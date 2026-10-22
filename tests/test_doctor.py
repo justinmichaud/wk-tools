@@ -17,6 +17,7 @@ from tests.support import NO_REGISTRY, REAL_MACHINES, REPO, SYSTEM_DIRS, WkTest,
 from tests.test_credcheck import FakeAnthropic, FakeLiteLLM
 
 sys.path.insert(0, str(REPO / "lib"))
+import credcheck  # noqa: E402
 from wk import doctor, priv  # noqa: E402
 from wk.key.cli import Key  # noqa: E402
 from wk.machine import HAVE, Fake, Local, Result  # noqa: E402
@@ -423,7 +424,9 @@ class TestTheCredentialsSection(unittest.TestCase):
         if online:
             env.update({"WK_ANTHROPIC_API": self.anthropic, "WK_LITELLM_API": self.litellm})
         e = clean_env(env)
-        with mock.patch.dict(os.environ, e, clear=True):   # Local's processes inherit this one's environment
+        apis = dict(GITHUB_API="http://127.0.0.1:1", **({"ANTHROPIC_API": self.anthropic, "LITELLM_API": self.litellm,
+                                                          "LITELLM_ENDPOINT": self.litellm + "/v1"} if online else {}))
+        with mock.patch.dict(os.environ, e, clear=True), mock.patch.multiple(credcheck, **apis):
             k = Key(str(REPO), env=e, machine=Local())
             return doctor.credentials_section(k.settable(), k.stored_verdict)
 

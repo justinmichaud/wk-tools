@@ -13,8 +13,7 @@ def path(name):
 
 
 def sudoers(name):
-    n = name[3:] if name.startswith("wk-") else name
-    return "/etc/sudoers.d/zzz-wk-%s" % (n[:-5] if n.endswith("-priv") else n)
+    return "/etc/sudoers.d/zzz-wk-%s" % name.removeprefix("wk-").removesuffix("-priv")
 
 
 def helpers():
@@ -32,15 +31,9 @@ def main(argv):
     if verb not in ("rows", "path", "sudoers", "answers") or len(rest) != (verb != "rows"):
         sys.stderr.write("usage: python3 -m wk.priv rows | path <name> | sudoers <name> | answers <helper path>\n")
         return 2
-    if verb == "rows":
-        for n, w, what in HELPERS:
-            print(n, w, what)
-    elif verb == "path":
-        print(path(rest[0]))
-    elif verb == "sudoers":
-        print(sudoers(rest[0]))
-    elif verb == "answers":
+    if verb == "answers":
         return 0 if answers(rest[0]) else 1
+    print("\n".join(" ".join(h) for h in HELPERS) if verb == "rows" else path(rest[0]) if verb == "path" else sudoers(rest[0]))
     return 0
 
 

@@ -18,6 +18,7 @@ from tests.support import REPO, WkTest, bash, clean_env, load_cmd
 from tests.test_push_service import Proc
 
 sys.path.insert(0, str(REPO / "lib"))
+import credcheck  # noqa: E402
 from wk import claudelogin, doctor, places, pushgate, repos, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
@@ -108,7 +109,9 @@ class _Wall(unittest.TestCase):
         self.addCleanup(patch.stop)
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "present"])
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "read"], out="stored-value")
-        self.fake.answer(["python3", os.path.join(str(REPO), "lib", "credcheck.py")], out="ok\tit works")
+        verdict = mock.patch.object(credcheck, "verdict", return_value="ok\tit works")
+        verdict.start()
+        self.addCleanup(verdict.stop)
         self.reg = places.Registry(str(REPO), env=self.env, machine=self.fake)
         self.driver = self.load(self.kind)
 
@@ -676,15 +679,41 @@ class TestAGuest(_Wall):
 
 
 class TestFromInside(_Wall):
-    """Inside a container, the probes run as whatever this process is to the push service; an agent session's own check is the usual one."""
+    """`wk doctor` in a workspace, its probes run as whatever this process is to the push service: an agent session (the
+    usual case), a person's own shell (whose push is served, which is not publishing), and the agent of a wk-tools
+    workspace (the one repository an agent publishes, so no commit wall and its push served)."""
     kind = "local"
+    CLIENT = str(REPO / "container" / "push" / "wk-push-client.py")
+    PUBLISHING = {"/pulls": "422", "http_code}' -X POST -H": "410", "git ls-remote": "", "test -S /run/wk/ssh-agent.sock": "agent"}
+    # who: (what a healthy pass says, the answers each of which is publishing, whether a Linux checkout is walled)
+    CASES = {"agent": (("no ssh-agent socket", "a push from an agent session is refused",
+                        "a write from an agent session is refused by the injector"), tuple(PUBLISHING), True),
+             "person": (("a push from a person's shell is served", "a write from a person's shell reaches GitHub",
+                         "a Bugzilla write is not measured from a person's shell"), (), True),
+             "tools": (("a push of u/wk-tools from an agent session is served: the one repository an agent publishes",
+                        "a write from an agent session is refused by the injector"),
+                       ("/pulls", "http_code}' -X POST -H", "test -S /run/wk/ssh-agent.sock"), False)}
 
     def setUp(self):
         super().setUp()
-        self.set("git config --global --get core.sshCommand", str(REPO / "container" / "push" / "wk-push-client.py"))
+        self.set("git config --global --get core.sshCommand", self.CLIENT)
         patch = mock.patch.object(places.LocalWorkspace, "os", lambda _: "linux")
         patch.start()
         self.addCleanup(patch.stop)
+
+    def as_(self, who):
+        """CASES in order: each starts from the healthy answers, and the wk-tools workspace comes last."""
+        self.answers = dict(HEALTHY)
+        self.set("git config --global --get core.sshCommand", self.CLIENT)
+        me = ["python3", "/opt/wk-tools/cmd/doctor"] if who == "person" else self.me
+        self.proc.chain([(os.getpid(), ENTRY, "python3", me)])
+        if who == "tools":
+            (self.tmp / "marker").write_text("name=demo\nsrc=/src/wk-tools\nrepo=wk-tools\n")
+            self.driver = self.load("local")
+            self.fake.answer(["git", "-c", "safe.directory=*", "-C", self.driver.tools_src(), "remote", "get-url", "origin"],
+                             out="https://github.com/u/wk-tools.git\n")
+            self.set("git ls-remote", "0123abcd\trefs/heads/main")
+        return self.CASES[who]
 
     def results(self):
         out = io.StringIO()
@@ -692,94 +721,39 @@ class TestFromInside(_Wall):
         return wall.from_inside(str(REPO), self.driver, "demo", self.fake, rep), rep, out.getvalue()
 
     def test_a_healthy_workspace_passes_and_nothing_can_publish(self):
-        publishing, rep, out = self.results()
-        self.assertFalse(publishing)
-        self.assertEqual(0, rep.missing, out)
-        self.assertIn("no ssh-agent socket", out)
+        for who in self.CASES:
+            with self.subTest(who=who):
+                says = self.as_(who)[0]
+                publishing, rep, out = self.results()
+                self.assertEqual((False, 0), (publishing, rep.missing), out)
+                for phrase in says:
+                    self.assertIn(phrase, out)
 
     def test_each_way_to_publish_is_publishing(self):
-        for key, value in (("/pulls", "422"), ("http_code}' -X POST -H", "410"), ("git ls-remote", ""), ("test -S /run/wk/ssh-agent.sock", "agent")):
-            with self.subTest(key=key):
-                self.set(key, value)
-                self.assertTrue(self.results()[0])
-                self.answers = dict(HEALTHY)
-                self.set("git config --global --get core.sshCommand", str(REPO / "container" / "push" / "wk-push-client.py"))
+        for who in self.CASES:
+            for key in self.as_(who)[1]:
+                with self.subTest(who=who, key=key):
+                    held = self.answers.get(key)
+                    self.set(key, self.PUBLISHING[key])
+                    self.assertTrue(self.results()[0])
+                    self.set(key, held)
+
+    def test_the_commit_wall_is_probed_where_bwrap_is(self):
+        for who in self.CASES:
+            walled = self.as_(who)[2]
+            for os_name in ("linux", "macos"):
+                with self.subTest(who=who, os=os_name), mock.patch.object(self.driver, "os", return_value=os_name):
+                    self.assertEqual(walled and os_name == "linux", "commit-wall" in [n for n, _ in self.wall().from_inside()])
 
     def test_a_read_that_fails_is_the_sandbox_not_publishing(self):
         self.set("rest/version", "000")
         publishing, rep, _ = self.results()
-        self.assertFalse(publishing)
-        self.assertEqual(1, rep.missing)
+        self.assertEqual((False, 1), (publishing, rep.missing))
 
     def test_the_host_half_is_not_asked(self):
         names = [n for n, _ in self.wall().from_inside()]
         for n in ("secrets-view", "isolation", "gpu", "agent-credential"):
             self.assertNotIn(n, names)
-
-    def test_the_commit_wall_is_probed_where_bwrap_is(self):
-        with mock.patch.object(self.driver, "os", return_value="linux"):
-            self.assertIn("commit-wall", [n for n, _ in self.wall().from_inside()])
-        with mock.patch.object(self.driver, "os", return_value="macos"):
-            self.assertNotIn("commit-wall", [n for n, _ in self.wall().from_inside()])
-
-    def test_an_agents_own_push_is_refused_and_its_check_says_so(self):
-        _, rep, out = self.results()
-        self.assertEqual(0, rep.missing, out)
-        self.assertIn("a push from an agent session is refused", out)
-        self.assertIn("a write from an agent session is refused by the injector", out)
-
-
-class TestFromInsideAPersonsShell(TestFromInside):
-    """`wk doctor` typed in a person's own shell: its push is served, and that is not publishing."""
-    me = ["python3", "/opt/wk-tools/cmd/doctor"]
-
-    def test_a_healthy_workspace_passes_and_nothing_can_publish(self):
-        publishing, rep, out = self.results()
-        self.assertFalse(publishing)
-        self.assertEqual(0, rep.missing, out)
-        self.assertIn("a push from a person's shell is served", out)
-        self.assertIn("a write from a person's shell reaches GitHub", out)
-        self.assertIn("a Bugzilla write is not measured from a person's shell", out)
-
-    def test_each_way_to_publish_is_publishing(self):
-        self.skipTest("a person's shell publishes by design; the agent session's case above holds the rule")
-
-    def test_an_agents_own_push_is_refused_and_its_check_says_so(self):
-        self.assertEqual(0, self.results()[1].missing)
-
-
-class TestFromInsideAToolsWorkspace(TestFromInside):
-    """The one repository an agent publishes: no commit wall, and its push is served to the agent's own session."""
-
-    def setUp(self):
-        super().setUp()
-        (self.tmp / "marker").write_text("name=demo\nsrc=/src/wk-tools\nrepo=wk-tools\n")
-        self.driver = self.load("local")
-        self.fake.answer(["git", "-c", "safe.directory=*", "-C", self.driver.tools_src(), "remote", "get-url", "origin"], out="https://github.com/u/wk-tools.git\n")
-        self.set("git ls-remote", "0123abcd\trefs/heads/main")
-
-    def test_a_healthy_workspace_passes_and_nothing_can_publish(self):
-        publishing, rep, out = self.results()
-        self.assertFalse(publishing)
-        self.assertEqual(0, rep.missing, out)
-        self.assertIn("a push of u/wk-tools from an agent session is served: the one repository an agent publishes", out)
-        self.assertIn("a write from an agent session is refused by the injector", out)
-        self.assertNotIn("commit-wall", [n for n, _ in self.wall().from_inside()])
-
-    def test_each_way_to_publish_is_publishing(self):
-        for key, value in (("/pulls", "422"), ("http_code}' -X POST -H", "410"), ("test -S /run/wk/ssh-agent.sock", "agent")):
-            with self.subTest(key=key):
-                self.set(key, value)
-                self.assertTrue(self.results()[0])
-                self.set(key, dict(HEALTHY)[key])
-
-    def test_an_agents_own_push_is_refused_and_its_check_says_so(self):
-        self.skipTest("a wk-tools workspace serves its agent's push")
-
-    def test_the_commit_wall_is_probed_where_bwrap_is(self):
-        for os_name in ("linux", "macos"):
-            with mock.patch.object(self.driver, "os", return_value=os_name):
-                self.assertNotIn("commit-wall", [n for n, _ in self.wall().from_inside()], "no wall around the one repository an agent publishes")
 
 
 class TestTheDriversAnswer(_Wall):
@@ -849,6 +823,7 @@ class TestExitCodes(unittest.TestCase):
             rep.missing = missing
             return publishing
         with mock.patch.object(DOCTOR_CMD.wall, "from_inside", side_effect=fake_from_inside), \
+                mock.patch.object(DOCTOR_CMD.wall, "from_host", side_effect=lambda *a, **k: fake_from_inside(*a[:5])), \
                 contextlib.redirect_stderr(io.StringIO()):
             return DOCTOR_CMD.inside(sim_registry(True))
 

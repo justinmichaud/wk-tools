@@ -18,11 +18,11 @@ from unittest import mock
 from tests.support import REPO, WkTest, clean_env
 
 sys.path.insert(0, str(REPO / "lib"))
+import credcheck  # noqa: E402
 from wk import notify  # noqa: E402
 from wk.machine import Local  # noqa: E402
 
 NOTIFY = REPO / "lib" / "wk" / "notify.py"
-CREDCHECK = REPO / "lib" / "credcheck.py"
 TOPIC = "placeholder-topic-for-this-test"
 SHORT = "short"
 DOWN = "http://127.0.0.1:1"
@@ -134,10 +134,8 @@ class TestTheRuleJudgesWhatTheTopicCanDo(_Ntfy):
             self.assertEqual(4, notify.check("not one word")[0])
 
     def _verdict(self, topic, url=None):
-        cp = subprocess.run(["python3", str(CREDCHECK), "check", "ntfy"], input=topic, capture_output=True, text=True,
-                            timeout=60, env={"WK_NTFY_API": url or self.url, "PATH": "/usr/bin:/bin"})
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        return cp.stdout.split("\t", 1)
+        with mock.patch.dict(os.environ, {"WK_NTFY_API": url or self.url}):
+            return credcheck.verdict("ntfy", topic).split("\t", 1)
 
     def test_the_credential_rule_reaches_the_same_verdicts(self):
         for topic, want in ((TOPIC, "ok"), (SHORT, "wide")):
@@ -158,11 +156,7 @@ class TestTheTopicIsMintedNotInvented(_Ntfy):
         self.assertEqual(0, notify.check(topic)[0])
 
     def test_the_rule_mints_through_this_module(self):
-        out = self.tmp / "minted"
-        cp = subprocess.run(["python3", str(CREDCHECK), "mint", "ntfy", str(out)], capture_output=True, text=True, timeout=60,
-                            env={"PATH": "/usr/bin:/bin"})
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        self.assertRegex(out.read_text().strip(), notify.TOPIC.pattern)
+        self.assertRegex(credcheck.rules()["ntfy"].mint().strip(), notify.TOPIC.pattern)
 
 
 class TestTheLibraryCall(_Ntfy):

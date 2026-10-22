@@ -570,30 +570,39 @@ def from_inside(root, driver, ws, machine, rep):
     return could_publish(results)
 
 
-def agent_checks(root, driver, ws, machine):
-    """`wk ai`'s gate: `wk doctor`'s checks, from the host for a container or a guest, from inside for this workspace."""
-    if driver.kind == "remote":
-        info("'wk doctor %s' is not run for '%s': there is no sandbox there to\n  measure (it says so and refuses). The "
-             "barrier above is the whole of the\n  boundary on this place." % (ws, driver.name))
-        return
+def measure(root, driver, ws, machine, want_gpu=False):
+    """Every row to stderr and the verdict: from inside for this workspace, from the host for a container or a guest."""
     rep = Report(sys.stderr)
     if driver.kind == "local":
         info("checking workspace '%s' from inside it" % ws)
         publishing = from_inside(root, driver, ws, machine, rep)
     else:
         info("checking workspace '%s' (%s)" % (ws, driver.name))
-        publishing = from_host(root, driver, ws, machine, rep)
+        publishing = from_host(root, driver, ws, machine, rep, want_gpu)
     sys.stderr.write("\n")
     v = verdict(rep, publishing)
+    if v == "publishing":
+        warn("an agent in '%s' could publish (see above)" % ws)
+    elif v == "broken":
+        warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
+    else:
+        info("sandbox intact, and nothing in '%s' can publish" % ws)
+    return v
+
+
+def agent_checks(root, driver, ws, machine):
+    """`wk ai`'s gate: `wk doctor`'s measurement of the workspace."""
+    if driver.kind == "remote":
+        info("'wk doctor %s' is not run for '%s': there is no sandbox there to\n  measure (it says so and refuses). The "
+             "barrier above is the whole of the\n  boundary on this place." % (ws, driver.name))
+        return
+    v = measure(root, driver, ws, machine)
     if v == "publishing":
         die("refusing to run: an agent in '%s' could publish (see above).\n    Nothing in here can fix it and --force does "
             "not cross it; 'wk doctor %s' on the host says which part fails" % (ws, ws))
     if v == "broken":
-        warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
         barrier("the sandbox around '%s' is not intact (see above), and relaxed\n"
                 "    permissions are only defensible while it is." % ws)
-    else:
-        info("sandbox intact")
 
 
 def guest_egress(env, driver, ws, machine):

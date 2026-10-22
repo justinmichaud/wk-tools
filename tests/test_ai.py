@@ -80,7 +80,7 @@ class _Flow(unittest.TestCase):
         self.addCleanup(env.stop)
         self.addCleanup(act._forced.clear)
         self.handed = []
-        fg = mock.patch.object(AI, "foreground", side_effect=lambda machine, argv, cwd: self.handed.append(argv) or 0)
+        fg = mock.patch.object(AI, "foreground", side_effect=lambda machine, argv, cwd, end: self.handed.append(argv) or 0)
         fg.start()
         self.addCleanup(fg.stop)
         self.fg = fg
@@ -372,6 +372,30 @@ class TestTheSessionIsAnEffect(_Box):
         self.assertIn("exec /home/u/.local/bin/claude --permission-mode auto", argv[-1])
         self.assertEqual([], self.switches())
         self.assertIs(before, signal.getsignal(signal.SIGINT))
+
+    def test_a_sigterm_ends_the_far_agents_and_exits_with_its_status(self):
+        running = ["4242"]
+
+        def kill(argv):
+            running.clear()
+            return Result(0)
+        self.driver.answers["kill -TERM"] = kill
+        self.driver.answers["ps -Ao"] = lambda argv: Result(0, "".join(p + "\n" for p in running))
+        self.fake.react(["exec"], lambda a, f: os.kill(os.getpid(), signal.SIGTERM) or Result(0))
+        before = signal.getsignal(signal.SIGTERM)
+        status, err = self.ai("claude", force=True)
+        self.assertEqual(143, status, err)
+        self.assertIn("kill -TERM 4242", self.driver.asked)
+        self.assertFalse([a for a in self.driver.asked if "kill -KILL" in a])
+        self.assertIs(before, signal.getsignal(signal.SIGTERM))
+
+    def test_under_nohup_a_hangup_stays_ignored(self):
+        old = signal.signal(signal.SIGHUP, signal.SIG_IGN)
+        self.addCleanup(signal.signal, signal.SIGHUP, old)
+        self.fake.react(["exec"], lambda a, f: os.kill(os.getpid(), signal.SIGHUP) or Result(0))
+        status, err = self.ai("claude", force=True)
+        self.assertEqual(0, status, err)
+        self.assertFalse([a for a in self.driver.asked if "kill -" in a])
 
     def test_a_dry_run_prints_the_session_and_does_not_start_it(self):
         os.environ["WK_DRY_RUN"] = "1"

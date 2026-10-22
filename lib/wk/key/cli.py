@@ -27,7 +27,6 @@ class Key(Creds, DeployKeys, Election, Check):
         self.rotate = rotate
         self.fleet = None
         self.fleet_on = False
-        self._names = None
 
     def setup(self):
         peers = self.start_fleet()

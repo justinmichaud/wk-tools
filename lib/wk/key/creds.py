@@ -3,6 +3,7 @@
 import os
 import sys
 
+import credcheck
 from wk import act, project, repos, secrets
 from wk.act import Refused, die, info, log, warn
 from wk.key.common import cred_print, detail, verdict
@@ -16,25 +17,14 @@ class Creds:
     def key_names(self):
         return [k[0] for k in secrets.push_keys()]
 
-    def _cc(self, *args, input=""):
-        r = self.machine.run(["python3", os.path.join(self.root, "lib", "credcheck.py")] + list(args), input=input)
-        sys.stderr.write(r.err)
-        return r
-
     def settable(self):
-        if self._names is None:
-            self._names = [n for n in self._cc("names").out.split() if n != "deploy-key"]
-        return self._names
+        return [n for n in credcheck.rules() if n != "deploy-key"]
 
     def rule(self, name, field):
-        for line in self._cc("rule", name).out.splitlines():
-            k, _, v = line.partition("\t")
-            if k == field:
-                return v
-        return ""
+        return getattr(credcheck.rules()[name], field)
 
     def alone(self, name):
-        return self.rule(name, "alone") == "True"
+        return self.rule(name, "alone")
 
     def path(self, name):
         return self.sec.cred_path(name)
@@ -61,15 +51,11 @@ class Creds:
         self.machine.ensure_dir_mode(d, "0700")
 
     def mint(self, name):
-        """In the foreground on this terminal, as a mint may need a person; the value comes back in the keyring's own directory."""
-        out = self.path(name) + ".minting"
-        self.private_dir(os.path.dirname(out))
-        try:
-            r = self.machine.act_run(["python3", os.path.join(self.root, "lib", "credcheck.py"), "mint", name, out], tty=True)
-            return self.machine.read(out).rstrip("\n") if r.ok and self.machine.exists(out) else ""
-        finally:
-            if self.machine.exists(out):
-                self.machine.remove_now(out)
+        """In the foreground on this terminal, as a mint may need a person."""
+        if act.dry_run():
+            sys.stderr.write("would mint a %s credential\n" % name)
+            return ""
+        return credcheck.rules()[name].mint().rstrip("\n")
 
     def store(self, name, value):
         p = self.path(name)
@@ -108,7 +94,7 @@ class Creds:
         if name not in names:
             die("there is no credential called '%s'.\n    This checkout knows: %s \n    Each is a row of lib/credcheck.py, which is "
                 "also what says where to mint\n    one and what it must be able to do." % (name, " ".join(names)))
-        mints = name in self._cc("minted").out.split()
+        mints = bool(self.rule(name, "mint"))
         path = self.path(name)
         if replace and not self.present(name):
             info("no %s is stored here (%s), so there is nothing to replace: setting one" % (name, path))
@@ -143,7 +129,7 @@ class Creds:
             die("could not write " + path)
         self.deliver(name)
         log(self.cred_line(name, "minted" if minted else "stored", path))
-        if minted and self.rule(name, "alone") != "True":
+        if minted and not self.alone(name):
             # Every reader of a stored credential redacts it, so this is the only chance to point a phone at one wk mints.
             log("  printed once: %s%s" % (self.rule(name, "url"), val))
             log("  " + self.rule(name, "remedy"))

@@ -9,7 +9,7 @@ from tests.support import REPO
 # Longest prefix wins. cli is cmd/* and the lib modules only a command runs: the CLI over every layer.
 LAYERS = {
     "lab": ("lib/common.sh", "lib/credcheck.py", "lib/secretfile.py", "lib/treehash.py", "lib/wkdata.py", "lib/wk/"),
-    "wk": ("lib/contributors.py", "lib/wk/build.py", "lib/wk/pgo.py", "lib/wk/pr.py", "lib/wk/presets.py",
+    "wk": ("lib/wk/build.py", "lib/wk/pgo.py", "lib/wk/pr.py", "lib/wk/presets.py",
            "lib/wk/profile.py", "lib/wk/slot.py", "lib/wk/bench/ab.py", "lib/wk/bench/autorun.py",
            "lib/wk/bench/board_ab.py", "lib/wk/bench/board_driver.py", "lib/wk/bench/mac_ab.py", "lib/wk/bench/mac_pgo.py",
            "lib/wk/bench/plans.py", "lib/wk/bench/scores.py", "lib/wk/bench/seed.py",

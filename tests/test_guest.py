@@ -311,13 +311,10 @@ class TestTheSteps(GuestTest):
                       cmds)
 
     def test_a_credential_file_its_reader_refuses_stops_the_delivery(self):
-        self.w.answer(["python3", SECRETFILE, "present"], rc=2, err="wk: refusing to read ...\n")
+        self.w.answer(["python3", SECRETFILE, "read"], rc=2, err="wk: refusing to read ...\n")
         g = self.the_guest()
         self.assertFalse(quiet(g.write_agent_secrets)[0])
         self.assertFalse([c for c, _ in self.w.guest_cmds if ".wk-litellm-key" in c])
-
-    def test_a_guest_start_points_git_at_the_push_client(self):
-        self.assertIn('git config --global core.sshCommand "$WK_TOOLS/container/push/wk-push-client.py"', guest.CHECKOUT)
 
     def test_the_push_forward_listens_for_this_guest_and_ends_at_the_socket_a_workspace_dials(self):
         g = self.the_guest()

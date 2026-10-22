@@ -84,40 +84,19 @@ def only(args, allowed, why):
         die("%s %s" % (extra[0], why))
 
 
+EXIT = {"intact": 0, "broken": 1, "publishing": 3}
+
+
 def inside(reg):
     driver = reg.load("local")
-    info("checking workspace '%s' from inside it" % driver.ws_name)
-    rep = Report(sys.stderr)
-    publishing = wall.from_inside(ROOT, driver, driver.ws_name, reg.machine, rep)
-    sys.stderr.write("\n")
+    v = wall.measure(ROOT, driver, driver.ws_name, reg.machine)
     disk.workspace_report(reg)
-    v = wall.verdict(rep, publishing)
-    if v == "publishing":
-        warn("an agent in here could publish (see above)")
-        return 3
-    if v == "broken":
-        warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
-        return 1
-    info("sandbox intact, and nothing in here can publish")
-    return 0
+    return EXIT[v]
 
 
 def workspace(reg, name, argv):
     args = decl.Args(decl.Decl(__file__), argv)
-    driver = reg.load(reg.ws_place(name))
-    info("checking workspace '%s' (%s)" % (name, driver.name))
-    rep = Report(sys.stderr)
-    publishing = wall.from_host(ROOT, driver, name, reg.machine, rep, want_gpu=args.flag("--gpu"))
-    sys.stderr.write("\n")
-    v = wall.verdict(rep, publishing)
-    if v == "publishing":
-        warn("an agent in '%s' could publish (see above)" % name)
-        return 3
-    if v == "broken":
-        warn("%d check(s) failed -- the sandbox is not intact" % rep.missing)
-        return 1
-    info("sandbox intact, and nothing in there can publish")
-    return 0
+    return EXIT[wall.measure(ROOT, reg.load(reg.ws_place(name)), name, reg.machine, want_gpu=args.flag("--gpu"))]
 
 
 def main(argv, env=None, reg=None):

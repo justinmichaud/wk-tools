@@ -1,14 +1,15 @@
-"""The credentials: where this machine keeps them, the key and token files the push service and the injector read, and
-/secrets, what every workspace here reads."""
+"""Where this machine keeps each credential, and how a workspace, an injector and a push service are given it."""
 
 import argparse
 import hashlib
+import json
 import os
 import shlex
 import sys
 
+import credcheck
 from wk import act, claudelogin, images, project, repos
-from wk.act import debug, die, warn
+from wk.act import debug, die, info, warn
 from wk.machine import Local
 from wk.store import Store, in_vm, remote_marker_path
 
@@ -18,6 +19,7 @@ AGENT_SECRETS = (("claude", "claude-token", ".wk-agent-token", "CLAUDE_CODE_OAUT
                  ("litellm", "litellm-key", ".wk-litellm-key", "LITELLM_API_KEY", "container,vm,remote"))
 LOGIN_KINDS = ("container", "vm")
 LOGIN_DIR = ".wk-claude"
+PUSH_CLIENT = "container/push/wk-push-client.py"
 
 
 def forks():
@@ -34,6 +36,40 @@ def agent_secrets():
 
 def first_line(text):
     return (text or "").split("\n", 1)[0].rstrip("\r")
+
+
+LOGIN_WRITE = 'umask 077 && mkdir -p "$HOME/$1" && cat > "$HOME/$1/.credentials.json"'
+# A container links its read-only /secrets, so a later `wk key set` reaches it: rc 1 is a link to nothing held yet.
+# A write removes first: umask sets the mode of a file `cat >` creates, not of one already there.
+DELIVERY = {"link": 'ln -sfn "/secrets/$2" "$HOME/$1" || exit 2; test -e "$HOME/$1"',
+            "write": 'umask 077 && rm -f "$HOME/$1" && cat > "$HOME/$1"', "withdraw": 'rm -f "$HOME/$1"'}
+
+
+def deliver(m, kind, value_of=None, where="", tools=""):
+    """What a <kind> workspace holds of its credentials, by `m` running in it. Where the injector and the push service
+    serve it: the placeholder login, and git's ssh transport the push client under `tools`. Each row given to <kind> at
+    ~/<home> (`value_of(name)`'s first line on stdin, or a container's link); every other row's file taken away.
+    `value_of` answers None for a stored file it refused to read."""
+    where = where or kind
+    ok = kind not in LOGIN_KINDS or all(m.act_run(argv, input=text).ok for argv, text in (
+        (["sh", "-c", LOGIN_WRITE, "sh", LOGIN_DIR], claudelogin.placeholder()),
+        (["git", "config", "--global", "core.sshCommand", tools + "/" + PUSH_CLIENT], ""),
+        (["git", "config", "--global", "ssh.variant", "ssh"], "")))   # git would otherwise run the client with -G
+    for name, file, home, var, kinds in AGENT_SECRETS:
+        given = kind in kinds.split(",")
+        value = value_of(name) if given and kind != "container" else ""
+        if value is None:
+            warn("the stored %s was refused (above), so none was delivered to %s" % (name, where))
+            ok = False
+            continue
+        how = "link" if given and kind == "container" else "write" if first_line(value) else "withdraw"
+        r = m.act_run(["sh", "-c", DELIVERY[how], "sh", home, file], input=first_line(value) + "\n" if how == "write" else "")
+        if how == "link" and r.rc == 1 or given and how == "withdraw" and r.ok:
+            info("no %s credential is held, so $%s is unset in %s: 'wk key set %s' on the host stores one" % (name, var, where, name))
+        elif not r.ok:
+            warn("could not deliver ~/%s in %s" % (home, where))
+            ok = False
+    return ok
 
 
 BOX_PUSH_REFUSAL = "error: a build box holds no deploy key; push from the workstation:  wk pr open <workspace>"
@@ -100,7 +136,6 @@ class Secrets:
         return self.read(path) if path else ""
 
     def cred_stored(self, name):
-        """True or False, None where lib/secretfile.py refused the file."""
         path = self.cred_path(name)
         if not path:
             return False
@@ -108,24 +143,19 @@ class Secrets:
         sys.stderr.write(r.err)
         return True if r.rc == 0 else False if r.rc == 1 else None
 
-    def check_value(self, name, value, *extra):
-        """lib/credcheck.py's verdict line on `value` as <name>; a Bugzilla key is judged with its login as evidence."""
-        args = ["check", name, "--repos", "".join(r[1] + " " for r in self.forks())] + list(extra)
+    def check_value(self, name, value, path="", repos=None, evidence=None):
         if name == "bugzilla-api-key":
-            args += ["--evidence", "login=" + (self.bugzilla_user() or "")]
-        r = self.machine.run(["python3", os.path.join(self.root, "lib", "credcheck.py")] + args, input=value)
-        sys.stderr.write(r.err)
-        return r.out.rstrip("\n")
+            evidence = dict(evidence or {}, login=self.bugzilla_user() or "")
+        return credcheck.verdict(name, value, [r[1] for r in self.forks()] if repos is None else repos, path, evidence)
 
     def cred_verdict(self, name):
         path = self.cred_path(name)
         value = self.read(path)
         if value is None:
             return "bad\tthe file at %s could not be read; the refusal above says why" % path
-        return self.check_value(name, value, "--path", path)
+        return self.check_value(name, value, path)
 
     def agent_secret_remedy(self, name):
-        """What this machine's store owes a workspace missing <name>."""
         if not self.cred_stored(name):
             return "this machine's store holds no %s: 'wk key set %s' puts one there" % (name, name)
         verdict, _, detail = self.cred_verdict(name).partition("\t")
@@ -142,14 +172,13 @@ class Secrets:
         return self.forks()[0][1].split("/")[0]
 
     def bugzilla_user(self):
+        """The first email of this account's entry in the mirror's contributors.json."""
         r = self.machine.run(["git", "-C", self.store.mirror_dir(), "cat-file", "-p", "main:metadata/contributors.json"], input="")
-        if not r.ok:
-            return None
-        r = self.machine.run(["python3", os.path.join(self.root, "lib", "contributors.py"), "bugzilla-login", self.github_user()],
-                             input=r.out)
-        if not r.ok:
-            return None
-        return r.out.strip() or None
+        try:
+            entries = json.loads(r.out) if r.ok else []
+        except ValueError:
+            entries = []
+        return next((e["emails"][0] for e in entries if e.get("github") == self.github_user() and e.get("emails")), None)
 
     def _machine_file(self, var, name):
         return self.env.get(var) or os.path.join(self.store.store_dir(), name)
@@ -164,7 +193,6 @@ class Secrets:
         return self._machine_file("WK_PUSH_BUGZILLA_KEY_FILE", "push-bugzilla-api-key")
 
     def machine_argv(self, line):
-        """A shell line on that machine: here, or in the podman VM when its store is not this process's to write."""
         if self.host_side or self.store.is_local():
             return ["sh", "-c", line]
         return ["podman", "machine", "ssh", self.store.podman_machine(), "--", line]
@@ -200,7 +228,6 @@ class Secrets:
         return self.cred_clear(path)
 
     def machine_creds(self):
-        """(path, held credential) per file the injector on this machine reads: the token a read spends, the one a write spends, the Bugzilla key."""
         return ((self.machine_read_pat(), "github-pat"), (self.machine_pat(), "github-pat"),
                 (self.machine_bugzilla_key(), "bugzilla-api-key"))
 
@@ -249,7 +276,6 @@ class Secrets:
         return path in self.planned_dirs or self.machine.isdir(path)
 
     def text(self, path):
-        """What a file holds, None when absent; under --dry-run, what this run would have left there."""
         if path in self.planned:
             return self.planned[path]
         try:
@@ -358,17 +384,17 @@ def rows(table):
 def main(argv):
     parser = argparse.ArgumentParser(prog="python3 -m wk.secrets")
     sub = parser.add_subparsers(dest="verb", required=True)
-    for verb in ("push-keys", "agent-secrets", "push-converge", "claude-placeholder"):
+    for verb in ("push-keys", "push-converge", "box-alias-blocks"):
         sub.add_parser(verb)
-    sub.add_parser("box-alias-blocks")
+    d = sub.add_parser("deliver")
+    d.add_argument("kind", choices=("container",))
+    d.add_argument("tools")
     a = parser.parse_args(argv)
     if a.verb == "push-converge":
         return 0 if Secrets(images.root()).push_converge_machine() else 1
-    if a.verb == "claude-placeholder":
-        sys.stdout.write(claudelogin.placeholder())
-        return 0
-    sys.stdout.write(box_alias_blocks(forks()) if a.verb == "box-alias-blocks" else
-                     rows([k, alias] for k, _, alias in push_keys()) if a.verb == "push-keys" else rows(AGENT_SECRETS))
+    if a.verb == "deliver":
+        return 0 if deliver(Local(), a.kind, tools=a.tools) else 1
+    sys.stdout.write(box_alias_blocks(forks()) if a.verb == "box-alias-blocks" else rows([k, alias] for k, _, alias in push_keys()))
     return 0
 
 

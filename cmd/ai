@@ -37,7 +37,8 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import agents, secrets, wall  # noqa: E402
+from wk import agents, job, pushgate, secrets, wall  # noqa: E402
+from wk.clock import Clock  # noqa: E402
 from wk.act import Refused, barrier, die, info, warn  # noqa: E402
 from wk.machine import HAVE, Local  # noqa: E402
 from wk.places import Registry  # noqa: E402
@@ -50,13 +51,38 @@ def _the_agents(signum, frame):
     pass
 
 
-def foreground(machine, argv, cwd):
-    """The session on this terminal, waited for; a Ctrl-C is the agent's (a handler: SIG_IGN would outlive its exec)."""
-    old = signal.signal(signal.SIGINT, _the_agents)
+def _ending(signum, frame):
+    raise job.Interrupted(signum)
+
+
+def end_session(driver, ws, env, clock=None):
+    """The agents in `ws`, TERM then KILL after job.kill's grace: a client of the place's exec dying leaves them running."""
+    def send(signum):
+        pids = pushgate.agent_pids(driver, ws)
+        if pids:
+            driver.exec(ws, ["kill", "-" + job.signal_name(signum)] + pids)
+    return job.terminate(send, lambda: not pushgate.agent_pids(driver, ws), clock or Clock(), job.kill_wait(env), 5)
+
+
+def foreground(machine, argv, cwd, end):
+    """The session on this terminal, waited for. TERM and HUP (and a Ctrl-C without a terminal, whose Ctrl-C is the
+    agent's) end it with `end()`; a signal already ignored, as under the babysitter's nohup, stays ignored."""
+    ends = (signal.SIGTERM, signal.SIGHUP) + (() if on_a_terminal() else (signal.SIGINT,))
+    saved = {s: signal.getsignal(s) for s in ends + (signal.SIGINT,)}
+    signal.signal(signal.SIGINT, _the_agents)
+    for s in ends:
+        if saved[s] is not signal.SIG_IGN:
+            signal.signal(s, _ending)
     try:
         return machine.act_run(argv, tty=True, cwd=cwd).rc
+    except job.Interrupted as e:
+        for s in ends:
+            signal.signal(s, signal.SIG_IGN)
+        end()
+        return job.EXIT_OF[e.signum]
     finally:
-        signal.signal(signal.SIGINT, old)
+        for s, h in saved.items():
+            signal.signal(s, h)
 
 
 def on_a_terminal():
@@ -122,7 +148,7 @@ class Ai:
         # The babysitter's fix loop runs this under nohup with -p, where a terminal of its own would be demanded.
         argv, cwd = t.exec_argv(name, ["env", "WK_AGENT=" + self.agent, "WK_WORKSPACE=" + name, "bash", "-lc", line],
                                 on_a_terminal())
-        return foreground(self.machine, argv, cwd)
+        return foreground(self.machine, argv, cwd, lambda: end_session(t, name, self.env))
 
     def run(self, args):
         t, name = self.driver, self.name

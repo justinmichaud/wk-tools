@@ -103,8 +103,6 @@ for f in settings.json hooks CLAUDE.md skills; do ln -sfn "$1/claude/$f" "$HOME/
 
 CHECKOUT = """set -u
 git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
-git config --global core.sshCommand "$WK_TOOLS/container/push/wk-push-client.py"
-git config --global ssh.variant ssh
 if [ -d "$WK_SRC/.git" ]; then
     echo checkout=present
 elif [ ! -d "$WK_MIRROR" ]; then
@@ -362,10 +360,10 @@ STEPS = (
     ("write_lldbinit", debug, "could not write .lldbinit in {ws}"),
     ("set_guest_clock", warn, "could not set {ws}'s clock; TLS in there will fail as CERT_NOT_YET_VALID"),
     ("set_guest_egress", warn, "could not set {ws}'s egress; nothing in there will reach the outside"),
+    ("write_agent_secrets", warn, "could not write the agent credentials into {ws}; an agent in there will ask you to log in"),
     ("write_checkout", warn, "{ws}'s checkout is not wired and set up (above); 'wk sync {ws} --fix' once it is up"),
     ("install_agents", warn, "{ws} has no working coding agents (above); 'wk rm {ws}' and 'wk new' remake it"),
     ("write_claude_config", warn, "could not link ~/.claude in {ws}; an agent in there would have no instructions"),
-    ("write_agent_secrets", warn, "could not write the agent credentials into {ws}; an agent in there will ask you to log in"),
     ("push_forward", warn, "could not reach the push service from {ws}; a push from in there is refused"),
     ("broker_forward", warn, "could not reach the request broker from {ws}; 'wk sync' in there refreshes no mirror"),
     ("settle_desktop", warn, "could not settle {ws}'s desktop; 'wk doctor {ws}' says what is in front of the window"),
@@ -498,25 +496,7 @@ class Guest:
             + "".join("export %s=%s\n" % kv for kv in env)
 
     def write_agent_secrets(self):
-        """Rewritten every start, so a withdrawn one goes; the claude.ai login is the placeholder the host's injector swaps."""
-        if not self.m.act_run(["sh", "-c", 'umask 077 && mkdir -p "$HOME/$1" && cat > "$HOME/$1/.credentials.json"', "sh",
-                               secrets.LOGIN_DIR], input=claudelogin.placeholder()).ok:
-            return False
-        n = 0
-        for name, _file, home_path, _var, delivery in self.secrets.agent_secrets():
-            here = self.secrets.cred_stored(name) if "vm" in delivery.split(",") else False
-            if here is None:
-                return False
-            if not here:
-                if not self.m.act_run(["sh", "-c", 'rm -f "$HOME/$1"', "sh", home_path]).ok:
-                    return False
-                continue
-            value = secrets.first_line(self.secrets.cred_read(name))
-            if not self.m.act_run(["sh", "-c", 'umask 077 && cat > "$HOME/$1"', "sh", home_path], input=value + "\n").ok:
-                return False
-            n += 1
-        debug("agent credentials in %s: %d" % (self.ws, n))
-        return True
+        return secrets.deliver(self.m, "vm", self.secrets.cred_read, self.ws, self.vm.tools(self.ws))
 
     def push_forward(self):
         near = self.host.push_listen(self.ws)

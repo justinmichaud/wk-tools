@@ -32,8 +32,7 @@ class Election:
             return "absent\tno key here\n    fix: wk key deploy"
         b64 = (pub.split() + ["", ""])[1]
         ssh = self.sshtest(fork)[1] if m == LOCAL else self.fleet.ask(m, "sshtest", fork)[1]
-        line = self.sec.check_value("deploy-key", "", "--repos", repo, "--evidence", "ssh=" + ssh.rstrip("\n"),
-                                "--evidence", "read_only=" + self.gh.read_only(repo, b64))
+        line = self.sec.check_value("deploy-key", "", repos=[repo], evidence={"ssh": ssh.rstrip("\n"), "read_only": self.gh.read_only(repo, b64)})
         return "%s\n    fingerprint: %s" % (line, self.pub_fingerprint(pub))
 
     def cred_verdict_of(self, m, name):

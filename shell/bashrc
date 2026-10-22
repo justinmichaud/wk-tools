@@ -282,7 +282,7 @@ unset WK_TOOLS_DIR
 alias clear="clear && printf '\033[3J'"   # scroll-back-clearing clear
 
 # --- 6b. The agents' credentials ---------------------------------------------
-# A workspace the host has given a credential starts able to use it: no /login, no browser, and no login Keychain -- which a macOS guest reached over ssh does not have unlocked anyway. Each file holds the raw value and nothing else, so a container can point it at the read-only /secrets mount and pick up a rotation without being rebuilt. The pairs are spelled out rather than read from lib/wk/secrets.py's AGENT_SECRETS, this rc running on machines with no store and no wk library; tests/test_pi_agent.py holds the two lists to each other.
+# A workspace the host has given a credential starts able to use it: no /login, no browser, and no login Keychain -- which a macOS guest reached over ssh does not have unlocked anyway. Each file holds the raw value and nothing else, so a container can point it at the read-only /secrets mount and pick up a rotation without being rebuilt. The pairs are spelled out rather than read from lib/wk/secrets.py's AGENT_SECRETS, this rc running on machines with no store and no wk library; tests/test_wk_secrets.py holds the two lists to each other.
 for _wk_sec in .wk-agent-token:CLAUDE_CODE_OAUTH_TOKEN .wk-litellm-key:LITELLM_API_KEY; do
   _wk_sec_file="$HOME/${_wk_sec%%:*}"
   _wk_sec_var="${_wk_sec#*:}"

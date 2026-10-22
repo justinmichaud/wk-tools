@@ -65,10 +65,10 @@ class EntryPoints(unittest.TestCase):
                 self.assertIn("usage", (cp.stdout + cp.stderr).lower())
 
     def test_every_script_loads_or_answers_help(self):
-        """One with a __main__ guard is loaded without running it; one without runs to its usage."""
+        """One with a __main__ guard, or a module lib/ imports by name, is loaded without running it; any other runs to its usage."""
         for p in scripts():
             with self.subTest(script=str(p.relative_to(REPO))):
-                if GUARD.search(p.read_text()):
+                if GUARD.search(p.read_text()) or p.parent == REPO / "lib":
                     cp = child([LOAD, LIB, str(p)])
                     self.assertEqual((0, ""), (cp.returncode, cp.stderr))
                 else:

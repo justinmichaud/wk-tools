@@ -22,8 +22,9 @@ fi
 git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
 [ -f "$HOME/.gitignore" ] || printf '.DS_Store\n.cache\ncompile_commands.json\n' > "$HOME/.gitignore"
 git config --global --add safe.directory "$SRC"
-git config --global core.sshCommand "$WK_TOOLS/container/push/wk-push-client.py"
-git config --global ssh.variant ssh   # git would otherwise run the client with -G, to learn whether it is OpenSSH
+# git's ssh transport, the placeholder claude.ai login and the agent credentials (lib/wk/secrets.py, deliver).
+PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.secrets deliver container "$WK_TOOLS" \
+    || warn "the agent credentials were not all delivered (above) -- 'wk rm' and 'wk new' remake the workspace"
 
 install -d -m 0700 "$HOME/.ssh"
 
@@ -72,27 +73,6 @@ for f in settings.json hooks CLAUDE.md; do    # read-only, from the synced tree
 done
 
 ln -sfn /skills "$HOME/.claude/skills"  # one mutable dir, shared by every ws
-
-# The claude.ai login is a placeholder the injector swaps on the way out (lib/wk/claudelogin.py).
-install -d -m 700 "$HOME/.wk-claude"
-(umask 077 && PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.secrets claude-placeholder > "$HOME/.wk-claude/.credentials.json")
-
-_agent_secrets() { PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.secrets agent-secrets 2>/dev/null; }
-while read -r _sname _sfile _shome _svar _sdelivery; do
-    [ -n "$_sname" ] || continue
-    # Taken away where it is not delivered: a token beside the login wins over it.
-    _sdelivered=0
-    case ",$_sdelivery," in *,container,*) _sdelivered=1 ;; esac
-    if [ "$_sdelivered" = 0 ]; then
-        rm -f "$HOME/$_shome"
-        continue
-    fi
-    ln -sfn "/secrets/$_sfile" "$HOME/$_shome"   # dangling until it exists
-    [ -e "$HOME/$_shome" ] \
-        || log "no $_sname credential yet -- 'wk key set $_sname' on the host stores one ($_svar)"
-done <<EOF
-$(_agent_secrets)
-EOF
 
 # apt runs as root, whose sockets this run's bridge cannot read, so it is given a bridge of its own.
 apt_get() { sudo "$WK_TOOLS/container/proxy/ensure-bridge.sh" apt-get "$@"; }

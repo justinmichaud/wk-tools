@@ -147,20 +147,7 @@ class BuildMachines:
         return False
 
     def credentials(self, t, host):
-        """Refreshed on every setup and removed when this store has none; on stdin, never in `ps`."""
-        sec = secrets.Secrets(self.root, self.env, self.here)
-        for row in Deps(self.root, self.env, self.here).remote_rows():
-            name, home_path = row[0], row[2]
-            value = secrets.first_line(sec.cred_read(name) or "")
-            dest = '"$HOME"/%s' % shlex.quote(home_path)
-            if value:
-                if t._far().act_run(["sh", "-c", "umask 077 && cat > %s" % dest], input=value + "\n").ok:
-                    info("wrote the %s credential to ~/%s on %s (0600)" % (name, home_path, host))
-                else:
-                    warn("could not write the %s credential to ~/%s on %s" % (name, home_path, host))
-            else:
-                t._far().act_run(["sh", "-c", "rm -f %s" % dest])
-                info("no %s credential here, so none was placed on %s ('wk key set %s' stores one)" % (name, host, name))
+        secrets.deliver(t._far(), "remote", secrets.Secrets(self.root, self.env, self.here).cred_read, host)
 
     def install_dependencies(self, t, host, name, ref):
         """Tools/*/install-dependencies prompts for sudo, so it runs only with a terminal."""

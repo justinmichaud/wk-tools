@@ -1,9 +1,13 @@
 """A workspace's `git push` through the host: which workspace a caller is, who is behind it, and the one command a push may run.
 The service and its client run for real over a unix socket; ssh is a stub, /proc a directory, podman a fake."""
 import asyncio
+import contextlib
 import importlib.util
+import io
 import json
 import os
+import re
+import shlex
 import shutil
 import socket
 import struct
@@ -16,10 +20,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest
+from tests import test_pr_workflow, test_wk_places
+from tests.support import REPO, WkTest, requires_container_place
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, pushgate, repos, secrets  # noqa: E402
+from wk import git, guest, pushgate, repos, secrets  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
@@ -517,13 +522,20 @@ class TestTheClient(_Service):
 
 
 class TestEveryWorkspaceIsWiredToTheClient(WkTest):
-    def test_a_container_and_a_guest_name_the_one_client_and_the_wall_expects_that_path(self):
+    def test_a_container_and_a_guest_are_given_the_one_client_and_a_build_box_none(self):
         client = "container/push/wk-push-client.py"
         self.assertTrue(os.access(REPO / client, os.X_OK))
-        self.assertIn('git config --global core.sshCommand "$WK_TOOLS/%s"' % client, (REPO / "container" / "firstrun.sh").read_text())
-        self.assertIn('git config --global core.sshCommand "$WK_TOOLS/%s"' % client, guest.CHECKOUT)
-        for text in ((REPO / "container" / "firstrun.sh").read_text(), guest.CHECKOUT):
-            self.assertIn("git config --global ssh.variant ssh", text, "git would probe the client with -G")
+        for kind in ("container", "vm", "remote"):
+            with self.subTest(kind=kind):
+                m = Fake("ws")
+                m.answer(["sh", "-c"])
+                m.answer(["git", "config"])
+                with mock.patch("sys.stderr"):
+                    secrets.deliver(m, kind, lambda n: "", "ws", "/opt/wk-tools")
+                git = [e[1] for e in m.effects if e[1][0] == "git"]
+                want = [("git", "config", "--global", "core.sshCommand", "/opt/wk-tools/" + client),
+                        ("git", "config", "--global", "ssh.variant", "ssh")] if kind != "remote" else []
+                self.assertEqual(want, git)
         self.assertEqual(Place(Fake()).tools_src(), str(REPO))
 
     def test_the_switch_is_gone_and_the_dispatcher_refuses_its_name(self):
@@ -702,6 +714,101 @@ class TestTheSshSessionIsTheKeysAlone(unittest.TestCase):
         for word in ("IdentitiesOnly=yes", "IdentityAgent=none", "BatchMode=yes", "/k/key", "SendEnv=GIT_PROTOCOL"):
             self.assertIn(word, argv)
         self.assertEqual(argv[:-2], pushgate.ssh_prefix("/k/key", "version=2"))
+
+
+@requires_container_place()
+class TestLivePushServiceInTheMachine(unittest.TestCase):
+    """Read-only: whether this machine's push service is where every container's mount says."""
+
+    def machine(self, cmd):
+        return subprocess.run(["podman", "machine", "ssh", "wk", "--", cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, timeout=60).stdout
+
+    def test_the_unit_is_active_and_the_socket_is_in_the_mounted_directory(self):
+        if "YES" not in self.machine("systemctl --user cat wk-push.service >/dev/null 2>&1 && echo YES || echo NO"):
+            self.skipTest("the machine has no wk-push.service yet:  ./setup --stage sdk")
+        self.assertIn("active", self.machine("systemctl --user is-active wk-push.service"))
+        self.assertIn("SOCKET", self.machine('test -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/wk/push.sock" && echo SOCKET || echo NONE'))
+
+
+# `unit push.remote_forwarding`: a build box holds no deploy key at rest and nothing forwards one to it, so a push is made
+# from the workstation (`wk pr open` fetches the box's branch into this machine's mirror and pushes it with the deploy key).
+CMD_PR = test_pr_workflow.CMD_PR_MODULE
+
+
+def forwarded(argv):
+    """The agent socket this ssh command line forwards, or None; ssh takes an option's first value."""
+    if "-A" in argv:
+        return "$SSH_AUTH_SOCK"
+    values = [argv[i + 1].split("=", 1)[1] for i, a in enumerate(argv[:-1])
+              if a == "-o" and argv[i + 1].lower().startswith("forwardagent=")]
+    return values[0] if values and values[0].lower() != "no" else None
+
+
+class TestABoxHoldsNoKey(test_wk_places.RemoteTest):
+    def test_no_ssh_to_a_box_forwards_an_agent(self):
+        """Neither an argv wk builds nor a block of dotfiles/ssh/config, the gateway's included."""
+        for argv in (self.t.machine.argv("true"), self.t.build_argv("a", ["ninja"])[0], self.t.exec_argv("a", ["true"])[0],
+                     self.t.exec_argv("a", ["claude"], tty=True)[0], self.t.enter_argv("a")[0]):
+            self.assertEqual("ssh", argv[0])
+            self.assertIsNone(forwarded(argv), argv)
+        config = (REPO / "dotfiles" / "ssh" / "config").read_text()
+        blocks = dict((m.group(1).strip(), m.group(2)) for m in re.finditer(r"^Host (.+)\n((?:[ \t].*\n|\n)*)", config, re.M))
+        self.assertNotIn("*", blocks)
+        self.assertIn("igalia.com", blocks)
+        for host, block in blocks.items():
+            self.assertNotIn("forwardagent", block.lower(), host)
+
+
+class TestAPushFromABoxIsMadeHere(test_wk_places.RemoteTest):
+    def test_wk_pr_open_fetches_the_box_branch_into_the_mirror_and_pushes_from_here(self):
+        self.fake.answer(["git"])
+        with mock.patch.object(CMD_PR, "pr_open_target", return_value=("WebKit/WebKit", "me:eng/b", "fork", "eng/b")), \
+                mock.patch.object(CMD_PR.secrets, "Secrets", lambda *a: test_pr_workflow.BoxKeys()), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.fake.files["/s/push-keys/build_key_fork"] = "KEY\n"
+            CMD_PR.pr_open(self.t, "a", False, False)
+        mirror = Store(self.env).mirror_dir()
+        here = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "git"]
+        self.assertIn(("git", "-C", mirror, "fetch", "--quiet", "box.example:/home/u/wk/ws/a/WebKit",
+                       "+refs/heads/eng/b:refs/wk/push/box/eng/b"), here)
+        push = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "git" and "push" in e[1]]
+        self.assertEqual(1, len(push), push)
+        self.assertEqual(("-C", mirror), push[0][1:3])
+        self.assertIn("-i /s/push-keys/build_key_fork", push[0][4])
+        self.assertEqual(("push", "git@github.com:alice/WebKit.git", "refs/wk/push/box/eng/b:refs/heads/eng/b"), push[0][-3:])
+        self.assertIn(("git", "-C", mirror, "update-ref", "-d", "refs/wk/push/box/eng/b"), here)
+        self.assertEqual([], [c for c in self.fake.ssh_calls() if "push" in c[-1]])
+        self.assertEqual(1, len([e for e in self.fake.effects if e[0] == "exec" and e[1][:3] == ("gh", "pr", "create")]))
+
+
+class TestAPushOnTheBoxIsRefused(test_wk_places.RemoteTest):
+    def test_every_fork_alias_on_a_box_stops_on_the_refusal_naming_wk_pr_open(self):
+        """remote/provision.sh writes these blocks; the ProxyCommand ssh would run for `git push` is run here as ssh runs it."""
+        text = secrets.box_alias_blocks(secrets.forks())
+        proxies = re.findall(r"^    ProxyCommand (.+)$", text, re.M)
+        self.assertEqual(len(secrets.forks()), len(proxies))
+        cp = subprocess.run(shlex.split(proxies[0]), capture_output=True, text=True)
+        self.assertEqual(1, cp.returncode)
+        self.assertIn("wk pr open", cp.stderr)
+
+
+# The pre-push hook's remote classification (git.hook_levels).
+def _levels(forks):
+    return {key: int(value) for key, value in re.findall(r"--level (\S+)=(\d+)", git.hook_levels(forks))}
+
+
+class TestHookLevels(unittest.TestCase):
+    def test_every_fork_is_named_by_its_ssh_alias_and_every_level_is_public(self):
+        forks = list(secrets.forks()) + [("extra", "someone/WebKit", "github-extra")]
+        levels = _levels(forks)
+        self.assertEqual({"%s:%s" % (alias, repo) for _, repo, alias in forks} | {git.NO_PUSH}, set(levels))
+        self.assertEqual(set(levels.values()), {0})
+
+    def test_the_hooks_are_installed_even_in_a_checkout_already_set_up(self):
+        before, _, after = git.pr_tool_setup_script("/src/WebKit", list(secrets.forks())).partition("state=already")
+        self.assertNotIn("exit 0", before)
+        self.assertIn("install-hooks $WK_HOOK_LEVELS", after)
 
 
 if __name__ == "__main__":
