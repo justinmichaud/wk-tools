@@ -15,6 +15,7 @@ from unittest import mock
 
 from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, bash, clean_env, load_cmd
+from tests.test_push_service import Proc
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import claudelogin, doctor, places, pushgate, repos, wall  # noqa: E402
@@ -74,8 +75,15 @@ def rows_text(rows):
     return "\n".join("%s %s -> %s" % r for r in rows)
 
 
+ENSURE_BRIDGE = "container/proxy/ensure-bridge.sh"
+CONMON, ENTRY, EXEC, BRIDGE_PID = 400, 500, 600, 601
+
+
 class _Wall(unittest.TestCase):
+    """The workspace's process table is a fake /proc: conmon, a person's entry under it, and this process -- `me`, the wk
+    command a check inside a workspace runs in -- under that. Each exec's bridge is added to it as ensure-bridge.sh starts one."""
     kind = "container"
+    me = ["python3", "/opt/wk-tools/cmd/ai", "claude"]
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-wall-"))
@@ -90,6 +98,14 @@ class _Wall(unittest.TestCase):
         self.asked_as = []
         self.fake.react(["env"], self._exec)
         self.fake.react(["bash", "-lc"], self._exec)
+        self.fake.react([os.path.join(str(REPO), ENSURE_BRIDGE)], self._exec)
+        self.proc, self.proc_lock = Proc(self.tmp / "proc"), threading.Lock()
+        self.proc.chain([(CONMON, 1, "conmon", ["/usr/bin/conmon"]), (ENTRY, CONMON, "bash", ["/bin/bash", "/opt/wk-tools/" + pushgate.PERSON, "/bin/bash", "--login"]),
+                         (os.getpid(), ENTRY, "python3", self.me)])
+        real = pushgate.Proc
+        patch = mock.patch.object(pushgate, "Proc", lambda: real(str(self.proc.root)))
+        patch.start()
+        self.addCleanup(patch.stop)
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "present"])
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "secretfile.py"), "read"], out="stored-value")
         self.fake.answer(["python3", os.path.join(str(REPO), "lib", "credcheck.py")], out="ok\tit works")
@@ -105,9 +121,25 @@ class _Wall(unittest.TestCase):
         return self.reg.load(kind)
 
     def _exec(self, argv, fake):
-        """A container's exec ends in the command; a workspace-local one quotes it after `exec`. A person's run is entered as one."""
-        person = any(a.endswith(pushgate.PERSON) for a in argv)
-        return self._answer(shlex.split(argv[-1])[-1] if argv[:2] == ["bash", "-lc"] else argv[-1], person)
+        """A container's exec ends in the command; a workspace-local one quotes it after `exec`."""
+        person = self._bridges_a_person(argv)
+        argv = argv[1:] if argv[0].endswith(ENSURE_BRIDGE) else argv
+        return self._answer(shlex.split(argv[-1])[-1] if argv[:2] == ["bash", "-lc"] else argv[-1], bool(person))
+
+    def _bridges_a_person(self, argv):
+        """Whether the push service takes the bridge this exec starts for a person's: it is the child of the command
+        ensure-bridge.sh execs into, which is conmon's child for a container's exec and this process's for one inside; None with no bridge."""
+        i = next((i for i, a in enumerate(argv) if a.endswith(ENSURE_BRIDGE)), None)
+        if i is None:
+            return None
+        with self.proc_lock:
+            self.proc.add(EXEC, CONMON if self.kind == "container" else os.getpid(), "bash", argv[i + 1:])
+            self.proc.add(BRIDGE_PID, EXEC, "python3", ["python3", "/opt/wk-tools/container/proxy/bridge.py", str(EXEC)])
+            try:
+                pushgate.person(pushgate.Proc(), BRIDGE_PID, "demo")
+                return True
+            except pushgate.Denied:
+                return False
 
     def _direct(self, ws, argv, tty=False, timeout=None, person=False):
         """For a driver whose own exec would reach tart or ssh."""
@@ -644,14 +676,13 @@ class TestAGuest(_Wall):
 
 
 class TestFromInside(_Wall):
-    """Inside, the probes run as whatever this process is to the push service; an agent session's own check is the usual one."""
+    """Inside a container, the probes run as whatever this process is to the push service; an agent session's own check is the usual one."""
     kind = "local"
-    standing = "an agent session"
 
     def setUp(self):
         super().setUp()
         self.set("git config --global --get core.sshCommand", str(REPO / "container" / "push" / "wk-push-client.py"))
-        patch = mock.patch.object(wall.Wall, "own_standing", return_value=self.standing)
+        patch = mock.patch.object(places.LocalWorkspace, "os", lambda _: "linux")
         patch.start()
         self.addCleanup(patch.stop)
 
@@ -700,12 +731,7 @@ class TestFromInside(_Wall):
 
 class TestFromInsideAPersonsShell(TestFromInside):
     """`wk doctor` typed in a person's own shell: its push is served, and that is not publishing."""
-    standing = "a person's shell"
-
-    def setUp(self):
-        super().setUp()
-        self.set("git ls-remote", "0123abcd\trefs/heads/main")
-        self.set("/pulls", "422")
+    me = ["python3", "/opt/wk-tools/cmd/doctor"]
 
     def test_a_healthy_workspace_passes_and_nothing_can_publish(self):
         publishing, rep, out = self.results()

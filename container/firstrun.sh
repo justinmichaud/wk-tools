@@ -9,11 +9,9 @@ SRC=$WK_SRC                             # the repo's checkout, lib/wk/repos.py
 log()  { printf '[firstrun] %s\n' "$*"; }
 warn() { printf '[firstrun] warning: %s\n' "$*" >&2; }
 
-if [ -S /run/wk/proxy.sock ]; then      # init runs before any wk command
-    /opt/wk-tools/container/proxy/ensure-bridge.sh true && log "egress bridge up"
-else
-    log "WARNING: no egress proxy socket at /run/wk/proxy.sock -- no network"
-fi
+# Every fetch below goes through a bridge of this run's own, with the injector's CA and GITHUB_COM_* in the environment.
+[ "${1:-}" = --bridged ] || exec "$WK_TOOLS/container/proxy/ensure-bridge.sh" "$0" --bridged
+[ -S /run/wk/proxy.sock ] || log "WARNING: no egress proxy socket at /run/wk/proxy.sock -- no network"
 
 if [ -S /run/wk/broker.sock ]; then
     log "fleet-request broker present -- 'wk boot' / 'wk bench' become requests"
@@ -59,10 +57,8 @@ elif [ -d "$SRC/.git" ]; then           # an old snapshot's remotes are stale
         warn "could not wire the checkout's remotes"
     fi
 
-    # Through ensure-bridge.sh: it puts the egress proxy, the injector's CA and GITHUB_COM_* in the environment, and git-webkit needs all three.
     _setup=$(_git_py pr-tool-setup-script "$SRC") || _setup=""
-    if [ -n "$_setup" ] \
-        && _out=$("$WK_TOOLS/container/proxy/ensure-bridge.sh" sh -c "$_setup" </dev/null); then
+    if [ -n "$_setup" ] && _out=$(sh -c "$_setup" </dev/null); then
         log "git-webkit: $_out"
     else
         log "WARNING: 'git-webkit setup' did not finish (above) -- 'wk sync ${WK_WORKSPACE:-?} --fix' on the host"
@@ -98,36 +94,16 @@ done <<EOF
 $(_agent_secrets)
 EOF
 
-# Every apt below runs under sudo, whose env_reset drops http_proxy, and the sandbox has no route of its own: apt is told in config what the shell is told in the environment, read from it rather than copied.
-APT_PROXY_CONF=/etc/apt/apt.conf.d/99-wk-proxy
-apt_proxy_conf() {
-    printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' \
-        "$http_proxy" "$https_proxy"
-}
-if [ -n "${http_proxy:-}" ] && [ -n "${https_proxy:-}" ]; then
-    case "$http_proxy$https_proxy" in
-    *'"'*|*';'*)
-        warn "not writing $APT_PROXY_CONF: a proxy address here carries a quote or a
-         semicolon ('$http_proxy', '$https_proxy'), which is apt.conf's own syntax --
-         apt would read the rest of the line as further directives. Every apt step
-         below fails until the value lib/wk/places.py's Container passes is fixed." ;;
-    *)
-        apt_proxy_conf | sudo tee "$APT_PROXY_CONF" >/dev/null
-        log "apt goes through the workspace proxy ($http_proxy, $APT_PROXY_CONF)" ;;
-    esac
-else
-    warn "http_proxy/https_proxy are not set in this workspace, so apt has no way
-         out and every apt step below fails. The container is started without the
-         proxy environment lib/wk/places.py's Container gives it: 'wk rm' and 'wk new'."
-fi
+# apt runs as root, whose sockets this run's bridge cannot read, so it is given a bridge of its own.
+apt_get() { sudo "$WK_TOOLS/container/proxy/ensure-bridge.sh" apt-get "$@"; }
 
 _install_profilers() {                  # wrapped: not load-bearing
-    if sudo apt-get update -qq >/dev/null 2>&1 \
-       && sudo apt-get install -y --no-install-recommends heaptrack valgrind sysprof >/dev/null 2>&1; then
+    if apt_get update -qq >/dev/null 2>&1 \
+       && apt_get install -y --no-install-recommends heaptrack valgrind sysprof >/dev/null 2>&1; then
         log "heaptrack, valgrind and sysprof-cli installed"
     else
         warn "apt install of heaptrack/valgrind/sysprof failed -- check egress. Retry by hand:
-         sudo apt-get update && sudo apt-get install heaptrack valgrind sysprof
+         sudo $WK_TOOLS/container/proxy/ensure-bridge.sh apt-get update && sudo $WK_TOOLS/container/proxy/ensure-bridge.sh apt-get install heaptrack valgrind sysprof
          Until then 'wk run --profile=heaptrack|massif' refuses by name."
     fi
 
@@ -178,18 +154,18 @@ if [ -f "$DDEBS_SOURCES" ]; then
 else
     _ddebs_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
     log "provisioning ddebs.ubuntu.com for $_ddebs_codename"
-    if sudo apt-get update -qq >/dev/null 2>&1 \
-       && sudo apt-get install -y --no-install-recommends ubuntu-dbgsym-keyring >/dev/null 2>&1 \
+    if apt_get update -qq >/dev/null 2>&1 \
+       && apt_get install -y --no-install-recommends ubuntu-dbgsym-keyring >/dev/null 2>&1 \
        && printf 'deb http://ddebs.ubuntu.com %s main restricted universe multiverse\ndeb http://ddebs.ubuntu.com %s-updates main restricted universe multiverse\ndeb http://ddebs.ubuntu.com %s-proposed main restricted universe multiverse\n' \
               "$_ddebs_codename" "$_ddebs_codename" "$_ddebs_codename" \
               | sudo tee "$DDEBS_SOURCES" >/dev/null \
-       && sudo apt-get update -qq >/dev/null 2>&1; then
-        log "ddebs.ubuntu.com added ($DDEBS_SOURCES) -- 'sudo apt-get install <pkg>-dbgsym' now works"
+       && apt_get update -qq >/dev/null 2>&1; then
+        log "ddebs.ubuntu.com added ($DDEBS_SOURCES) -- 'sudo $WK_TOOLS/container/proxy/ensure-bridge.sh apt-get install <pkg>-dbgsym' now works"
     else
         warn "ddebs.ubuntu.com provisioning failed -- check egress. Retry by hand:
-         sudo apt-get install ubuntu-dbgsym-keyring
+         sudo $WK_TOOLS/container/proxy/ensure-bridge.sh apt-get install ubuntu-dbgsym-keyring
          sudo tee $DDEBS_SOURCES <<<'deb http://ddebs.ubuntu.com $_ddebs_codename main restricted universe multiverse'
-         sudo apt-get update"
+         sudo $WK_TOOLS/container/proxy/ensure-bridge.sh apt-get update"
     fi
 fi
 
@@ -253,7 +229,7 @@ if ! command -v lazygit >/dev/null 2>&1; then
     _install_lazygit || warn "lazygit install failed -- continuing without it"
 fi
 if ! command -v npm >/dev/null 2>&1; then
-    if sudo apt-get install -y --no-install-recommends nodejs npm >/dev/null 2>&1; then
+    if apt_get install -y --no-install-recommends nodejs npm >/dev/null 2>&1; then
         log "node $(node -v) and npm installed (Ubuntu's archive), for 'wk new' to install pi with"
     else
         warn "apt install of nodejs/npm failed -- check egress; this workspace is made without pi"

@@ -30,7 +30,6 @@ GUEST_MIRROR_MOUNT = "/Volumes/" + MIRROR_TAG
 GUEST_MOUNT_MIRROR = "/usr/local/libexec/wk-mount-mirror"
 TOOLS = "/opt/wk-tools"
 BRIDGE = TOOLS + "/container/proxy/ensure-bridge.sh"
-PROXY = "http://127.0.0.1:3128"
 NO_PROXY = "localhost,127.0.0.1,::1"
 MOTD_REFERENCE = '''
         cat /etc/motd /etc/motd.d/* /run/motd.dynamic 2>/dev/null \\
@@ -978,8 +977,6 @@ class Container(Driver):
         rt = self.runtime_dir()
         self.machine.mkdir(rt)
         flags = ["--volume", "%s:/run/wk" % rt, "--env", "WK_PROXY_SOCKET=/run/wk/proxy.sock"]
-        for v in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
-            flags += ["--env", "%s=%s" % (v, PROXY)]
         for v in ("no_proxy", "NO_PROXY"):
             flags += ["--env", "%s=%s" % (v, NO_PROXY)]
         flags += ["--env", "WAYLAND_DISPLAY=/run/wk/display/wayland-0"]
@@ -1582,7 +1579,8 @@ class LocalWorkspace(Driver):
         return "running" if ws == self.ws_name else "absent"
 
     def exec_argv(self, ws, argv, tty=False, person=False):
-        return ["bash", "-lc", "exec " + shlex.join(argv)], None
+        own_bridge = [os.path.join(self.root, "container", "proxy", "ensure-bridge.sh")] if self.os() == "linux" else []
+        return own_bridge + ["bash", "-lc", "exec " + shlex.join(argv)], None
 
     def store_init(self):
         self.machine.mkdir(self.store.ws_dir(self.ws_name))

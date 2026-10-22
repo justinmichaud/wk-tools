@@ -352,7 +352,7 @@ class TestFirstRun(unittest.TestCase):
     """container/firstrun.sh's checkout block, lifted and run: a cloned repo is cloned at its branch, pushes through its
     deploy key's alias, and is never given the snapshot's wiring."""
     TEXT = (REPO / "container" / "firstrun.sh").read_text()
-    BLOCK = TEXT[TEXT.index('if [ -n "${WK_CLONE:-}" ]'):TEXT.index("    # Through ensure-bridge.sh")] + "fi\n"
+    BLOCK = TEXT[TEXT.index('if [ -n "${WK_CLONE:-}" ]'):TEXT.index("    _setup=$(_git_py pr-tool-setup-script")] + "fi\n"
 
     def test_the_branch_is_cloned_with_its_push_url_and_the_wiring_never_runs(self):
         with scratch_dir(prefix="wk-firstrun-clone-") as d:

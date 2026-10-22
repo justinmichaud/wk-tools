@@ -11,7 +11,6 @@ DELIBERATE_PREDICATES = {
     ("admin/wk-card-priv", "_slot_present"),
     ("build/mem-watchdog.sh", "_alive"),
     ("container/agents.sh", "node_ok"),
-    ("container/proxy/ensure-bridge.sh", "bridge_alive"),
 }
 
 SHELL_SHEBANG_LINE = re.compile(r'^#!.*\b(bash|sh|dash|ksh)\b')
