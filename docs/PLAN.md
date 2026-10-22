@@ -136,6 +136,8 @@ Answered 2026-10-21 (second batch): kept in the workspace loop are `run --profil
 
 Answered 2026-10-05 (sixth batch): each repo has its own push identity (wk-tools its own deploy key); commands declare the repos they serve and the dispatcher refuses the rest; on a Mac the host-side injector holds and refreshes the claude.ai login and the podman VM's injector forwards Claude traffic to it, so a guest never needs the podman VM (the two VMs do not fit the Mac's memory envelope together); the injector adds the bearer for api.anthropic.com, claude.ai and platform.claude.com.
 
+Answered 2026-10-22: the Mac's bench default is set by hand in a later session (`wk boot mbp --status` read `firmware_default=the host install` at 08:10 MST, so `live boot.arm[mbp]`, `bench[mbp]` and `doctor.bench_readiness[mbp]` wait for it); a sudoers drop-in written at a container's first run keeps the bridge's proxy and CA variables across `sudo`, so a plain `sudo apt-get` has the network; the guest's three launchd jobs (nosleep, mirror, display) are `daemons.py` rows and the golden base is rebuilt in the session that lands them; `./setup --stage sdk` on Linux is owed to a session on moose (the podman VM's checkout is at `SDK_PIN`, the head of the fork's `wk` branch, measured); every bench, sysimage, secrets, places, workspace, status and guest behaviour stays except build snapshots, the ntfy publish and the build-box dependency findings, which go; the `cmd` row counts tables and `main` only (a command's docstring is its help, held by the help-text rule) and the bodies of `test`, `ai`, `run`, `pr`, `gui` and `stop` move into their lib modules; the budget table carries two numbers per row, the budget (10k and 15k stand) and the interim lint holds now -- the measured size after the day's cuts, lowered as each dedup pass lands and never raised; the tests are redesigned as regression tests (step 7.13), end to end through the dispatcher against the fake world, designed in this file first and rewritten module by module afterwards.
+
 ## Cutting it down
 
 Measured 2026-10-21 (non-blank lines): 36k of Python core, 52k of tests, after
@@ -1199,6 +1201,22 @@ exist.
    7.12 **Budgets in lint.** *Landed 2026-10-21* (`tests/test_lint_budgets.py`: one owed test per row of the
      table above and one for the sums, failing loudly once a row is under budget; `python3 -m
      tests.test_lint_budgets` prints the rows).
+   7.13 **Regression tests, end to end.** *Designed 2026-10-22; lands module by module.* A unit test names a
+     behaviour a person can see and states it as `wk <argv>` in and four things out: the exit code, the text as the
+     person reads it, the commands the fake machines were asked to run (the `World`'s recorded argv, in order) and
+     the store's final state (records, locks, files). It enters through the dispatcher (`tests.fakes.FlowTest`),
+     never a lib function, and asserts nothing about which function ran or how often. The `World` is the one fake:
+     it answers as the real substrate does (podman, tart, ssh, launchctl, the filesystem) from answer tables kept
+     beside the tests, one table per subsystem, and a test that needs an answer the `World` cannot give extends the
+     `World`, not the test. The test is a regression test when a change that keeps the behaviour (a rename, a move,
+     a merge of two functions) breaks no test and a change that breaks the behaviour breaks the one test that names
+     it. So: no assertion that a function was called; no `mock.patch` of a lib name; no test of a private helper; no
+     assertion on prose but the one line a person acts on (a refusal's first line, a status row). The kill-point rows
+     (`tests/killpoints.py`) and the conformance mixins already have this shape and stay. The rewrite follows the
+     workflows -- workspace (`new`, `build`, `rm`, `status`), agent sessions (`ai`, `key`, the wall), board bench,
+     Mac bench, then the rest -- one module at a time, its old tests deleted in the same change; `lint.test_shape`
+     (owed until the first module lands) refuses a test that imports a lib module or patches one. The tests
+     interim budget is lowered per row as each module lands.
 8. Delete this file.
 
 ## Owed
@@ -1277,6 +1295,9 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A fresh bench volume provisions itself: python3 present before it is needed, Command Line Tools fetched and the update denial restored, no FileVault, the `bench` account, room checked, network credentials checked | 5 | `live sysimage.mac_volume_provision` |
 | A second build of one profile reuses sstate, and `--keep-work` leaves the kernel tree to configure | 5 | `live sysimage.sstate_reuse` |
 | A disk written from any image is unique per disk (`LABEL=` images included) and mountable whatever the medium held | 5 | `unit sysimage.write_identity`, `live sysimage.write[<board>]` |
+| A person's plain `sudo apt-get` inside a container workspace reaches the network through the per-exec bridge: the sudoers drop-in keeps the proxy and CA variables | 7 | `live sudo.network_in_workspace` |
+| A guest booted from the rebuilt base runs its three launchd jobs as `daemons.py` rows: nosleep and mirror in the system domain, display as the user's agent | 7 | `live vm.guest_daemons`, `live vm.mirror_tag_mount` |
+| A unit test enters through the dispatcher and patches no lib name (step 7.13) | 7 | `lint.test_shape` |
 | Every card verb runs against a real card and is read back before unmount, and a board boots from it onto the tailnet with its seeded key | 5 | `live sysimage.card_verbs[rpi5]` |
 | One WiFi credential reader, in the card helper | 5 | `lint.one_wifi_reader` |
 | A board's first boot is proven on hardware: self-disarm parks the medium, self-return reboots an unclaimed board within the watchdog, the rescue marker holds, `config.txt.append` lands for every builder, an absent boot device falls through to host mode, armed-not-rebooted reads ARMED exit 2, and the prompt shows `bench` | 5 | `live boot.firstboot[<board>]` |
@@ -1331,5 +1352,6 @@ decides is a row; one still open is listed under "Decisions for the user".
 Decisions are asked as questions, and their answers are recorded under "Decisions taken".
 
 - Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
-  wk never blesses; the way back is the person's power-button pick. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`,
+  wk never blesses; the way back is the person's power-button pick. The default is not yet set (`wk boot mbp
+  --status`, 2026-10-22 08:10 MST: `firmware_default=the host install`); the Mac rows run once it is. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`,
   `unit bench.variance_pairing`).

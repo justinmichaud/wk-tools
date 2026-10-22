@@ -1,8 +1,11 @@
 """lint.budgets: Python non-blank lines per package against docs/PLAN.md's budget table.
 
-Each row is owed until the cut lands; `python3 -m tests.test_lint_budgets` prints today against budget.
+A row carries a budget (owed until the cut lands) and an interim, the measured size lint holds now: a change that
+grows a row over its interim trims something, and the interim is lowered as a dedup pass lands. A `cmd/*` file counts
+without its docstring, which is its help. `python3 -m tests.test_lint_budgets` prints the rows.
 The `fixtures` line (tests/*.py that are not test_*) is this module's addition, budgeted at 800."""
 TIER = "lint"
+import ast
 import fnmatch
 import functools
 import subprocess
@@ -38,6 +41,22 @@ ROWS = {
     "live bodies": ((), ("owed_live", "*_live"), 0, 800),
 }
 FIXTURES_BUDGET = 800
+# row: (core interim, tests interim), measured 2026-10-22 after the day's cuts; lowered, never raised.
+INTERIM = {"dispatcher": (770, 927),
+           "machine": (491, 1932),
+           "places": (1786, 3992),
+           "record": (1144, 2702),
+           "workspace": (2547, 5748),
+           "secrets": (2465, 4701),
+           "status": (1707, 2639),
+           "bench": (6326, 6808),
+           "boot": (1261, 2243),
+           "sysimage": (3756, 3060),
+           "guest": (2356, 3579),
+           "cmd": (1629, 0),
+           "lint rules": (0, 2062),
+           "live bodies": (0, 151),
+           "fixtures": (0, 1807)}
 
 
 def tracked():
@@ -46,7 +65,14 @@ def tracked():
 
 
 def lines(rel):
-    return python_counts((REPO / rel).read_text())[0]
+    src = (REPO / rel).read_text()
+    return python_counts(src)[0] - (help_lines(src) if rel.startswith("cmd/") else 0)
+
+
+def help_lines(src):
+    body = ast.parse(src).body
+    doc = body[0].value if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) else None
+    return doc.end_lineno - doc.lineno + 1 if doc is not None and isinstance(doc.value, str) else 0
 
 
 def core_files():
@@ -74,21 +100,26 @@ def table():
     for f in test_files():
         for r in owners(f, 1)[:1]:
             tests[r] += lines(f)
-    out = [(r + " core", core[r], row[2]) for r, row in ROWS.items() if row[2]]
-    out += [(r + " tests", tests[r], row[3]) for r, row in ROWS.items() if row[3]]
-    out.append(("fixtures tests", sum(lines(f) for f in SUPPORT), FIXTURES_BUDGET))
+    out = [(r + " core", core[r], row[2], INTERIM[r][0]) for r, row in ROWS.items() if row[2]]
+    out += [(r + " tests", tests[r], row[3], INTERIM[r][1]) for r, row in ROWS.items() if row[3]]
+    out.append(("fixtures tests", sum(lines(f) for f in SUPPORT), FIXTURES_BUDGET, INTERIM["fixtures"][1]))
     return out
 
 
 def report():
-    print(f"{'row':<22}{'today':>8}{'budget':>8}{'over-by':>9}")
-    for name, today, budget in table():
-        print(f"{name:<22}{today:>8}{budget:>8}{max(0, today - budget):>9}")
+    print(f"{'row':<22}{'today':>8}{'interim':>8}{'budget':>8}{'over-by':>9}")
+    for name, today, budget, interim in table():
+        print(f"{name:<22}{today:>8}{interim:>8}{budget:>8}{max(0, today - budget):>9}")
 
 
 def under(name):
-    today, budget = next((t, b) for n, t, b in table() if n == name)
+    today, budget, _ = next((t, b, i) for n, t, b, i in table() if n == name)
     assert today <= budget, f"{name}: {today} non-blank lines over the budget {budget}; remove this test's @owed mark"
+
+
+def within_interim(name):
+    today, _, interim = next((t, b, i) for n, t, b, i in table() if n == name)
+    assert today <= interim, f"{name}: {today} non-blank lines over its interim {interim} (tests/test_lint_budgets.py INTERIM); trim something"
 
 
 class Budgets(unittest.TestCase):
@@ -98,8 +129,8 @@ class Budgets(unittest.TestCase):
 
     def test_sums(self):
         t = table()
-        core = sum(today for n, today, _ in t if n.endswith(" core"))
-        tests = sum(today for n, today, _ in t if n.endswith(" tests"))
+        core = sum(today for n, today, _, _ in t if n.endswith(" core"))
+        tests = sum(today for n, today, _, _ in t if n.endswith(" tests"))
         self.assertEqual((core <= 10000, tests <= 15000), (True, True), f"core {core}, tests {tests}")
 
     test_sums = owed("core 10,000 and tests 15,000 total; the sum row of PLAN.md's budget table")(test_sums)
@@ -111,8 +142,15 @@ def _row(name, today, budget):
     return owed(f"{name}: {today} today, budget {budget} (PLAN.md budgets per package)")(test) if today > budget else test
 
 
-for _name, _today, _budget in table():
+def _interim_row(name):
+    def test(self):
+        within_interim(name)
+    return test
+
+
+for _name, _today, _budget, _ in table():
     setattr(Budgets, "test_budget_" + _name.replace(" ", "_"), _row(_name, _today, _budget))
+    setattr(Budgets, "test_interim_" + _name.replace(" ", "_"), _interim_row(_name))
 
 if __name__ == "__main__":
     report()
