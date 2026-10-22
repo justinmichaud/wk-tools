@@ -14,12 +14,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import WsDriver
 from tests import fakes
 from tests.support import REPO, load_cmd, rand_suffix, stub_path
-
-CMD_PR = REPO / "cmd" / "pr"
-
 
 CMD_PR_MODULE = load_cmd("pr")
 
@@ -27,7 +23,7 @@ from wk import act, decl, dispatch, git, places, pr, sync  # noqa: E402  -- need
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from tests.fakes import Fake, WsDriver  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
@@ -137,17 +133,8 @@ class GitWorld(fakes.World):
         if sub[:2] == ["config", "--get-all"] and sub[2].endswith(".fetch"):
             name = sub[2][len("remote."):-len(".fetch")]
             return Result(0, "+refs/heads/*:refs/remotes/%s/*\n" % name) if name in self.remotes else Result(1)
-        if sub[0] == "config" and sub[1] == "--get" and sub[2].startswith("remote."):
-            name = sub[2][len("remote."):-len(".url")]
-            url = self.remotes.get(name)
-            return Result(0, url + "\n") if url else Result(1)
-        if sub[0] == "symbolic-ref":
-            return Result(0, self.head + "\n") if self.head else Result(1)
-        if sub[0] == "rev-parse" and sub[1] == "--abbrev-ref":
-            up = self.upstream.get(self.head)
-            return Result(0, "%s/%s\n" % (up["remote"], up["merge"][len("refs/heads/"):])) if up else Result(1)
         if sub[0] == "push":
-            fork, branch = sub[2], sub[3]
+            fork, branch = sub[1], sub[2]
             self.effect(("push", fork, branch))
             self.pushed.add((fork, branch))
             self.remote_refs[(fork, branch)] = self.local.get(branch, "")
@@ -300,7 +287,7 @@ class TestPrDryRunEqualsWetRun(unittest.TestCase):
                 open_once(RecordingDriver(w))
         execvp.assert_not_called()
         self.assertEqual(set(), w.pushed)
-        self.assertIn("would run in ws: git -C /src/WebKit push -u fork eng/x", err.getvalue())
+        self.assertIn("would run in ws: git -C /src/WebKit push fork eng/x", err.getvalue())
         self.assertIn("would run: gh pr create --repo WebKit/WebKit --head alice:eng/x --fill", err.getvalue())
 
     def test_every_form_declares_its_dry_run(self):
@@ -505,24 +492,20 @@ class TestPrOpen(unittest.TestCase):
     """It pushes from where the key is, then ends as gh: the process becomes `gh pr create`, so a PR gh did not create
     is not a success."""
 
-    def _open(self, peer=None, draft=False):
-        driver = rebase_place("", [Result(0)])   # the push
+    def _open(self, peer=None):
+        driver = rebase_place("", [Result(0)] * 4)   # the push, the fork's refspec, the two tracking writes
         if peer is not None:
             driver.kind, driver.is_here, driver.peer = "remote", lambda: False, peer
         with mock.patch.object(pr, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
                 mock.patch.object(pr, "push_from_here", return_value=Result(0)) as from_here, \
                 contextlib.redirect_stderr(io.StringIO()):
-            pr.pr_open(driver, "myws", draft=draft, web=False)
+            pr.pr_open(driver, "myws", draft=False, web=False)
         return driver, from_here.called, calls(driver)
 
-    def test_the_command_execs_into_gh(self):
-        driver = self._open(draft=True)[0]
-        self.assertEqual([("exec", ("gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "me:b", "--fill", "--draft"), None)],
-                         [e for e in driver.here.effects if e[0] == "exec"])
-
     def test_a_build_box_pushes_from_here_and_a_peer_its_own(self):
-        self.assertEqual(self._open(peer=False)[1:], (True, []))
-        self.assertEqual(self._open(peer=True)[1:], (False, [["git", "-C", "/src/WebKit", "push", "-u", "fork", "b"]]))
+        track = [["git", "-C", "/src/WebKit", "config", "--get-all", "remote.fork.fetch"]] + pr.track("/src/WebKit", "fork", "b", "refs/heads/b")
+        self.assertEqual(self._open(peer=False)[1:], (True, track))
+        self.assertEqual(self._open(peer=True)[1:], (False, [["git", "-C", "/src/WebKit", "push", "fork", "b"]] + track))
 
 
 class TestPrOpenRefusals(unittest.TestCase):

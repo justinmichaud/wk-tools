@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, bash, scratch_dir
+from tests.support import REPO, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, git, pr  # noqa: E402
@@ -51,7 +51,7 @@ class Here:
     def src(self, ws):
         return self._src
 
-    def exec(self, ws, argv, tty=False, timeout=None):
+    def exec(self, ws, argv, tty=False, timeout=None, person=False):
         self.ran.append(list(argv))
         cp = subprocess.run(argv, capture_output=True, text=True)
         return Result(cp.returncode, cp.stdout, cp.stderr)
@@ -72,7 +72,6 @@ class Wired(unittest.TestCase):
         self.commit(seed, "one")
         self.origin_main = git_("rev-parse", "main", cwd=seed)
         git_("branch", "topic", cwd=seed)
-        self.topic = self.origin_main
 
         for bare in (self.mirror, self.fork):
             git_("init", "-q", "--bare", "-b", "main", str(bare))
@@ -95,14 +94,12 @@ class Wired(unittest.TestCase):
         git_("add", text, cwd=repo)
         git_("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", text, cwd=repo)
 
-    def in_src(self, script):
-        return bash(f'cd "{self.src}"\n' + script)
 
 
 class TestLsRemote(Wired):
     def test_it_answers_from_the_fork_not_the_mirror(self):
         self.assertNotEqual(self.fork_main, self.origin_main)
-        for ref, want in (("refs/heads/topic", self.topic), ("refs/heads/main", self.fork_main), ("refs/heads/no-such", "")):
+        for ref, want in (("refs/heads/topic", self.origin_main), ("refs/heads/main", self.fork_main), ("refs/heads/no-such", "")):
             with self.subTest(ref=ref):
                 self.assertEqual(pr.ls_remote(In(self.src), str(self.fork), ref), want)
 
@@ -347,6 +344,24 @@ class TestTheMergeRefFollowsTheRemotesRefspec(Pushable):
         self.assertNotIn("push -u", self.check())
         self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), self.forks), [])
         self.assertEqual(self.upstream("mine"), ("fork", "refs/heads/topic"))
+
+    def test_a_branch_pushed_before_opens_again_and_stays_wired(self):
+        """`unit pr.open_twice`: once opened, `mine` tracks its fork, whose `@{u}` resolves nowhere; it opens again all the same."""
+        url = "https://github.com/justinmichaud/WebKit.git"
+        for argv in (("remote", "set-url", "origin", git.REMOTES[0][1]), ("remote", "set-url", "fork", url),
+                     ("config", f"url.{self.dir / 'fork'}.pushInsteadOf", url), ("checkout", "-q", "--track", "-b", "mine", "origin/main")):
+            git_(*argv, cwd=self.src)
+        driver = Here(self.src)
+        driver.here = Fake()
+        for draft in (False, True):
+            self.commit(self.src, str(draft))
+            with mock.patch.object(pr.secrets, "forks", lambda: self.forks), contextlib.redirect_stderr(io.StringIO()):
+                pr.pr_open(driver, "ws", draft, False)
+            self.assertEqual(git_("rev-parse", "mine", cwd=self.fork), git_("rev-parse", "HEAD", cwd=self.src), draft)
+        gh = ("gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "justinmichaud:mine", "--fill")
+        self.assertEqual([e[1] for e in driver.here.effects if e[0] == "exec"], [gh, gh + ("--draft",)])
+        self.assertEqual(self.upstream("mine"), ("fork", "refs/remotes/fork/mine"))
+        self.assertNotIn("problem: branch", self.check())
 
 
 class TestTheBrokerServesTheMirrorRefresh(unittest.TestCase):

@@ -36,10 +36,9 @@ def rubble(store, machine, lock):
     rows = []
     for ref in r.out.split():
         pid = lock.holder_pid(push_lock(ref))
-        busy = pid is not None and machine.alive(pid)
         rows.append(row("push-ref", "%s, left in the mirror by a killed box push" % ref, 0,
                         take=lambda ref=ref: machine.act_run(["git", "-C", mirror, "update-ref", "-d", ref]).ok,
-                        why="kept -- the 'wk pr open' (pid %d) pushing it holds it" % pid if busy else ""))
+                        why="kept -- the 'wk pr open' (pid %d) pushing it holds it" % pid if pid is not None and machine.alive(pid) else ""))
     return rows
 
 
@@ -260,12 +259,13 @@ def pr_open_target(src, run=lambda argv: Local().run(argv)):
         die("'wk pr open' cannot open 'main' as a pull request -- create a branch first")
     if ask("status", "--porcelain")[1]:
         die("the tree has uncommitted changes -- commit or stash them: git -C %s status" % src)
-    rc, up = ask("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    # The remote, not `@{u}`: a branch tracking its fork resolves no `@{u}` until the mirror carries what was pushed.
+    rc, up = ask("config", "--get", "branch.%s.remote" % branch)
     if rc != 0 or not up:
         die("'%s' has no upstream, so 'wk pr open' cannot tell which project it belongs to -- "
             "track one first: git branch -u origin/main (WebKit) or wpe/main (WPEWebKit)" % branch)
     # Not `git remote get-url`: through the mirror's insteadOf every remote reads as the mirror, and both projects as one.
-    up_url = ask("config", "--get", "remote.%s.url" % up.split("/", 1)[0])[1]
+    up_url = ask("config", "--get", "remote.%s.url" % up)[1]
     up_repo = git.repo_of(up_url)
     push_forks = secrets.forks()
     # The project's upstream, not the fork `wk pr` leaves a branch tracking: a PR against that is one against yourself.
@@ -277,9 +277,8 @@ def pr_open_target(src, run=lambda argv: Local().run(argv)):
     if rc != 0 or not url:
         die("no '%s' remote here -- 'wk sync --fix' wires it" % fork)
     owner = re.search(r"[:/]([^/]+)/[^/]+$", re.sub(r"\.git$", "", url))
-    forks = {r for r, _, _ in push_forks}
     base = next((re.sub(r"^https://github\.com/|\.git$", "", u) for n, u in git.REMOTES
-                 if n not in forks and u.endswith("/%s.git" % up_repo)), "")
+                 if n not in {r for r, _, _ in push_forks} and u.endswith("/%s.git" % up_repo)), "")
     if not base:
         die("no upstream among the wired remotes for the project '%s', so there is nothing to open '%s' against"
             % (up_repo, branch))
@@ -298,8 +297,7 @@ def pr_rebase(driver, name):
         r = driver.act_exec(name, ["git", "-C", src, "rebase", "origin/main"])
     if r.ok:
         info("'%s' is rebased onto origin/main" % name)
-        r = driver.exec(name, ["git", "-C", src, "--no-pager", "log", "--oneline", "-1"])
-        log("  %s" % r.out.replace("\r", "").strip())
+        log("  " + _out(driver.exec(name, ["git", "-C", src, "--no-pager", "log", "--oneline", "-1"])))
         return 0
     show(r)
     warn("the rebase stopped -- almost always a conflict, and the sequencer holds where.")
@@ -315,10 +313,12 @@ def pr_open(driver, name, draft, web):
     if driver.kind == "remote" and not driver.is_here() and not driver.peer:
         r = push_from_here(driver, src, fork, branch)
     else:
-        r = driver.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch], person=True)
+        r = driver.act_exec(name, ["git", "-C", src, "push", fork, branch], person=True)
     show(r)
     if not r.ok:
         die("the push to '%s' failed -- see above; a refusal there is the push service's, and names its remedy" % fork)
+    for argv in track(src, fork, branch, merge_ref(driver, name, src, fork, branch)):
+        driver.act_exec(name, argv)
     info("opening a pull request: %s <- %s" % (base, head))
     driver.here.exec(["gh", "pr", "create", "--repo", base, "--head", head, "--fill"]
                      + (["--draft"] if draft else []) + (["--web"] if web else []))
