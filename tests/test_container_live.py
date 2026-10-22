@@ -14,8 +14,9 @@ import sys
 import time
 import unittest
 
-from tests.support import REPO, WK, clean_env, container_side, rand_suffix, requires_container_place, run
-from tests.test_dev_integration import clean, last_build, tail, wk, workspace_record
+from tests.support import (REPO, WK, clean_env, container_side, container_store, container_target_missing, rand_suffix,
+                           requires_container_place, run)
+from tests.test_dev_integration import clean, last_build, ls_rows, real_env, tail, wk, workspace_record
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import secrets  # noqa: E402
@@ -23,6 +24,8 @@ from wk import secrets  # noqa: E402
 SRC = "/src/WebKit"
 JS = 'let s = 0; for (let i = 0; i < 3000000; ++i) s += i * i % 7; print("WK-PROFILE " + s);'
 WALL_NOTE = "wk: git history is read-only in this session. An agent runs under bwrap"
+PARANOID_REMEDY = r"echo 1 \| sudo tee /proc/sys/kernel/perf_event_paranoid|Remedy:  \./setup --stage quiesce"
+BABYSIT_PROBE = "Source/JavaScriptCore/runtime/JSObject.cpp"
 
 
 def new_workspace(ws):
@@ -216,7 +219,8 @@ class TestBuiltWorkspace(unittest.TestCase):
     def test_3_profile_modes(self):
         """`live profile.modes[sampling]` prints the tier breakdown; `live profile.modes[bytecode]` leaves one JSCProfile
         json in the workspace and none in the checkout; `live profile.modes[samply]` records, or refuses naming the
-        perf_event_paranoid remedy."""
+        perf_event_paranoid remedy; `live profile.modes[sysprof]` leaves the capture and a JIT dump beside it, or refuses
+        the same way -- the capture and the dump are the fact measured, Sysprof's own view of it is not opened here."""
         self.built()
         js = "/tmp/wk-live.js"
         self.assertEqual(inside(self.ws, "printf '%%s' %s > %s && cat %s" % (shlex.quote(JS), js, js)).strip(), JS)
@@ -242,8 +246,59 @@ class TestBuiltWorkspace(unittest.TestCase):
                 self.assertRegex(out, r"recorded in '%s': \S+/profile\.json" % self.ws)
             else:
                 self.assertRegex(out, r"perf_event_paranoid is -?[0-9]+ in '%s', and samply needs 1 or less\." % self.ws, tail(out))
-                self.assertRegex(out, r"echo 1 \| sudo tee /proc/sys/kernel/perf_event_paranoid|Remedy:  \./setup --stage quiesce",
-                                 tail(out))
+                self.assertRegex(out, PARANOID_REMEDY, tail(out))
+        with self.subTest(mode="sysprof"):
+            rc, out = on_a_pty("run", self.ws, "--profile=sysprof", "--", js, timeout=900)
+            if rc == 0:
+                m = re.search(r"recorded in '%s': ((\S+)/capture\.syscap)" % self.ws, out)
+                self.assertTrue(m, "no 'recorded in' line naming capture.syscap:\n" + out)
+                listed = inside(self.ws, "find %s -maxdepth 1 -type f -size +0" % shlex.quote(m.group(2))).split()
+                self.assertIn(m.group(1), listed, "no capture under %s but %r; the run said:\n%s" % (m.group(2), listed, out))
+                self.assertTrue([f for f in listed if re.search(r"/jit-.*\.dump$", f)],
+                                "no JIT dump beside the capture, only %r; the run said:\n%s" % (listed, out))
+            else:
+                self.assertRegex(out, r"perf_event_paranoid is -?[0-9]+ in '%s', and sysprof needs 1 or less\." % self.ws, out)
+                self.assertRegex(out, PARANOID_REMEDY, out)
+
+    def babysit_exit(self):
+        """The newest babysit record's exit word for this workspace: "" while it runs, None with no record."""
+        said = container_side('for d in %s/task/babysit-*/; do [ "$(cat "$d/name" 2>/dev/null)" = %s ] || continue; '
+                              'echo "$(cat "$d/started" 2>/dev/null) $(cat "$d/exit" 2>/dev/null)"; done | sort | tail -1'
+                              % (container_store(), self.ws), timeout=120).stdout.split()
+        return None if not said else (said[1] if len(said) > 1 else "")
+
+    def babysit_until(self, want, timeout):
+        deadline = time.monotonic() + timeout
+        while self.babysit_exit() not in want and time.monotonic() < deadline:
+            time.sleep(5)
+        return self.babysit_exit()
+
+    def test_4_babysit_is_one_task_refused_beside_itself_cancelled_by_kill_and_ends_by_name(self):
+        """`live build.babysit_e2e`: with the checkout broken, `wk build --babysit` is a task of its own: a second one is
+        refused naming the pid and the kill, `--kill` leaves its record cancelled, and one run to its end reads ok (the
+        one fix took) or gave-up, its report naming the attempt."""
+        self.built()
+        self.addCleanup(inside, self.ws, "git -C %s checkout -- %s" % (SRC, BABYSIT_PROBE))
+        inside(self.ws, "echo '#error wk-babysit-probe' >> %s/%s" % (SRC, BABYSIT_PROBE))
+        env = dict(real_env(), WK_BABYSIT_ATTEMPTS="1", WK_BABYSIT_MODEL="haiku")
+        r = wk("build", self.ws, "jsc-debug", "--babysit", env=env, timeout=600)
+        self.assertEqual(0, r.rc, tail(r.out))
+        self.assertIn("babysitter started for jsc-debug in '%s'" % self.ws, r.out)
+        self.assertEqual(self.babysit_until(("",), 60), "", "no running babysit record within 60s")
+        second = wk("build", self.ws, "jsc-debug", "--babysit", env=env, timeout=600)
+        self.assertNotEqual(0, second.rc, "a second babysitter started beside the first:\n" + tail(second.out))
+        self.assertRegex(second.out, r"a babysitter is already running for '%s' \(pid [0-9]+\)" % self.ws)
+        self.assertIn("Stop it:    wk build %s --kill" % self.ws, second.out)
+        killed = run("build", self.ws, "--kill", timeout=600)
+        self.assertEqual(killed.returncode, 0, killed.stdout)
+        self.assertEqual(self.babysit_until(("cancelled",), 60), "cancelled")
+
+        r = wk("build", self.ws, "jsc-debug", "--babysit", env=env, timeout=600)
+        self.assertEqual(0, r.rc, tail(r.out))
+        ended = self.babysit_until(("0", "ok", "gave-up", "error", "stalled"), 900)
+        report = container_side("cat %s/ws/%s/babysit.report" % (container_store(), self.ws), timeout=120).stdout
+        self.assertIn(ended, ("0", "ok", "gave-up"), "the babysitter ended '%s'; its report:\n%s" % (ended, report))
+        self.assertRegex(report, r"=== fix attempt 1 \(exit [0-9]+\)", report)
 
 
 @requires_container_place()
@@ -274,6 +329,36 @@ class TestAgentCommitWall(unittest.TestCase):
                 self.assertTrue(err, "git %s gave no error of its own:\n%s" % (verb, tail(said)))
                 self.assertIn(WALL_NOTE, said, "no wall note after git %s:\n%s" % (verb, tail(said)))
                 self.assertLess(err.start(), said.index(WALL_NOTE), "the wall's note came before git's own error:\n" + tail(said))
+
+
+@requires_container_place()
+class TestStopKeepVmThenStart(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ws = "wk-test-%s" % rand_suffix()
+        new_workspace(cls.ws)
+
+    @classmethod
+    def tearDownClass(cls):
+        remove_workspace(cls.ws)
+
+    def running(self):
+        return sorted(n for n, place, state in ls_rows(run("ls", timeout=300).stdout) if place == "container" and state == "running")
+
+    def test_stop_keep_vm_then_start_returns_every_container_to_running(self):
+        """`live start.roundtrip`: `wk stop --keep-vm` stops every container (and a running macOS guest) and leaves the
+        podman machine answering, and a bare `wk start` has each of those containers running again. The machine's own
+        stop and start are not round-tripped here: minutes, and the guests compete with it for memory."""
+        before = self.running()
+        self.assertIn(self.ws, before, "the fresh workspace is not listed running:\n" + run("ls", timeout=300).stdout)
+        cp = run("stop", "--keep-vm", timeout=900)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("leaving the machine running (--keep-vm)", cp.stdout)
+        self.assertIsNone(container_target_missing(), "the podman machine went down under --keep-vm:\n" + cp.stdout)
+        self.assertEqual([n for n in self.running() if n in before], [], "still running after 'wk stop --keep-vm':\n" + cp.stdout)
+        cp = run("start", timeout=900)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertEqual([n for n in before if n not in self.running()], [], "not running again after 'wk start':\n" + cp.stdout)
 
 
 if __name__ == "__main__":
