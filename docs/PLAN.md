@@ -252,19 +252,19 @@ is generated from the Owed table.
 | --- | --- | --- | --- | --- | --- | --- |
 | dispatcher: `dispatch`, `decl`, `act`, `completion`, `wk` | 1,230 | 800 | 773 | 1,734 | 900 | 932 |
 | `machine` | 773 | 400 | 491 | 554 | 500 | 1,786 |
-| `places` and the drivers | 1,816 | 950 | 1,786 | 1,135 | 1,000 | 4,020 |
+| `places` and the drivers | 1,816 | 950 | 1,786 | 1,135 | 1,000 | 4,017 |
 | record, job, lock, resources, clock | 1,174 | 550 | 1,242 | 1,500 | 700 | 2,700 |
 | workspace, build, sync, pr, git, presets, store, tools, agents | 2,350 | 1,150 | 3,010 | 6,001 | 1,800 | 5,748 |
-| wall, pushgate, secrets, key, credcheck, ai, sudo | 3,000 | 1,150 | 2,600 | 5,400 | 2,000 | 4,724 |
-| status, doctor, gc, ls, fleet, reach | 2,100 | 700 | 1,703 | 1,600 | 900 | 2,635 |
+| wall, pushgate, secrets, key, credcheck, ai, sudo | 3,000 | 1,150 | 2,579 | 5,400 | 2,000 | 4,684 |
+| status, doctor, gc, ls, fleet, reach | 2,100 | 700 | 1,705 | 1,600 | 900 | 2,708 |
 | bench, pgo, sched, scores | 7,300 | 1,300 | 6,319 | 9,500 | 2,200 | 6,790 |
 | boot | 1,433 | 650 | 1,261 | 3,000 | 1,100 | 2,243 |
-| sysimage, images, slot | 3,900 | 950 | 3,756 | 4,300 | 1,400 | 3,060 |
+| sysimage, images, slot | 3,900 | 950 | 3,759 | 4,300 | 1,400 | 3,060 |
 | guest, mac, quiet, session, screen, notify, tailnet, machine_cmd | 2,600 | 900 | 2,221 | 3,300 | 1,000 | 3,514 |
-| `cmd/*` | 2,763 | 500 | 951 | -- | -- | -- |
+| `cmd/*` | 2,763 | 500 | 928 | -- | -- | -- |
 | lint rules | -- | -- | -- | 1,300 | 700 | 2,070 |
 | live bodies | -- | -- | -- | 2,000 | 800 | 151 |
-| **sum** | **~30k + 2.8k cmd** | **10,000** | **26,113** | **~41k** | **15,000** | **42,178** |
+| **sum** | **~30k + 2.8k cmd** | **10,000** | **26,074** | **~41k** | **15,000** | **42,208** |
 
 ## Testing, concretely
 
