@@ -1,8 +1,5 @@
-"""What a shared build machine answers to remote/deps.sh and remote/probe.sh, and the distro family it resolves to."""
-import os
+"""What a shared build machine answers to remote/probe.sh, and the distro family remote/deps.sh resolves."""
 import sys
-import tempfile
-from pathlib import Path
 
 from tests.support import REPO, WkTest, bash
 
@@ -31,13 +28,7 @@ class TestTheList(WkTest):
 
 class TestTheProbeItself(WkTest):
     def test_it_runs_against_this_machine_and_answers_every_key(self):
-        home = Path(tempfile.mkdtemp(prefix="wk-test-probe-home-"))
-        self.addCleanup(bash, 'rm -rf "%s"' % home)
-        (home / ".wk-agent-token").write_text("sk-the-value\n")
-        cp = bash(f'cat "{DEPS}" "{PROBE}" | bash -s', env={"HOME": str(home)})
+        cp = bash(f'cat "{DEPS}" "{PROBE}" | bash -s')
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         keys = {l.split("=", 1)[0] for l in cp.stdout.splitlines() if "=" in l}
-        for want in ("host", "os", "family", "arch", "cores", "marker"):
-            self.assertIn(want, keys, cp.stdout)
-        self.assertIn("cred..wk-agent-token", keys, "a credential copy is reported by digest")
-        self.assertNotIn("sk-the-value", cp.stdout)
+        self.assertEqual(keys, {"host", "os", "family", "arch", "cores"}, cp.stdout)

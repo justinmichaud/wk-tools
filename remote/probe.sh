@@ -12,37 +12,3 @@ printf 'os=%s\n' "${_pretty:-unknown}"
 printf 'family=%s\n' "$(wk_remote_family "$_id" "$_like")"
 printf 'arch=%s\n' "$(uname -m)"
 printf 'cores=%s\n' "$(nproc 2>/dev/null || echo '?')"
-
-while read -r _tool _need _why; do
-    [ -n "$_tool" ] || continue
-    printf 'tool.%s=%s\n' "$_tool" "$(command -v "$_tool" 2>/dev/null || true)"
-done <<EOF
-$(wk_remote_deps)
-EOF
-
-for _v in $(wk_remote_build_env_vars); do   # a *login* shell, which is what a build runs under: an export from /etc/profile.d or the account's profile is invisible to `ssh host env`
-    _val=$(bash -lc "printf '%s' \"\${$_v:-}\"" 2>/dev/null || true)
-    [ -n "$_val" ] || continue
-    printf 'env.%s=%s\n' "$_v" "$_val"
-done
-
-if command -v git >/dev/null 2>&1; then
-    printf 'git.name=%s\n' "$(git config --get user.name 2>/dev/null || true)"
-    printf 'git.email=%s\n' "$(git config --get user.email 2>/dev/null || true)"
-    printf 'git.fsmonitor=%s\n' "$(git config --get core.fsmonitor 2>/dev/null || true)"
-    printf 'git.manyfiles=%s\n' "$(git config --get feature.manyFiles 2>/dev/null || true)"
-fi
-
-if [ -f "$HOME/.wk-remote" ]; then
-    printf 'marker=yes\n'
-else
-    printf 'marker=no\n'
-fi
-
-# The credential copies `wk machine setup` writes into the home, by digest, so the machine that stores them tells a stale copy from its own without a value crossing back.
-for _f in "$HOME"/.wk-*; do
-    [ -f "$_f" ] || continue
-    case "$_f" in */.wk-remote) continue ;; esac
-    _d=$(sha256sum < "$_f" 2>/dev/null | cut -c1-16)
-    printf 'cred.%s=%s\n' "${_f##*/}" "${_d:-?}"
-done

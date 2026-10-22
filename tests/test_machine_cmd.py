@@ -35,16 +35,6 @@ os=Debian GNU/Linux 13
 family=debian
 arch=x86_64
 cores=8
-tool.git=/usr/bin/git
-tool.cmake=/usr/bin/cmake
-tool.ninja=/usr/bin/ninja
-tool.clang=/usr/bin/clang
-tool.python3=/usr/bin/python3
-tool.ccache=/usr/bin/ccache
-tool.zsh=/usr/bin/zsh
-git.fsmonitor=true
-git.manyfiles=true
-marker=no
 """
 SECRETS = ("claude        claude-token        .wk-agent-token             CLAUDE_CODE_OAUTH_TOKEN  value  remote\n"
            "litellm       litellm-key         .wk-litellm-key             LITELLM_API_KEY          value  container,vm,remote\n"
