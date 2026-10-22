@@ -1,8 +1,6 @@
 """The base a workspace tracks: the upstream WebKit line a checkout's HEAD descends from (places.upstream_line(),
 run inside the workspace by `wk ls` and `wk status`), against real disposable repositories; an image
-workspace's base from the preset conf this checkout ships; and the SDK image's freshness as the renderer
-words it."""
-import json
+workspace's base from the preset conf this checkout ships."""
 import re
 import subprocess
 import sys
@@ -14,7 +12,7 @@ from tests.support import REPO, bash
 from tests.test_status import machine_rec, render
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places  # noqa: E402
+from wk import places, statusview  # noqa: E402
 
 CONFIGS = REPO / "image" / "presets"
 
@@ -93,41 +91,14 @@ class TestImageBase(unittest.TestCase):
         self.assertIsNone(places.image_base(str(REPO), "yocto-no-such-preset"))
 
 
-def sdk_rec(machine, **extra):
-    return dict(kind="sdk", machine=machine, tag="2.53-v9-abc0000", pulled="2026-08-01", **extra)
-
-
-class TestSdkImageRendering(unittest.TestCase):
-    """The renderer's wording for the three verdicts the collector's sdk_record decides (tests.test_status.TestSdkDecision)."""
-
-    def test_each_verdict_s_words(self):
-        for extra, words in (({"unknown": "registry did not answer within 1s"}, ["unknown -- registry did not answer within 1s"]),
-                             ({"upstream": "2.53-v9-abc0000"}, ["current", "2.53-v9-abc0000"]),
-                             ({"upstream": "2.53-v11-def0000"}, ["behind (2.53-v11-def0000)"])):
-            with self.subTest(extra=extra):
-                out = render([machine_rec("moose"), sdk_rec("moose", **extra)]).stdout
-                for w in words:
-                    self.assertIn(w, out)
-
-
-def workspace_rec(machine, name, **extra):
-    return dict(kind="workspace", machine=machine, method="container", name=name, **extra)
-
-
-class TestJsonCarriesBaseAndSdk(unittest.TestCase):
+class TestJsonCarriesTheBase(unittest.TestCase):
     """One merged document feeds every view: a field present in text is present in json."""
 
     def test_workspace_base_survives_into_json(self):
-        recs = [machine_rec("moose"), workspace_rec("moose", "stringimpl238", state="running", ws="present", branch="eng/stringimpl-2.38", base="?"),
-                {"kind": "exit", "code": 0}]
-        self.assertIn("stringimpl238", render(recs).stdout)
-        moose = next(m for m in json.loads(render(recs, "json").stdout)["machines"] if m["name"] == "moose")
-        self.assertEqual(moose["methods"][0]["workspaces"][0]["base"], "?")
-
-    def test_sdk_record_survives_into_json(self):
-        recs = [machine_rec("moose"), sdk_rec("moose", upstream="2.53-v11-def0000"), {"kind": "exit", "code": 0}]
-        moose = next(m for m in json.loads(render(recs, "json").stdout)["machines"] if m["name"] == "moose")
-        self.assertEqual((moose["sdk"][0]["tag"], moose["sdk"][0]["upstream"]), ("2.53-v9-abc0000", "2.53-v11-def0000"))
+        recs = [machine_rec("moose"), dict(kind="workspace", machine="moose", method="container", name="stringimpl238", state="running",
+                                           ws="present", branch="eng/stringimpl-2.38", base="?")]
+        self.assertIn("stringimpl238", render(recs))
+        self.assertEqual(statusview.merge(recs)["machines"][0]["methods"][0]["workspaces"][0]["base"], "?")
 
 
 if __name__ == "__main__":

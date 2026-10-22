@@ -1,12 +1,11 @@
-"""One board, one driver, across the fleet: the claim is a `holds: device:<machine>` field on the holder's own task
-record (lib/wk/record.py), asked of this store, the podman machine's and every peer's; `record.hold` is the barrier."""
+"""One board, one driver, across the fleet: the claim is a `device:<machine>` hold on the holder's own task record
+(lib/wk/record.py), asked of this store, the podman machine's and every peer's; `record.hold` is the barrier."""
 import contextlib
 import io
 import os
 import shutil
 import subprocess
 import sys
-import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -54,7 +53,7 @@ class ClaimTest(WkTest):
         if pid is None:
             pid = self.spawn()
         t = self.records().begin(kind, "here", name, "kill %d" % pid, "", ["one step"],
-                                 holds="device:%s" % machine, pid=pid)
+                                 holds=["device:%s" % machine], pid=pid)
         if ended is not None:
             t.end(ended)
         return t.path, pid
@@ -67,96 +66,33 @@ class ClaimTest(WkTest):
         return sorted(p.name for p in d.iterdir()) if d.is_dir() else []
 
 
-class TestTheRecordDeclaresWhatItHolds(ClaimTest):
-    def test_holds_is_a_field_of_the_record(self):
-        d, _ = self.holder()
-        self.assertEqual("device:rpi5", (d / "holds").read_text().strip())
-
-    def test_a_record_that_claims_nothing_has_no_holds_field(self):
-        t = self.records().begin("build", "here", "ws1", "wk build ws1 --kill", "/l", ["compile"])
-        self.assertFalse((t.path / "holds").exists())
-
-    def test_a_live_holder_is_one_row_naming_the_machine_and_its_kill(self):
-        _, pid = self.holder()
-        rows = self.rows()
-        self.assertEqual(1, len(rows), rows)
-        task_id, machine, what, kill = rows[0]
-        self.assertTrue(task_id.startswith("bench-rpi5-speedometer3-"), task_id)
-        self.assertEqual("bench rpi5/speedometer3", what)
-        self.assertEqual("kill %d" % pid, kill)
-        self.assertTrue(machine, "the row does not say which machine holds it")
-
-    def test_another_resource_is_not_this_one(self):
-        self.holder(machine="rpi4")
-        self.assertEqual([], self.rows())
-
-    def test_a_task_that_ended_holds_nothing(self):
-        self.holder(ended=0)
-        self.assertEqual([], self.rows())
-
-    def test_a_holder_whose_pid_is_gone_holds_nothing(self):
-        _, pid = self.holder()
-        os.kill(pid, 9)
-        for _ in range(50):
-            if not alive(pid):
-                break
-            time.sleep(0.1)
-        self.assertEqual([], self.rows())
-
-
 class TestTheFleetIsAsked(unittest.TestCase):
-    def setUp(self):
-        self.records = mock.Mock()
-        self.records.holders.return_value = []
+    def test_each_store_answers_its_rows_or_is_an_unknown_row(self):
+        from wk import fleet
+        answers = [fleet.Answer("moose", None, "answering", 0, "\t".join(ROW) + "\n", ""),
+                   fleet.Answer("here", None, "none", None, "", ""),
+                   fleet.Answer("far", None, "unreachable", None, "", "unreachable over ssh"),
+                   fleet.Answer("old", None, "answering", 2, "", "")]
+        asked = []
+        rows = record.fleet_holders("device:rpi5", lambda argv: asked.append(argv) or answers)
+        self.assertEqual(asked, [["status", "--holds", "device:rpi5"]])
+        self.assertEqual(rows, [ROW, ("?", "far", "unknown", "unreachable over ssh"),
+                                ("?", "old", "unknown", "its 'wk status --holds' exited 2")])
 
-    def test_this_machine_and_the_peers_are_both_the_answer(self):
-        here = ("id", "tolken", "bench rpi5/jetstream3", "kill 1")
-        self.records.holders.return_value = [here]
-        rows = record.fleet_holders("device:rpi5", self.records, [("moose", lambda r: ("\t".join(ROW) + "\r\n", ""))])
-        self.assertEqual([here, ROW], rows)
+    def stores(self, local):
+        moose, box, vm = FakeDriver("moose", out="\t".join(ROW)), FakeDriver("box"), FakeDriver("container", kind="container")
+        drivers = {"moose": moose, "box": box, "container": vm}
+        with mock.patch("wk.store.Store.is_local", return_value=local), mock.patch("wk.places.Registry") as reg:
+            reg.return_value.env = {}
+            reg.return_value.machines.return_value = ["moose", "box"]
+            reg.return_value.fleet.kind.side_effect = {"moose": "peer", "box": "build"}.get
+            reg.return_value.load.side_effect = drivers.get
+            record.fleet_stores(str(REPO), {}, Fake())(["status", "--holds", "device:rpi5"])
+        return [n for n, d in drivers.items() if d.asked]
 
-    def test_a_store_that_could_not_be_asked_is_a_row_of_its_own(self):
-        rows = record.fleet_holders("device:rpi5", self.records, [("moose", lambda r: (None, "unreachable\tover ssh"))])
-        self.assertEqual([("?", "moose", "unknown", "unreachable over ssh")], rows)
-
-    def stores(self, local, drivers, peers=("moose",)):
-        with mock.patch("wk.store.Store.is_local", return_value=local), \
-                mock.patch("wk.places.Registry") as reg:
-            reg.return_value.load.side_effect = lambda name: drivers[name]
-            reg.return_value.peer_workstations.return_value = list(peers)
-            return [(name, ask("device:rpi5")) for name, ask in record.fleet_stores(str(REPO), {}, Fake())]
-
-    def test_a_peer_is_asked_through_its_own_wk(self):
-        moose = FakeDriver("moose", out="\t".join(ROW))
-        self.assertEqual([("moose", ("\t".join(ROW), ""))], self.stores(True, {"moose": moose}))
-        self.assertEqual([("status", "--holds", "device:rpi5")], [args for args, _, _ in moose.asked])
-
-    def test_a_peer_that_cannot_be_reached_is_not_asked_and_says_why(self):
-        moose = FakeDriver("moose", side="unreachable", why="timed out")
-        [(_, (rows, why))] = self.stores(True, {"moose": moose})
-        self.assertIsNone(rows)
-        self.assertIn("unreachable over ssh", why)
-        self.assertEqual([], moose.asked)
-
-    def test_a_peer_whose_wk_does_not_read_the_flag_names_the_sync(self):
-        [(_, (rows, why))] = self.stores(True, {"moose": FakeDriver("moose", rc=1)})
-        self.assertIsNone(rows)
-        self.assertIn("wk sync --tools moose", why)
-
-    def test_a_store_of_this_machines_own_is_not_asked_twice(self):
-        self.assertEqual([], self.stores(True, {}, peers=()))
-
-    def test_a_store_elsewhere_is_asked_as_well(self):
-        vm = FakeDriver("container", out="\t".join(ROW))
-        [(name, (rows, _))] = self.stores(False, {"container": vm}, peers=())
-        self.assertIn("podman machine", name)
-        self.assertEqual("\t".join(ROW), rows)
-
-    def test_a_podman_machine_that_did_not_answer_says_so(self):
-        [(name, (rows, why))] = self.stores(False, {"container": FakeDriver("container", rc=1)}, peers=())
-        self.assertIn("podman machine", name)
-        self.assertIsNone(rows)
-        self.assertIn("wk start", why)
+    def test_the_peers_and_a_podman_machine_apart_from_this_store_are_the_stores(self):
+        self.assertEqual(self.stores(True), ["moose"])
+        self.assertEqual(self.stores(False), ["moose", "container"])
 
 
 class TestTheBarrier(unittest.TestCase):
@@ -186,7 +122,7 @@ class TestTheBarrier(unittest.TestCase):
 
     def test_a_free_board_is_taken_and_the_claim_is_the_holders_own_record(self):
         t, _ = self.hold()
-        self.assertEqual(("device:rpi5", "4321"), (t.field("holds"), t.field("pid")))
+        self.assertEqual((["device:rpi5"], "4321"), (t.holds(), t.field("pid")))
         self.assertEqual(["device:rpi5"], self.fleet_asked)
 
     def test_a_held_board_refuses_naming_the_machine_the_task_and_the_remedy(self):

@@ -6,6 +6,7 @@ import io
 import os
 import re
 import sys
+import types
 import unittest
 from unittest import mock
 
@@ -144,82 +145,45 @@ UPDATE_ON = (SETTLED
                       "setupassistant_seen_product=26.3"))
 
 
-def desktop(probe):
-    return guest.Desktop(str(REPO), BenchHere(), probe)
+def readings(probe):
+    """What a start and `wk doctor <guest>` make of a captured probe: this tree's libraries run for real."""
+    return guest.desktop_readings(str(REPO), BenchHere(), types.SimpleNamespace(run=lambda argv, input=None: Result(0, probe)))
 
 
-def findings(probe):
-    return [tuple(l.split("\t")) for l in desktop(probe).findings().splitlines()]
+def rows(probe):
+    return doctor.desktop_rows(readings(probe), "demo")
 
 
-# (probe, state, what a finding says): each must be found.
-FINDINGS = (
-    [(AS_FOUND, "wrong", w) for w in ("screen saver", "Setup Assistant will put a modal pane", "nothing wk runs put it there")]
-    + [(UPDATE_ON, "wrong", w) for w in ("install themselves", "download themselves", "what is new in macOS")]
-    + [(LOGIN_WINDOW, "wrong", "nobody is logged in")]
-)
+class TestTheDesktopRows(unittest.TestCase):
+    def test_a_settled_guest_misses_nothing(self):
+        self.assertEqual([], [r for r in rows(SETTLED) if r[0] == doctor.MISS], rows(SETTLED))
 
-
-class TestTheFindings(unittest.TestCase):
-    def test_a_settled_guest_is_all_ok(self):
-        self.assertEqual({f[0] for f in findings(SETTLED)} - {"note"}, {"ok"}, findings(SETTLED))
-
-    def test_each_fault_is_reported(self):
-        for probe, state, what in FINDINGS:
+    def test_each_fault_is_a_miss(self):
+        for probe, what in ([(AS_FOUND, w) for w in ("screen saver", "Setup Assistant will put a modal pane", "nothing wk runs put it there")]
+                            + [(UPDATE_ON, w) for w in ("install themselves", "download themselves", "what is new in macOS")]
+                            + [(LOGIN_WINDOW, "nobody is logged in")]):
             with self.subTest(what):
-                self.assertTrue([x for x in findings(probe) if x[0] == state and what in x[1]], findings(probe))
-        self.assertTrue(all(REBUILD in x[2] for x in findings(UPDATE_ON) if "install themselves" in x[1]))
+                self.assertTrue([r for r in rows(probe) if r[0] == doctor.MISS and what in r[1]], rows(probe))
 
-    def test_a_guest_that_says_nothing_about_software_update_is_not_called_ok(self):
-        f = [x for x in findings(AS_FOUND) if "Software Update" in x[1]]
-        self.assertTrue(f)
-        self.assertNotIn("ok", [x[0] for x in f], f)
-        self.assertTrue(any("wk start" in x[2] for x in f), f)
-
-    def test_the_check_flag_no_guest_can_set_is_not_judged(self):
-        for probe in (SETTLED, AS_FOUND, UPDATE_ON):
-            self.assertFalse([x for x in findings(probe) if "scheduled update check" in x[1]])
-
-    def test_a_daemon_is_not_a_covered_window(self):
-        f = findings(SETTLED.replace("frontapp=com.apple.Finder", "frontapp=com.apple.Terminal"))
-        self.assertEqual([], [x for x in f if x[0] == "wrong"], f)
-
-    def test_a_pane_over_the_window_is_named_once_with_its_size_and_the_furniture_is_not(self):
-        named = [x for x in findings(AS_FOUND) if "nothing wk runs put it there" in x[1]]
-        self.assertTrue(named)
-        self.assertIn("Setup Assistant:0:800x600", named[0][1])
-        self.assertNotIn("Notification Center", named[0][1])
-        self.assertIn(guest.BASE_BUILD, named[0][2], "a pane on screen is cleared on the base, not by a restart")
-        self.assertNotIn("wk stop", named[0][2])
-
-    def test_a_screen_nobody_could_ask_about_is_not_reported_as_clean(self):
+    def test_what_the_guest_did_not_say_is_unknown_not_ok(self):
+        self.assertEqual([doctor.UNK], [r[0] for r in rows(AS_FOUND) if r[1].startswith("Software Update")][:1])
         blind = "\n".join("windows=?" if l.startswith("windows=") else l for l in SETTLED.splitlines())
-        self.assertEqual(["note"], [x[0] for x in findings(blind) if "window server" in x[1]])
+        self.assertEqual([doctor.UNK], [r[0] for r in rows(blind) if "window server" in r[1]])
+
+    def test_a_pane_over_the_window_is_named_with_its_size_and_cleared_on_the_base(self):
+        (named,) = [r for r in rows(AS_FOUND) if "nothing wk runs put it there" in r[1]]
+        self.assertIn("Setup Assistant:0:800x600", named[1])
+        self.assertNotIn("Notification Center", named[1])
+        self.assertIn(guest.BASE_BUILD, named[2])
+
+    def test_only_what_no_clone_can_clear_blocks_a_start(self):
+        self.assertEqual([], guest.blockers(readings(SETTLED)))
+        self.assertEqual([], guest.blockers(readings(SETTLED.replace("pyobjc=" + PYOBJC_VERSION, "pyobjc=9.0"))))
+        self.assertEqual(1, len(guest.blockers(readings(LOGIN_WINDOW))))
 
     def test_the_probe_asks_only_about_keys_the_settle_writes(self):
         asked = set(re.findall(r"DidSee[A-Za-z0-9]+", PROBE.read_text()))
         self.assertEqual(set(), asked - set(re.findall(r"DidSee[A-Za-z0-9]+", DESKTOP.read_text())))
-
-    def test_the_login_names_the_account_and_not_its_password(self):
-        note = [x for x in findings(SETTLED) if "logs in as" in x[1]]
-        self.assertEqual("note", note[0][0])
-        self.assertNotIn("admin / ", note[0][1])
-        self.assertIn("password", note[0][2])
-
-    def test_every_finding_is_one_line_of_three_fields(self):
-        for probe in (SETTLED, AS_FOUND, UPDATE_ON, LOGIN_WINDOW):
-            for line in desktop(probe).findings().splitlines():
-                self.assertEqual(3, len(line.split("\t")), line)
-        for f in load_findings(_load_sample()) + load_findings(IDLE_SAMPLE):
-            self.assertEqual(3, len(f), f)
-
-
-class TestWhatIsInFrontOfTheDesktop(unittest.TestCase):
-    def test_a_settled_guest_has_nothing_in_front(self):
-        self.assertEqual([], desktop(SETTLED).blockers())
-
-    def test_the_wrong_pyobjc_does_not_block(self):
-        self.assertEqual([], desktop(SETTLED.replace("pyobjc=" + PYOBJC_VERSION, "pyobjc=9.0")).blockers())
 
 
 class TestTheScriptsAreSafeOnALiveGuest(unittest.TestCase):
@@ -240,7 +204,8 @@ class TestTheScriptsAreSafeOnALiveGuest(unittest.TestCase):
         table = (REPO / "bench" / "quiet" / "macos.tsv").read_text()
         keys = set(re.findall(r"printf '([a-z_]+)=", PROBE.read_text() + (REPO / "bench" / "mac-window-probe.sh").read_text()))
         keys |= set(re.findall(r"^[a-z]+\t([a-z_]+)\t", table, re.M)) | set(re.findall(r"printf '([a-z_]+)=", quiet))
-        read = set(re.findall(r'v\("([a-z_]+)"\)', inspect.getsource(guest.Desktop)))
+        read = set(re.findall(r'v\("([a-z_]+)"', inspect.getsource(doctor.desktop_rows))) | {row[0] for row in doctor.DESKTOP}
+        read -= {"pin", "uninvited", "quiet"}   # desktop_readings' own, not the probe's
         self.assertTrue(read)
         self.assertEqual(set(), read - keys)
 
@@ -258,27 +223,18 @@ def _load_sample(shells=40, free_pct=6, swap_used="4096.00M"):
 IDLE_SAMPLE = _load_sample(shells=2, free_pct=71, swap_used="0.00M")
 
 
-def load_findings(probe, env=None):
-    return [tuple(l.split("\t")) for l in guest.load_findings(probe, env or {}).splitlines()]
-
-
 class TestWhatIsResidentInThere(unittest.TestCase):
-    def test_an_accumulation_low_memory_and_swap_are_reported_with_the_culprits_and_the_remedy(self):
-        f = load_findings(_load_sample())
-        for state, what, remedy in (("wrong", "40 shells", "wk stop"), ("wrong", "editor remote server", ""),
-                                    ("note", "editor remote server", "outlives the editor window"), ("wrong", "6%", ""),
-                                    ("wrong", "jsc", ""), ("note", "4096 MB of swap", "")):
+    def test_an_accumulation_low_memory_and_swap_are_reported_with_the_culprits(self):
+        f = doctor.load_rows(_load_sample(), "demo")
+        for state, what in ((doctor.MISS, "40 shells"), (doctor.MISS, "editor remote server"), (doctor.MISS, "6%"), (doctor.MISS, "jsc"),
+                            (doctor.NOTE, "4096 MB of swap")):
             with self.subTest(what):
-                self.assertTrue([x for x in f if x[0] == state and what in x[1] and remedy in x[2]], f)
+                self.assertTrue([x for x in f if x[0] == state and what in x[1]], f)
 
     def test_an_idle_guest_is_all_ok(self):
-        f = load_findings(IDLE_SAMPLE)
-        self.assertEqual({x[0] for x in f} - {"note"}, {"ok"}, f)
+        f = doctor.load_rows(IDLE_SAMPLE, "demo")
+        self.assertEqual({x[0] for x in f}, {doctor.OK}, f)
         self.assertTrue(any("2 shells resident" in x[1] for x in f))
-
-    def test_the_thresholds_are_the_documented_overrides(self):
-        f = load_findings(_load_sample(), {"WK_VM_SHELLS_WARN": "100", "WK_VM_MEM_FREE_WARN_PCT": "1", "WK_VM_SWAP_WARN_MB": "100000"})
-        self.assertFalse([x for x in f if "shells are resident" in x[1] or "macOS calls that pressure" in x[1] or "swap" in x[1]], f)
 
     def test_nothing_wk_runs_in_a_guest_leaves_a_shell_behind(self):
         with mock.patch.object(places.Vm, "tart", lambda s: "/t/tart"):
@@ -376,7 +332,7 @@ class TestTheDoctorOfAGuest(ReportTest):
         here = GuestAt(desktop_sample, load)
         here.answer(["/t/tart", "list"], out='[{"Name": "wk-demo", "Source": "local", "State": "running"}]')
         here.answer(["/t/tart", "ip"], out="10.0.0.2\n")
-        return guest.check_rows(self.vm(here), "demo")
+        return doctor.guest_rows(self.vm(here), "demo")
 
     def test_a_good_guest_has_all_three_reports(self):
         text = "\n".join(r[1] for r in self.rows(SETTLED, IDLE_SAMPLE))
@@ -403,11 +359,9 @@ class TestTheLiveDesktop(unittest.TestCase):
         up = [n for n, state in vm.list() if state == "running"] if vm.tart() else []
         if not up:
             self.skipTest("no macOS guest is running on this host")
-        probe = guest.desktop_probe(vm.root, vm.machine, vm.guest(up[0]))
-        self.assertTrue(probe, "the guest did not answer the desktop probe")
-        d = guest.Desktop(vm.root, vm.machine, probe)
-        self.assertEqual([], d.blockers())
-        self.assertEqual("off", d.v("screenlock"))
+        rd = guest.desktop_readings(vm.root, vm.machine, vm.guest(up[0]))
+        self.assertEqual([], guest.blockers(rd))
+        self.assertEqual("off", rd["screenlock"])
 
 
 if __name__ == "__main__":

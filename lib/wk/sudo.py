@@ -4,12 +4,13 @@ import os
 import re
 import sys
 
-from wk import act, priv, record, status
+from wk import act, fleet, priv, record
 from wk.act import die, log
 from wk.store import ws_name
 
 DROPIN_FMT = "/etc/sudoers.d/zz-%s-passwd"
-DEFAULT_TIMEOUT_MIN = "0.5"
+TIMEOUT_MIN = "0.5"   # sudo's own default is 5 minutes, long enough for an agent to ride a person's password
+STATUS = ["key", "sudo", "status", "--quiet"]
 QUIESCE_PRIV, CARD_PRIV, BOOT_PRIV = PRIV_HELPERS = tuple(priv.path(n) for n, _, _ in priv.HELPERS)
 
 _RULE_LINE = re.compile(r'^\s*\(.*\)')
@@ -59,7 +60,7 @@ class Sudo:
     def __init__(self, machine, env=None, linux=None):
         self.machine = machine
         self.env = os.environ if env is None else env
-        self.timeout_min = self.env.get("WK_SUDO_TIMEOUT_MIN") or DEFAULT_TIMEOUT_MIN
+        self.timeout_min = TIMEOUT_MIN
         self.timeout_desc = "%s seconds" % seconds(self.timeout_min)
         self._linux = linux
 
@@ -170,19 +171,21 @@ class Sudo:
         return 0
 
 
-def machine_answers(driver, name):
-    """One probe: whether `place` answers at all, printing the fan-out row when it does not."""
-    side, why = driver.probe()
-    if side == "answering":
-        return True
-    sys.stdout.write("%-22s %s\n" % (name, status.far_side_reason(driver, side, why)))
-    return False
-
-
 def wk_tty(driver, *args, env=None):
     """With a terminal, for far-side commands that prompt a human -- 'wk key sudo setup' over ssh -t."""
     env = os.environ if env is None else env
     return driver.machine.run_tty(["sh", "-c", driver.wk_cmd(list(args), env)]).rc
+
+
+def status_row(a):
+    """One machine's `wk key sudo status` answer as its fan-out row."""
+    if a.side != "answering":
+        sys.stdout.write("%-22s %s\n" % (a.name, a.why or fleet.reason(a.driver, a.side)))
+        return 1
+    sys.stdout.write("%-22s %s\n" % (a.name, a.out.strip()))
+    if a.rc != 0:
+        log("  fix: wk key sudo setup --on %s" % a.name)
+    return a.rc
 
 
 def on_machine(reg, action, name, env):
@@ -190,15 +193,13 @@ def on_machine(reg, action, name, env):
         driver = reg.load(name)
     except LookupError as e:
         die(str(e))
-    if not machine_answers(driver, name):
+    if action != "setup":
+        return status_row(fleet.ask(driver, STATUS, env))
+    side, why = driver.probe()
+    if side != "answering":
+        sys.stdout.write("%-22s %s\n" % (name, fleet.reason(driver, side, why)))
         return 1
-    if action == "setup":
-        return wk_tty(driver, "key", "sudo", "setup", env=env)
-    rc, out = driver.wk("key", "sudo", "status", "--quiet", env=env)
-    sys.stdout.write("%-22s %s\n" % (name, out.strip()))
-    if rc != 0:
-        log("  fix: wk key sudo setup --on %s" % name)
-    return rc
+    return wk_tty(driver, "key", "sudo", "setup", env=env)
 
 
 def all_machines(reg, action, env):
@@ -208,10 +209,9 @@ def all_machines(reg, action, env):
     sys.stdout.write("%-22s %s\n" % (record.host_name(reg.machine), v))
     if rc != 0:
         log("  fix: wk key sudo setup")
-    worst = rc
-    for name in reg.machines():
-        worst = max(worst, on_machine(reg, action, name, env))
-    return worst
+    if action == "setup":
+        return max([rc] + [on_machine(reg, action, name, env) for name in reg.machines()])
+    return max([rc] + [status_row(a) for a in fleet.each(reg, STATUS, reg.machines(), env)])
 
 
 def status_here(sudo, env):

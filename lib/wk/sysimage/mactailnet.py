@@ -16,9 +16,7 @@ from wk.sysimage import task
 
 # No darwin tailscaled is published, and the packaged clients tunnel through NetworkExtension, whose consent panel
 # only a person answers. The tailscale version and its source checksum are REL's.
-GO = {"version": "1.26.8",
-      "darwin_arm64": "a012b25b571bd0138a03dcd25375ceba866fe5ca822f426d2c66a4de56fd3f4b",
-      "linux_arm64": "211ffced9dcb9633a55eac6364816ec0ddd951389a740e88fa8b3337971bdda0"}
+GO = {"version": "1.26.8", "darwin_arm64": "a012b25b571bd0138a03dcd25375ceba866fe5ca822f426d2c66a4de56fd3f4b"}
 REL = "image/yocto/meta-wk-tailnet/recipes-network/tailscale/tailscale-release.inc"
 MACHO_ARM64 = "cf fa ed fe 0c 00 00 01"   # MH_MAGIC_64 and CPU_TYPE_ARM64, little-endian
 

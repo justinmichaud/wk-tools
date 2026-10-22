@@ -167,16 +167,13 @@ class TestTheGuestOverrides(unittest.TestCase):
     def test_the_limits_refuse_and_the_share_crosses_the_memory_one(self):
         self.assertTrue(self.admitted())
         self.assertFalse(self.admitted(WK_VM_MAX="0"))
-        self.assertFalse(self.admitted(WK_HOST_FREE_MIN_GB="200"))
-        self.assertTrue(self.admitted(WK_HOST_FREE_MIN_GB="1", WK_HOST_FREE_WARN_GB="2"))
         self.assertFalse(self.admitted(mine=99999999))
         self.assertTrue(self.admitted(mine=99999999, WK_VM_SHARE="1"))
 
 
 class TestEachOverrideReachesWhatItNames(WkTest):
     def test_the_plain_readers(self):
-        from wk import guest, status
-        self.assertEqual((status.fleet_timeout({}), status.fleet_timeout({"WK_FLEET_TIMEOUT": "9"})), (4, 9))
+        from wk import guest
         self.assertEqual(guest.password({"WK_VM_PASSWORD": "pw"}), "pw")
         t = places.Registry(REPO, env={"HOME": "/h", "WK_SDK": "/my/sdk"}, machine=Fake()).load("container")
         self.assertEqual(t.sdk(), "/my/sdk")
@@ -188,27 +185,11 @@ class TestEachOverrideReachesWhatItNames(WkTest):
             survey.identify("10.0.0.9", "")
         self.assertEqual(asked[-1], "benchy@10.0.0.9")
 
-class TestStatusOverrides(WkTest):
-    def test_wk_wait_timeout_is_the_waits_default_timeout(self):
-        from tests.support import load_cmd
-        cmd = load_cmd("status")
-        seen = []
-
-        def wait(probe, timeout, interval, *rest):
-            seen.append((timeout, interval))
-            raise SystemExit(0)
-        with mock.patch.object(cmd, "wait_until_idle", wait), \
-                mock.patch.dict(os.environ, {"WK_WAIT_TIMEOUT": "7", "WK_WAIT_INTERVAL": "2"}), self.assertRaises(SystemExit):
-            cmd.main(["--wait"])
-        self.assertEqual(seen, [(7, 2.0)])
-
-
 class TestOtherOverrides(WkTest):
     def test_sudo_and_sync(self):
         from wk import sync
         from wk.sudo import Sudo
-        self.assertEqual((Sudo(None, {}).timeout_desc, Sudo(None, {"WK_SUDO_TIMEOUT_MIN": "2"}).timeout_desc),
-                         ("30 seconds", "120 seconds"))
+        self.assertEqual(Sudo(None, {}).timeout_desc, "30 seconds")
         self.assertEqual((sync.publish_branch({}), sync.publish_branch({"WK_BRANCH": "wpe-2.44"})), ("origin/main", "wpe-2.44"))
 
     def session_user(self, conf):

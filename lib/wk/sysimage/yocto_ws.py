@@ -1,6 +1,4 @@
-"""The yocto image build as it runs inside a workspace (lib/wk/sysimage/yocto.py is the host half), around
-Tools/Scripts/cross-toolchain-helper, which stays the upstream interface for the build itself. Run as
-`python3 /opt/wk-tools/lib/wk/sysimage/yocto_ws.py`, under task.stage_main, which takes the wall off PATH."""
+"""The yocto build inside its workspace (yocto.py is the host half), around upstream's Tools/Scripts/cross-toolchain-helper."""
 
 import argparse
 import configparser
@@ -13,14 +11,17 @@ import sys
 if __name__ == "__main__":
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from wk import slot as wkslot  # noqa: E402
+from wk import images, pgo, slot as wkslot  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import here, isolated_module  # noqa: E402
 from wk.sysimage import TOOLS, WsBuild, fail  # noqa: E402
 
 STAGES = ("layers", "fetch", "image", "toolchain", "webkit", "pgo-mix")
 DEFAULT_IMAGE = "webkit-dev-ci-tools"
-WEBKIT_MB_PER_JOB = 2560
+WEBKIT_MB_PER_JOB = 2560   # one cross WebKit compile's working set, sized to WebCore's unified sources
+CROSS = {"wpe-cross": "the release branch's own flags and nothing else",
+         pgo.COLLECT: "clang, thin LTO and LLVM profile generation -- the collection build, which nothing measures",
+         pgo.USE: "clang, full LTO and a collected profile -- the build every number from a 2.52+ board is taken from"}
 # The wkdev SDK's dev environment hands host headers and libraries to a cross build and stops bitbake's sanity checker.
 UNSET = ("CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "OBJCPLUS_INCLUDE_PATH",
          "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR", "LD_LIBRARY_PATH", "LD_PRELOAD")
@@ -34,24 +35,39 @@ HOST_MODULES = (("git", "python3-git"), ("jinja2", "python3-jinja2"), ("pexpect"
 BIG_RECIPES = ("clang", "clang-native", "clang-cross-arm", "clang-cross-aarch64", "llvm", "llvm-native", "rust-llvm",
                "rust-llvm-native", "mozjs-115", "boost", "gdb", "linux-raspberrypi")
 LAYERS = ("meta-wk", "meta-wk-tailnet", "meta-wk-wifi", "meta-wk-rescue")
-MARKER = "# --- wk (image/yocto-build.sh) ---"
-BB_MARKER = "# --- wk layers (image/yocto-build.sh) ---"
+MARKER = "# --- wk (lib/wk/sysimage/yocto_ws.py) ---"
+BB_MARKER = "# --- wk layers (lib/wk/sysimage/yocto_ws.py) ---"
 # wpe-2.46 defaults both on and CMake refuses the pair; run-benchmark's WPE driver wants the platform API.
 WEBKIT_CMAKE = "-DENABLE_WPE_PLATFORM=ON -DENABLE_WPE_1_1_API=OFF"
+# Every image: rm_work, no Chromium (half the build; no bench runs it), and what joins a board to the fleet and writes its media.
+IMAGE_LINES = ['INHERIT += "rm_work"', 'IMAGE_INSTALL:remove = "chromium-ozone-wayland"',
+               'IMAGE_INSTALL:append = " tailscale wk-wifi-join wk-card-priv"']
+
+
+def cross_preset(name, profile):
+    """(cc, cxx, cmake). The PGO pair share a build directory, so each states both options (WEBKIT_OPTION_CONFLICT)."""
+    if name not in CROSS:
+        fail("no such cross preset '%s'. They are:\n%s" % (name, "".join("      %-22s %s\n" % kv for kv in CROSS.items())))
+    if name != pgo.USE and profile:
+        fail("--pgo-profile names a profile to build against, and only '%s' does" % pgo.USE)
+    if name == "wpe-cross":
+        return "", "", ""
+    if name == pgo.COLLECT:
+        return "clang", "clang++", ("-DLTO_MODE=thin -DENABLE_LLVM_PROFILE_GENERATION=ON -DUSE_PGO_PROFILE=OFF -DPGO_PROFILE_DIR=%s"
+                                    % pgo.BOARD_DIR)
+    if not profile:
+        fail("%s needs --pgo-profile, the merged .profdata cmake reads (PGO_PROFILE_PATH)" % pgo.USE)
+    return "clang", "clang++", "-DLTO_MODE=full -DENABLE_LLVM_PROFILE_GENERATION=OFF -DUSE_PGO_PROFILE=ON -DPGO_PROFILE_PATH=" + profile
 
 
 def parse(argv):
     ap = argparse.ArgumentParser(prog="yocto_ws.py")
-    for flag in ("--image", "--jobs", "--mem-budget", "--commit", "--slot", "--image-preset", "--sstate-ns",
-                 "--port-target-from", "--port-machine", "--board", "--multilib", "--multilib-tune", "--cross-cc",
-                 "--cross-cxx", "--cross-cmake", "--pgo-dir", "--pgo-lib", "--webkit-jobs"):
-        ap.add_argument(flag, default="")
-    ap.add_argument("--target", required=True)
+    ap.add_argument("preset")
     ap.add_argument("--stage", default="image", choices=STAGES)
-    ap.add_argument("--src", default="/src/WebKit")
+    for flag in ("--jobs", "--mem-budget", "--webkit-jobs", "--sstate-ns", "--commit", "--slot", "--pgo-profile"):
+        ap.add_argument(flag, default="")
     ap.add_argument("--cross-preset", default="wpe-cross")
-    for flag, default in (("--rm-work", "1"), ("--chromium", "0"), ("--local-layer", "1"), ("--tailnet", "1")):
-        ap.add_argument(flag, default=default, choices=("0", "1"))
+    ap.add_argument("--src", default="/src/WebKit")
     return ap.parse_args(argv)
 
 
@@ -82,31 +98,22 @@ def strip_block(text, marker):
     return "\n".join(lines[:lines.index(marker)]) if marker in lines else text
 
 
-def local_conf(a, env, jobs, board_append):
+def local_conf(p, env, jobs, board_append):
     bb, par = threads(jobs)
-    out = ["", MARKER, "# Written by lib/wk/sysimage/yocto_ws.py; the workdir is wiped whenever the target config changes.", "",
-           'DL_DIR = "%s"' % env["DL_DIR"], 'SSTATE_DIR = "%s"' % env["SSTATE_DIR"], ""]
-    if a.multilib:
-        out += ["require conf/multilib.conf", 'MULTILIBS = "multilib:%s"' % a.multilib,
-                'DEFAULTTUNE:virtclass-multilib-%s = "%s"' % (a.multilib, a.multilib_tune), ""]
-    out += ['BB_NUMBER_THREADS = "%d"' % bb, 'PARALLEL_MAKE = "-j %d"' % par, ""]
+    out = ["", MARKER, 'DL_DIR = "%s"' % env["DL_DIR"], 'SSTATE_DIR = "%s"' % env["SSTATE_DIR"]]
+    if p["YOC_MULTILIB"]:
+        out += ["require conf/multilib.conf", 'MULTILIBS = "multilib:%s"' % p["YOC_MULTILIB"],
+                'DEFAULTTUNE:virtclass-multilib-%s = "%s"' % (p["YOC_MULTILIB"], p["YOC_MULTILIB_TUNE"])]
+    out += ['BB_NUMBER_THREADS = "%d"' % bb, 'PARALLEL_MAKE = "-j %d"' % par]
     out += ['PARALLEL_MAKE:pn-%s = "-j %d"' % (r, jobs) for r in BIG_RECIPES]
-    out += ["", 'BB_PRESSURE_MAX_MEMORY = "10000"', ""]
     # Not PREMIRRORONLY: meta-webkit, meta-clang and meta-raspberrypi fetch from github, which the mirror lacks.
-    out += ['INHERIT += "own-mirrors"', 'SOURCE_MIRROR_URL = "https://downloads.yoctoproject.org/mirror/sources/"',
-            'BB_GENERATE_MIRROR_TARBALLS = "1"', ""]
-    out += ['BB_DISKMON_DIRS = "\\', "    STOPTASKS,${TMPDIR},10G,100K \\", "    STOPTASKS,${DL_DIR},5G,100K \\",
-            "    STOPTASKS,${SSTATE_DIR},5G,100K \\", "    HALT,${TMPDIR},5G,1K \\", "    HALT,${DL_DIR},2G,1K \\",
-            '    HALT,${SSTATE_DIR},2G,1K"', ""]
-    out += (["# tailnet: off. This image joins nothing and is reachable only over whatever LAN it lands on.", ""]
-            if a.tailnet == "0" else ['IMAGE_INSTALL:append = " tailscale"', ""])
-    out += ['IMAGE_INSTALL:append = " wk-wifi-join"', "", 'IMAGE_INSTALL:append = " wk-card-priv"', ""]
-    if a.chromium == "0":
-        out += ["# Chromium dropped: about half the build. --chromium puts it back.", 'IMAGE_INSTALL:remove = "chromium-ozone-wayland"', ""]
-    if a.rm_work == "1":
-        out += ['INHERIT += "rm_work"', 'RM_WORK_EXCLUDE += "%s"' % (a.image or DEFAULT_IMAGE), ""]
+    out += ['BB_PRESSURE_MAX_MEMORY = "10000"', 'INHERIT += "own-mirrors"',
+            'SOURCE_MIRROR_URL = "https://downloads.yoctoproject.org/mirror/sources/"', 'BB_GENERATE_MIRROR_TARBALLS = "1"',
+            'BB_DISKMON_DIRS = "STOPTASKS,${TMPDIR},10G,100K STOPTASKS,${DL_DIR},5G,100K STOPTASKS,${SSTATE_DIR},5G,100K '
+            'HALT,${TMPDIR},5G,1K HALT,${DL_DIR},2G,1K HALT,${SSTATE_DIR},2G,1K"']
+    out += IMAGE_LINES + ['RM_WORK_EXCLUDE += "%s"' % (p["YOC_IMAGE"] or DEFAULT_IMAGE)]
     if board_append is not None:
-        out += ["# --- image/boards/%s/local.conf.append ---" % a.board, board_append.rstrip("\n")]
+        out += ["# --- image/boards/%s/local.conf.append ---" % p["IMG_MACHINE"], board_append.rstrip("\n")]
     return "\n".join(out) + "\n"
 
 
@@ -147,8 +154,9 @@ class Build(WsBuild):
 
     def __init__(self, a, machine, env, clock, tools=TOOLS):
         super().__init__(a, machine, env, clock, tools)
-        self.src = a.src
-        self.workdir = os.path.join(a.src, "WebKitBuild", "CrossToolChains", a.target)
+        self.p = images.load(a.preset, {})   # this module's own tree, the workspace's wk-tools
+        self.target, self.src = self.p["YOC_TARGET"], a.src
+        self.workdir = os.path.join(a.src, "WebKitBuild", "CrossToolChains", self.target)
         self.conf = os.path.join(self.workdir, "build", "conf", "local.conf")
         self.helper = os.path.join(a.src, "Tools", "Scripts", "cross-toolchain-helper")
         self.image_dir = os.path.join(self.workdir, "build", "image")
@@ -179,7 +187,7 @@ class Build(WsBuild):
         self.git(d, "update-index", "--really-refresh")
 
     def checkout_slot_commit(self):
-        """Forced and cleaned: a killed webkit stage leaves the checkout mid-checkout. `-fd`, never `-fdx`: WebKitBuild holds the image workspace's slots."""
+        """Forced and cleaned: a killed webkit stage leaves the checkout mid-checkout. `-fd`, never `-fdx`: WebKitBuild holds the slots."""
         c = self.a.commit
         self.fetch_commit(self.src, c)
         dirty = len([l for l in self.m.run(["git", "-C", self.src, "status", "--porcelain"]).out.splitlines() if l.strip()])
@@ -193,12 +201,12 @@ class Build(WsBuild):
         self.say_source(self.src)
 
     def port(self):
-        a, ydir = self.a, os.path.join(self.src, "Tools", "yocto")
-        if not a.port_target_from:
+        frm, machine, ydir = self.p["YOC_PORT_TARGET_FROM"], self.p["YOC_MACHINE"], os.path.join(self.src, "Tools", "yocto")
+        if not frm:
             return
-        if not a.port_machine:
-            fail("this image preset names a target to derive [%s] from but no YOC_MACHINE for it to select" % a.target)
-        self.say("porting       [%s] from [%s] (MACHINE=%s) -- this branch has no such section" % (a.target, a.port_target_from, a.port_machine))
+        if not machine:
+            fail("this image preset names a target to derive [%s] from but no YOC_MACHINE for it to select" % self.target)
+        self.say("porting       [%s] from [%s] (MACHINE=%s) -- this branch has no such section" % (self.target, frm, machine))
 
         def local(rel):
             p = os.path.join(ydir, rel)
@@ -207,59 +215,46 @@ class Build(WsBuild):
         conf = os.path.join(ydir, "targets.conf")
         if not self.m.exists(conf):
             fail("no targets.conf in %s" % ydir)
-        got = port_target(self.m.read(conf), local, a.target, a.port_target_from, a.port_machine, a.image)
+        got = port_target(self.m.read(conf), local, self.target, frm, machine, self.p["YOC_IMAGE"])
         if got is None:
-            self.say("targets.conf already has [%s]; nothing to port" % a.target)
+            self.say("targets.conf already has [%s]; nothing to port" % self.target)
             return
-        text, locals_ = got
-        for rel, body in locals_.items():
+        for rel, body in got[1].items():
             self.m.write(os.path.join(ydir, rel), body)
-        self.m.write(conf, text)
+        self.m.write(conf, got[0])
 
     def check_available(self):
         r = self.m.run([self.helper, "--print-available-targets", "--log-level", "quiet"])
-        if self.a.target not in r.out.split():
+        if self.target not in r.out.split():
             fail("'%s' is not a cross-target in this checkout.\n    Available here:\n%s"
-                 % (self.a.target, "".join("      %s\n" % t for t in r.out.split())))
+                 % (self.target, "".join("      %s\n" % t for t in r.out.split())))
 
     def init_workdir(self):
         if self.m.exists(os.path.join(self.workdir, ".target-info-version")) and self.m.exists(self.conf):
             self.say("layers already synced at %s" % self.workdir)
         else:
             self.say("syncing Yocto layers (repo sync -- this is the network-bound part)")
-            if not self.m.act_run([self.helper, "--cross-target=" + self.a.target, "--bitbake-dev-shell"], input="").ok:
+            if not self.m.act_run([self.helper, "--cross-target=" + self.target, "--bitbake-dev-shell"], input="").ok:
                 fail("the layer sync failed, almost always at the proxy allowlist (container/proxy/wk-proxy.py),\n"
                      "    whose log names what it refused")
             if not self.m.exists(self.conf):
                 fail("the layer sync reported success but wrote no %s" % self.conf)
         self.refresh_git_index(self.workdir)
 
-    def configure_local_conf(self):
-        if not self.m.exists(self.conf):
-            fail("no %s -- the layer sync did not run" % self.conf)
-        text = self.m.read(self.conf)
-        self.say("refreshing the wk additions in local.conf" if MARKER in text.split("\n") else "appending the wk additions to local.conf")
-        board = os.path.join(self.tools, "image", "boards", self.a.board, "local.conf.append") if self.a.board else ""
-        append = self.m.read(board) if board and self.m.exists(board) else None
-        self.m.write(self.conf, strip_block(text, MARKER).rstrip("\n") + "\n" + local_conf(self.a, self.env, self.jobs, append))
-
-    def configure_bblayers(self):
-        f = os.path.join(self.workdir, "build", "conf", "bblayers.conf")
-        if not self.m.exists(f):
-            fail("no %s -- the layer sync did not run" % f)
-        text = strip_block(self.m.read(f), BB_MARKER).rstrip("\n") + "\n"
-        if self.a.local_layer == "0":
-            self.m.write(f, text)
-            self.say("no local layer: this image preset builds the branch's own configuration unmodified")
-            return
-        lines = ["", BB_MARKER]
-        for name in LAYERS + (("meta-wk-multilib",) if self.a.multilib else ()):
-            layer = os.path.join(self.tools, "image", "yocto", name)
+    def configure(self):
+        board = os.path.join(self.tools, "image", "boards", self.p["IMG_MACHINE"], "local.conf.append")
+        append = self.m.read(board) if self.p["IMG_MACHINE"] and self.m.exists(board) else None
+        layers = [os.path.join(self.tools, "image", "yocto", n) for n in LAYERS + (("meta-wk-multilib",) if self.p["YOC_MULTILIB"] else ())]
+        for layer in layers:
             if not self.m.exists(os.path.join(layer, "conf", "layer.conf")):
                 fail("no layer at %s" % layer)
-            lines.append('BBLAYERS += "%s"' % layer)
-            self.say("layer added: %s" % layer)
-        self.m.write(f, text + "\n".join(lines) + "\n")
+        bblayers = os.path.join(self.workdir, "build", "conf", "bblayers.conf")
+        for f, marker, block in ((self.conf, MARKER, local_conf(self.p, self.env, self.jobs, append)),
+                                 (bblayers, BB_MARKER, "\n%s\n" % BB_MARKER + "".join('BBLAYERS += "%s"\n' % l for l in layers))):
+            if not self.m.exists(f):
+                fail("no %s -- the layer sync did not run" % f)
+            self.m.write(f, strip_block(self.m.read(f), marker).rstrip("\n") + "\n" + block)
+        self.say("wk's blocks written into local.conf and bblayers.conf (%s)" % ", ".join(os.path.basename(l) for l in layers))
 
     def clear_hosttools(self):
         d = os.path.join(self.workdir, "build", "tmp", "hosttools")
@@ -268,8 +263,7 @@ class Build(WsBuild):
             self.m.remove(d)
 
     def bitbake(self, args):
-        """WEBKIT_CROSS_TARGET/VERSION from the file the helper wrote: without them meta-webkit's distro conf falls back
-        to the machine name and today's date, and sstate is invalidated."""
+        """Without the helper's WEBKIT_CROSS_TARGET/VERSION, meta-webkit's distro conf takes today's date and sstate is invalidated."""
         info = os.path.join(self.workdir, ".target-info-version")
         if not self.m.exists(info):
             fail("no %s -- the layer sync did not finish" % info)
@@ -282,11 +276,10 @@ class Build(WsBuild):
 
     def helper_run(self, what, args):
         self.say(what)
-        if not self.m.run_tty(self.guarded(self.jobs, [self.helper, "--cross-target=" + self.a.target] + list(args)), cwd=self.src).ok:
+        if not self.m.run_tty(self.guarded(self.jobs, [self.helper, "--cross-target=" + self.target] + list(args)), cwd=self.src).ok:
             fail("%s failed" % what)
 
     def require_toolchain(self):
-        """Asked here: build-webkit bitbakes the whole nativesdk stack when the SDK is missing, under a budget booked for one compile."""
         d = os.path.join(self.workdir, "build", "toolchain")
         setup = ""
         if self.m.exists(os.path.join(d, ".toolchain_path_configured")):
@@ -301,8 +294,7 @@ class Build(WsBuild):
             fail("could not move %s to %s" % (src, dst))
 
     def copies_aside(self):
-        """The helper takes a file at build/image as proof the image is current, so it is moved aside, not deleted:
-        a killed stage must leave the image workspace its last image."""
+        """Aside, not deleted: the helper takes a file at build/image as current, and a killed stage must leave the last image."""
         prev = self.image_dir + ".previous"
         self.m.remove(prev)
         if self.m.isdir(self.image_dir):
@@ -320,42 +312,20 @@ class Build(WsBuild):
         self.m.remove(self.image_dir)
         self.move(prev, self.image_dir)
 
-    def summary(self):
-        a = self.a
-        bb, par = threads(self.jobs)
-        self.say("target        %s" % a.target)
-        self.say("image recipe  %s" % (a.image or "<from targets.conf>"))
-        if a.multilib:
-            self.say("multilib      %s at %s -- the userspace width, not the machine's" % (a.multilib, a.multilib_tune))
-        self.say("stage         %s" % a.stage)
-        self.say("chromium      %s" % ("dropped (about half the build; --chromium puts it back)" if a.chromium == "0" else "in the image (--chromium)"))
-        self.say("jobs          BB_NUMBER_THREADS=%d PARALLEL_MAKE=-j%d (from %d); -j%d for %d named recipes"
-            % (bb, par, self.jobs, self.jobs, len(BIG_RECIPES)))
-        self.say("DL_DIR        %s" % self.env.get("DL_DIR", ""))
-        self.say("SSTATE_DIR    %s" % self.env.get("SSTATE_DIR", ""))
-        self.say("locale        %s" % self.env.get("LANG", ""))
-
-    def prepare(self):
-        self.init_workdir()
-        self.configure_local_conf()
-        self.configure_bblayers()
-
     def webkit(self):
         a = self.a
+        cc, cxx, extra = cross_preset(a.cross_preset, a.pgo_profile)
         self.require_toolchain()
-        self.say("cross-building WebKit (WPE, Release) for %s" % a.target)
         try:
-            flags, cmake = webkit_args(self.m.read(os.path.join(self.src, "Tools", "yocto", "targets.conf")), a.target)
+            flags, cmake = webkit_args(self.m.read(os.path.join(self.src, "Tools", "yocto", "targets.conf")), self.target)
         except (OSError, KeyError, configparser.Error, ValueError):
-            fail("could not read BUILD_WEBKIT_ARGS for %s out of Tools/yocto/targets.conf" % a.target)
-        cmake = " ".join(x for x in (cmake, WEBKIT_CMAKE, a.cross_cmake) if x)
+            fail("could not read BUILD_WEBKIT_ARGS for %s out of Tools/yocto/targets.conf" % self.target)
+        cmake = " ".join(x for x in (cmake, WEBKIT_CMAKE, extra) if x)
         jobs = int(a.webkit_jobs or 8)
-        self.say("  preset:       %s" % a.cross_preset)
-        self.say("  target flags: %s" % (" ".join(flags) or "none"))
-        self.say("  cmakeargs:    %s" % cmake)
-        pre = ["env", "CC=" + a.cross_cc, "CXX=" + a.cross_cxx] if a.cross_cc else []   # the SDK's setup exports its clang only when named
+        self.say("cross-building WebKit (WPE, Release, %s) for %s: %s --cmakeargs=%s" % (a.cross_preset, self.target, " ".join(flags), cmake))
+        pre = ["env", "CC=" + cc, "CXX=" + cxx] if cc else []   # the SDK's setup exports its clang only when named
         # build-webkit's own -j$(nproc) OOMs on WebCore's unified sources, and bitbake's PARALLEL_MAKE does not reach it.
-        argv = pre + [os.path.join(self.src, "Tools", "Scripts", "build-webkit"), "--wpe", "--release", "--cross-target=" + a.target] \
+        argv = pre + [os.path.join(self.src, "Tools", "Scripts", "build-webkit"), "--wpe", "--release", "--cross-target=" + self.target] \
             + flags + ["--makeargs=-j%d" % jobs, "--cmakeargs=" + cmake]
         if not self.m.run_tty(self.guarded(jobs, argv, WEBKIT_MB_PER_JOB), cwd=self.src).ok:
             fail("the cross build of WebKit failed")
@@ -364,7 +334,7 @@ class Build(WsBuild):
 
     def slot(self, jobs):
         a = self.a
-        b = os.path.join(self.src, "WebKitBuild", "WPE", "Release_" + a.target)
+        b = os.path.join(self.src, "WebKitBuild", "WPE", "Release_" + self.target)
         slotdir = os.path.join(self.src, "WebKitBuild", "wk-slots", a.slot)
         if not self.m.exists(os.path.join(b, "bin", "MiniBrowser")):
             fail("the cross build left no %s/bin/MiniBrowser" % b)
@@ -373,41 +343,45 @@ class Build(WsBuild):
         self.m.mkdir(root)
         if not self.m.act_run(["cp", "-a", os.path.join(b, "bin"), os.path.join(b, "lib"), root + "/"]).ok:
             fail("could not copy the build into %s" % slotdir)
-        bid = wkslot.write_manifest(self, root, slotdir, dict(slot=a.slot, profile=a.image_preset, commit=a.commit, target=a.target,
-                                                build_preset=a.cross_preset, browser="minibrowser", lib_dir="lib", exec_dir="bin",
-                                                bundle_dir="lib", jobs=str(jobs)))
+        bid = wkslot.write_manifest(self, root, slotdir, dict(slot=a.slot, profile=a.preset, commit=a.commit, target=self.target,
+                                                              build_preset=a.cross_preset, browser="minibrowser", lib_dir="lib",
+                                                              exec_dir="bin", bundle_dir="lib", jobs=str(jobs)))
         self.say("slot ready: %s (build-id %s)" % (slotdir, bid))
 
     def pgo_mix(self):
-        a = self.a
-        if not self.m.isdir(a.pgo_dir):
-            fail("no collection at %s; a board's PGO collection puts one there" % a.pgo_dir)
+        d = pgo.pgo_dir_in(self.a.slot)
+        if not self.m.isdir(d):
+            fail("no collection at %s; a board's PGO collection puts one there" % d)
         self.init_workdir()
-        self.say("mixing %s profiles from %s at WebKit's own weights" % (a.pgo_lib, a.pgo_dir))
-        pgo = isolated_module(os.path.join(self.tools, "lib"), "wk.pgo")
-        common = ["--scripts", os.path.join(self.src, "Tools", "Scripts"), "--dir", a.pgo_dir, "--lib", a.pgo_lib]
-        self.helper_run("mix the collected profiles", ["--cross-toolchain-run-cmd"] + pgo + ["mix"] + common)
-        self.helper_run("read the mixed profile back", ["--cross-toolchain-run-cmd"] + pgo + ["check"] + common
-                        + ["--json", os.path.join(a.pgo_dir, "profile-check.json")])
+        self.say("mixing %s profiles from %s at WebKit's own weights" % (pgo.GLIB_LIB, d))
+        mod = isolated_module(os.path.join(self.tools, "lib"), "wk.pgo")
+        common = ["--scripts", os.path.join(self.src, "Tools", "Scripts"), "--dir", d, "--lib", pgo.GLIB_LIB]
+        self.helper_run("mix the collected profiles", ["--cross-toolchain-run-cmd"] + mod + ["mix"] + common)
+        self.helper_run("read the mixed profile back", ["--cross-toolchain-run-cmd"] + mod + ["check"] + common
+                        + ["--json", os.path.join(d, "profile-check.json")])
 
     def run(self):
-        a = self.a
+        a, p = self.a, self.p
         if not self.m.isdir(self.src):
             fail("no checkout at %s" % self.src)
-        if a.multilib and not a.multilib_tune:
-            fail("this image preset asks for the '%s' multilib but names no YOC_MULTILIB_TUNE for it" % a.multilib)
+        if p["YOC_MULTILIB"] and not p["YOC_MULTILIB_TUNE"]:
+            fail("this image preset asks for the '%s' multilib but names no YOC_MULTILIB_TUNE for it" % p["YOC_MULTILIB"])
         self.check_host()
         self.refresh_git_index(self.src)
         if a.stage == "webkit" and a.commit:
             self.checkout_slot_commit()
-        self.summary()
+        bb, par = threads(self.jobs)
+        self.say("%s of %s: cross-target %s, BB_NUMBER_THREADS=%d PARALLEL_MAKE=-j%d, DL_DIR %s, SSTATE_DIR %s, locale %s"
+                 % (a.stage, a.preset, self.target, bb, par, self.env.get("DL_DIR", ""), self.env.get("SSTATE_DIR", ""),
+                    self.env.get("LANG", "")))
         self.port()
         self.check_available()
         self.copies_back()
         if a.stage == "pgo-mix":
             self.pgo_mix()
         else:
-            self.prepare()
+            self.init_workdir()
+            self.configure()
             if a.stage != "layers":
                 self.clear_hosttools()
                 {"fetch": self.fetch, "image": self.image, "webkit": self.webkit,
@@ -415,15 +389,16 @@ class Build(WsBuild):
         self.say("stage '%s' done" % a.stage)
 
     def fetch(self):
-        self.say("fetching every source for %s (--runall=fetch -k)" % (self.a.image or "the image"))
-        if not self.bitbake(["--runall=fetch", "-k", self.a.image or DEFAULT_IMAGE]):
+        image = self.p["YOC_IMAGE"] or DEFAULT_IMAGE
+        self.say("fetching every source for %s (--runall=fetch -k)" % image)
+        if not self.bitbake(["--runall=fetch", "-k", image]):
             fail("not every source could be fetched; the ERROR lines above name the recipes, and the proxy names\n"
                  "    the hosts it refused:  journalctl --user -u wk-proxy -g DENY")
 
     def image(self):
         self.copies_aside()
         start = self.clock.now()
-        self.helper_run("bitbake %s (rootfs + kernel + wic)" % (self.a.image or "the image"), ["--build-image"])
+        self.helper_run("bitbake %s (rootfs + kernel + wic)" % (self.p["YOC_IMAGE"] or "the image"), ["--build-image"])
         self.verify_fresh(self.image_dir, start)
         self.m.remove(self.image_dir + ".previous")
 

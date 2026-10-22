@@ -60,7 +60,7 @@ def main(argv):
     held = None
     if action in ("arm", "back"):   # the two that move the board out from under whatever is measuring on it
         records = record.Records(env=os.environ)
-        held = record.hold(records, lambda r: record.fleet_holders(r, records, record.fleet_stores(ROOT, os.environ, records.machine)),
+        held = record.hold(records, lambda r: record.fleet_holders(r, record.fleet_stores(ROOT, os.environ, records.machine)),
                            name, "boot", name, "kill %d" % os.getpid(), "", ["%s %s" % (action, name)], os.getpid(), os.environ)
     rc = 1
     try:

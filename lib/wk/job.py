@@ -18,7 +18,6 @@ TOOLS = {"cc1", "cc1plus", "lto1", "clang", "clang++", "gcc", "g++", "cc", "c++"
          "ld64.lld", "ld.lld", "lld", "ninja", "xcodebuild", "swift-frontend"}
 KILL_WAIT = 15
 ABORT_SECONDS = 1800
-EXCLUSIVE = ("build", "babysit", "yocto", "buildroot")   # jobs that hold a checkout: two at once corrupt it
 EXIT_OF = {sig.SIGINT: 130, sig.SIGTERM: 143, sig.SIGHUP: 129}
 # Depth first, children before parents: ninja's children reparent to init once it is gone.
 TREE = '_d() { for k in $(pgrep -P "$1"); do _d "$k"; done; echo "$1"; }; _d "$1"'
@@ -149,11 +148,7 @@ def watch_pid(ended, pid, path, machine, clock, env=None, abort=None, wedge=None
     abort = record.watchdog_abort(env, ABORT_SECONDS) if abort is None else abort
     start = last_change = last_beat = clock.now()
     last_size, warned, named, same = 0, False, "", 0
-    while ended() is None:
-        for _ in range(poll):
-            clock.sleep(1)
-            if ended() is not None:
-                break
+    while not clock.wait_until(lambda: ended() is not None, poll, 1):
         size, now = os.path.getsize(path) if os.path.exists(path) else 0, clock.now()
         if size != last_size:
             last_size, last_change, warned = size, now, False
@@ -218,12 +213,13 @@ def wait_remote(ask, log_path, rc, clock, interval=30, stream=False, timeout=0, 
         if n is not None and n > last_size:
             sys.stderr.write(ask("tail -c +%d %s" % (last_size + 1, q(log_path))).out)
 
-    while True:
-        clock.sleep(interval)
-        if timeout and clock.now() - start >= timeout:
-            return "timeout", False
+    verdict = []
+
+    def step():
+        nonlocal last_size, last_change, warned, last_beat
         if abort_re and ask("grep -qiE %s %s" % (q(abort_re), q(log_path))).ok:
-            return "aborted", False
+            verdict.append(("aborted", False))
+            return True
         n, now = size(), clock.now()
         if n is not None and n > last_size:
             if stream:
@@ -233,7 +229,8 @@ def wait_remote(ask, log_path, rc, clock, interval=30, stream=False, timeout=0, 
         if status:
             if stream:
                 more(size())
-            return status, True
+            verdict.append((status, True))
+            return True
         idle = int(now - last_change)
         if idle >= stall and not warned:
             warn("no output for %ds -- not stopping it; a detached job can be\n  silent for a long time. Look on the far side:  tail -f %s"
@@ -242,6 +239,12 @@ def wait_remote(ask, log_path, rc, clock, interval=30, stream=False, timeout=0, 
         if not stream and now - last_beat >= beat:
             log("  ... still running (%dm)" % ((now - start) // 60))
             last_beat = now
+        return False
+
+    clock.sleep(interval)
+    if not clock.wait_until(step, timeout or None, interval):
+        return "timeout", False
+    return verdict[0]
 
 
 def announced_pid(path, label):
@@ -369,39 +372,6 @@ def records_of(driver, clock, machine):
     return record.of_driver(driver, clock, machine, env)
 
 
-def busy_reason(driver, records, name, skip=""):
-    """What holds the checkout: a live record of an EXCLUSIVE kind, else a live pid file in the workspace's home no record names."""
-    recorded = set()
-    for t in records.list():
-        if skip and os.path.realpath(str(t.path)) == os.path.realpath(skip):
-            continue
-        if t.field("name") != name:
-            continue
-        if t.field("where") == "place":
-            recorded.add(t.field("pid"))
-        if t.field("kind") in EXCLUSIVE and t.alive(None):
-            return "%s (pid %s, %s)  stop it: %s" % (t.field("kind"), t.field("pid"), t.field("machine"), t.field("kill"))
-    home = os.path.join(driver.store.ws_dir(name), "home")
-    here = records.machine
-    if not here.isdir(home):
-        return None
-    for n in here.listdir(home):
-        if not n.endswith(".pid"):
-            continue
-        try:
-            pid = re.sub(r"[^0-9]", "", here.read(os.path.join(home, n)))
-        except OSError:
-            continue
-        if pid and pid not in recorded and driver.exec(name, ["kill", "-0", pid]).ok:
-            return "%s (pid %s in the workspace)" % (n[:-4], pid)
-    return None
-
-
-def holder_alive(reg):
-    """A budget record's holder, `pid:<n>` on this machine (Budget.record's callers write no other kind)."""
-    return lambda h: h.startswith("pid:") and h[4:].isdigit() and reg.machine.alive(int(h[4:]))
-
-
 def detached(here, recs, clock, kind, name, argv, path, what):
     since = clock.stamp()
     pid = detach(here, argv, path)
@@ -415,12 +385,15 @@ def detached(here, recs, clock, kind, name, argv, path, what):
         offset[0] += len(data)
         sys.stderr.write(data.decode(errors="replace"))
 
-    while True:
+    def started():
         pump()
         t = recs.find(kind, name, floor=since)
         if t is not None and t.id.endswith("-%d" % pid):
-            return pid
+            return True
         if not here.alive(pid):
             pump()
             die("the detached %s of '%s' ended before it started -- what it said is\n    above, in full in %s" % (what, name, path))
-        clock.sleep(1)
+        return False
+
+    clock.wait_until(started, None, 1)
+    return pid

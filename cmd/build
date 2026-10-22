@@ -28,8 +28,6 @@
 #   WK_BABYSIT_MODEL=<model>    the model `--babysit` uses (default haiku)
 #   WK_BABYSIT_ATTEMPTS=<n>     fixes the babysitter tries before giving up
 #                               (default 5)
-#   WK_MEM_INTERVAL=<s>         how often the memory watchdog samples (default 30)
-#   WK_MEM_BUDGET_MB, WK_MEM_FLOOR_MB   what --mem-budget and --mem-floor set
 #   WK_NO_COMPILE_COMMANDS=1    write no compile_commands.json (it costs the Apple
 #                               ports their precompiled prefix headers)
 #   WK_NO_COMPILATION_CACHE=1   build without Xcode's compilation cache

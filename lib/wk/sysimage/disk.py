@@ -10,8 +10,6 @@ from wk.kv import kv
 LSBLK = "lsblk -J -p -o NAME,SIZE,TRAN,RM,TYPE,MODEL,LABEL"
 BOOTED = "is a disk this machine is running from"
 TRANSPORTS = (("/dev/sd", "usb"), ("/dev/mmcblk", "mmc"), ("/dev/nvme", "nvme"))
-UPDATE = ("Update it first: on a workstation,\n    ./setup --stage quiesce from a terminal there; on a rescue, rebuild the\n"
-          "    rescue image and write it again.")
 
 Disk = namedtuple("Disk", "name size tran rm model labels")
 
@@ -56,76 +54,46 @@ class Disks:
     def __init__(self, ch, conf):
         self.ch, self.conf = ch, conf
         self.name, self.device = conf.get("name", ""), conf.get("device", "")
-        self._disks = self._can = None
-        self._whose = {}
 
     def card(self, *args):
         return self.ch.card(*args, input="")
 
     def candidates(self):
-        if self._disks is None:
-            r = self.ch.run(LSBLK.split(), "host", input="")
-            self._disks = parse_lsblk(r.out) if r.ok else []
-        return self._disks
-
-    def can_identify(self):
-        if self._can is None:
-            r = self.card("whose")
-            self._can = "usage: wk-card-priv" not in r.out + r.err
-        return self._can
+        r = self.ch.run(LSBLK.split(), "host", input="")
+        return parse_lsblk(r.out) if r.ok else []
 
     def whose(self, dev):
         """(machine=, booted): the helper refuses to mount the disk this machine runs from, and that refusal says so."""
-        if not self.can_identify():
-            return "", False
-        if dev not in self._whose:
-            r = self.card("whose", dev)
-            text = r.out + r.err
-            self._whose[dev] = (kv(text).get("machine", ""), BOOTED in text)
-        return self._whose[dev]
+        r = self.card("whose", dev)
+        text = r.out + r.err
+        return kv(text).get("machine", ""), BOOTED in text
 
-    def for_machine(self, want):
-        return next((d.name for d in self.candidates() if want and self.whose(d.name)[0] == want), "")
+    def for_machine(self, want, owners=None):
+        owners = owners if owners is not None else {d.name: self.whose(d.name) for d in self.candidates()}
+        return next((name for name, (owner, _) in owners.items() if want and owner == want), "")
 
     def listing(self):
-        out = []
-        for d in self.candidates():
+        out, disks = [], self.candidates()
+        owners = {d.name: self.whose(d.name) for d in disks}
+        for d in disks:
             desc = "labels: " + ",".join(d.labels) if d.labels else "empty -- no partition table"
             here = "   <- %s is configured to boot from this one (wk boot %s)" % (self.name, self.name) if d.name == self.device else ""
-            out.append("    %s%s" % (line(d), here))
-            owner, booted = self.whose(d.name)
-            if owner:
-                out.append("        %s  --  holds %s" % (desc, "this machine's own system" if owner == self.name else "a system for " + owner))
-            elif booted:
-                out.append("        %s  --  this machine's own system (booted)" % desc)
-            elif self.can_identify():
-                out.append("        %s  --  no wk system on it" % desc)
-            else:
-                out.append("        " + desc)
-        if not out:
-            out.append("    (none -- no removable disk is attached to %s)" % self.name)
-        if not self.can_identify():
-            act.warn("cannot tell which system is on any of these: %s's card helper is\n  older than this checkout and has no "
-                     "'whose' verb. The disks are listed by what\n  their filesystems are labelled, which is not the same "
-                     "question.\n  Remedy, from a terminal on %s:  ./setup --stage quiesce" % (self.name, self.name))
-        mine = self.for_machine(self.name)
+            owner, booted = owners[d.name]
+            what = ("holds this machine's own system" if owner == self.name else "holds a system for " + owner) if owner \
+                else "this machine's own system (booted)" if booted else "no wk system on it"
+            out += ["    %s%s" % (line(d), here), "        %s  --  %s" % (desc, what)]
+        mine = self.for_machine(self.name, owners)
         if self.device and mine and mine != self.device:
             act.warn("%s's conf says it boots %s, but the disk holding\n  %s's own system is %s. Kernel names are assigned "
                      "in enumeration\n  order and these have moved. Trust the marker, not the name." % (self.name, self.device, self.name, mine))
-        return "\n".join(out)
+        return "\n".join(out or ["    (none -- no removable disk is attached to %s)" % self.name])
 
     def refuse_unless_safe(self, dev):
         """The rule is the helper's `check`. Fit is not asked: the image is a stream whose size is known only once written."""
-        status = self.card("status")
-        if not status.ok:
+        if not self.card("status").ok:
             act.die("%s cannot write a disk: its card helper is missing, or its\n    sudoers rule is not in force. Everything "
                     "privileged here goes through it and\n    there is deliberately no second way in.\n    What fails:  "
                     "sudo -n %s status\n    The remedy, from a terminal on %s:  ./setup --stage quiesce" % (self.name, CARD_PRIV, self.name))
-        # A helper without @second answers for the whole disk, and would write over the rescue it may be running from.
-        slots = () if not is_second(dev) else ("second", "third") if dev.endswith("@third") else ("second",)
-        for slot in slots:
-            if slot + "=yes" not in status.out:
-                act.die("%s's card helper predates %s systems (@%s), so it\n    would write the whole disk. %s" % (self.name, slot, slot, UPDATE))
         r = self.card("check", dev)
         said = (r.out + r.err).rstrip("\n")
         if not r.ok:

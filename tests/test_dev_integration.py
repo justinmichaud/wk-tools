@@ -566,7 +566,7 @@ def zed_pids():
 # -- the gates: nothing here starts, boots or updates a machine
 
 def own_build(label, place):
-    return label.startswith("wk build %s%s " % (PREFIX, place))
+    return label == "build %s%s" % (PREFIX, place)
 
 
 def place_unready(place):
@@ -688,9 +688,9 @@ class TestTheEvidence(unittest.TestCase):
         self.assertEqual([("corpse-tv", "tolken:container", "running")], ls_rows(text))
 
     def test_only_the_places_own_build_is_joined_rather_than_waited_out(self):
-        self.assertTrue(own_build("wk build integ-container (jsc-debug)", "container"))
-        self.assertFalse(own_build("wk build corpse-tv (jsc-release)", "container"))
-        self.assertFalse(own_build("wk build integ-container2 (jsc-debug)", "container"))
+        self.assertTrue(own_build("build integ-container", "container"))
+        self.assertFalse(own_build("build corpse-tv", "container"))
+        self.assertFalse(own_build("build integ-container2", "container"))
 
 
 class TestTheSteps(unittest.TestCase):

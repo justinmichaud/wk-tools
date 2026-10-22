@@ -3,11 +3,9 @@
 import argparse
 import os
 import sys
-import time
 
 from wk import act
 from wk import record
-from wk.kv import kv
 from wk.store import Store
 
 RESERVE_CORES = 1
@@ -167,48 +165,25 @@ class Resources:
 
 
 class Budget:
-    """One record per build under <state>/builds."""
+    """This machine's builds: each one's task record holds `build:<machine>` and names its jobs and memory."""
 
-    def __init__(self, machine, env=None, clock=None):
+    def __init__(self, machine, env=None):
         self.machine = machine
         self.env = os.environ if env is None else env
-        self.clock = clock
-
-    def dir(self):
-        return os.path.join(Store(self.env).state_dir(), "builds")
 
     def machine_label(self):
         return self.env.get("WK_BUILD_MACHINE") or record.host_name(self.machine)
 
-    def record(self, label, jobs, budget_mb, holder):
-        now = self.clock.now() if self.clock else time.time()
-        self.machine.mkdir(self.dir())
-        path = os.path.join(self.dir(), "%d-%d-%s" % (now, os.getpid(), os.urandom(3).hex()))
-        started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
-        self.machine.write(path, "label=%s\nmachine=%s\njobs=%s\nbudget_mb=%s\nholder=%s\nstarted=%s\n"
-                           % (label, self.machine_label(), jobs, budget_mb, holder, started))
-        return path
+    def resource(self):
+        return "build:" + self.machine_label()
 
-    def running(self, holder_alive):
-        """(label, jobs, budget_mb) per live build on this machine; a dead one's record goes."""
-        try:
-            names = self.machine.listdir(self.dir())
-        except OSError:
-            return []
-        me, out = self.machine_label(), []
-        for n in names:
-            path = os.path.join(self.dir(), n)
-            try:
-                rec = kv(self.machine.read(path))
-            except OSError:
-                continue
-            if rec.get("machine") != me:
-                continue
-            if holder_alive(rec.get("holder", "")):
-                out.append((rec.get("label", ""), int(rec.get("jobs") or 0), int(rec.get("budget_mb") or 0)))
-            else:
-                self.machine.remove(path)
-        return out
+    @staticmethod
+    def rows(tasks):
+        return [("%s %s" % (t.field("kind"), t.field("name")), int(t.field("jobs") or 0), int(t.field("budget_mb") or 0)) for t in tasks]
+
+    def running(self, records):
+        """(what, jobs, budget_mb) per live build on this machine."""
+        return self.rows(records.holders(self.resource()))
 
     def jobs(self, cores, avail_mb, mb_per_job, load=None, max_jobs=None, running=()):
         cores = max(1, cores - sum(r[1] for r in running))

@@ -17,7 +17,7 @@ from tests.support import NO_REGISTRY, REAL_MACHINES, REPO, SYSTEM_DIRS, WkTest,
 from tests.test_credcheck import FakeAnthropic, FakeLiteLLM
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import doctor  # noqa: E402
+from wk import doctor, priv  # noqa: E402
 from wk.key.cli import Key  # noqa: E402
 from wk.machine import HAVE, Fake, Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -41,42 +41,25 @@ def boom(*a, **kw):
     raise AssertionError("the fleet was asked without --all: %r" % (a,))
 
 
-def stub_shell(**over):
-    """Every question a Doctor asks outside Python (doctor.Host), answered with nothing unless the test says otherwise."""
-    base = dict(gh_authenticated=lambda root, machine: False,
-                priv_helpers=lambda root, env=None: [],
-                priv_answers=lambda root, path, machine: False)
-    base.update(over)
-    return types.SimpleNamespace(**base)
-
-
-def stub_keys():
-    """`wk key`'s answers (lib/wk/key/): nothing stored here."""
-    return types.SimpleNamespace(settable=lambda: [], stored_verdict=lambda n: "")
-
-
-def stub_mc(**over):
-    """lib/wk/machine_cmd/deps.py's build-machine questions, answered with nothing unless the test says otherwise."""
-    base = dict(probe=lambda driver, root: "", findings=lambda root, probe, env=None, here=None: [],
-                stale=lambda driver, root: None)
-    base.update(over)
-    return types.SimpleNamespace(**base)
-
-
-def fake_doctor(macos, sh=None, env=None, machine=None, mc=None, keys=None):
+def fake_doctor(macos, env=None, machine=None):
     e = {"HOME": "/h", "WK_STORE": "/store", "XDG_STATE_HOME": "/h/.local/state", "PATH": os.environ["PATH"],
          "WK_MACHINES_DIR": NO_REGISTRY}
     e.update(env or {})
-    return doctor.Doctor(str(REPO), env=e, machine=machine or Fake(), macos=macos, sh=sh or stub_shell(), mc=mc or stub_mc(),
-                         keys=keys or stub_keys())
+    return doctor.Doctor(str(REPO), env=e, machine=machine or Fake(), macos=macos)
 
 
-def build_doctor(**over):
+def build_doctor():
     d = tempfile.mkdtemp(prefix="wk-test-doctor-machines-")
     for n in ("farbox", "box", "old", "fresh"):
         with open(os.path.join(d, n + ".conf"), "w") as f:
             f.write("kind=build\ndriver=remote\n")
-    return fake_doctor(False, env={"WK_MACHINES_DIR": d, "XDG_STATE_HOME": os.path.join(d, "state")}, mc=stub_mc(**over))
+    return fake_doctor(False, env={"WK_MACHINES_DIR": d, "XDG_STATE_HOME": os.path.join(d, "state")})
+
+
+def deps(**over):
+    """lib/wk/machine_cmd/deps.py's build-machine questions, answered with nothing unless the test says otherwise."""
+    return mock.patch.multiple(doctor.machine_deps, **dict(dict(probe=lambda driver, root: "", stale=lambda driver, root: None,
+                                                               findings=lambda root, probe, env=None, here=None: []), **over))
 
 
 def text_of(rows):
@@ -363,7 +346,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
         fake = Fake()
         fake.answer(("python3", "-c"), rc=0)
         fake.answer(INSPECT, 0, machine_in("stopped"))
-        doc = fake_doctor(True, machine=fake, sh=stub_shell())
+        doc = fake_doctor(True, machine=fake)
         rows = list(doc.workspaces_store()) + list(doc.machine_local())
         self.assertIn((UNK, "podman machine 'wk' is stopped", "wk start, then re-run wk doctor for the store checks"), rows)
         self.assertTrue(any("read-github-pat (podman VM) -- not visible while the podman machine is stopped" in r[1] for r in rows), rows)
@@ -376,15 +359,15 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
         fake = Fake()
         fake.answer(("python3", "-c"), rc=1)
         daemons = [("credential injector", "/s/github-inject.sock", "inject"), ("request broker", "/b.sock", "broker")]
-        with mock.patch.object(doctor.status, "launchd_daemons", return_value=daemons):
-            rows = list(fake_doctor(True, machine=fake, sh=stub_shell()).workspaces_store())
+        with mock.patch.object(doctor, "launchd_daemons", return_value=daemons):
+            rows = list(fake_doctor(True, machine=fake).daemons())
         self.assertEqual([(MISS, "credential injector answers on this Mac", "./setup --stage inject"),
                           (MISS, "request broker answers on this Mac", "./setup --stage broker")], rows[:2])
 
     def test_no_machine_at_all_is_missing_with_the_stage_that_makes_one(self):
         fake = Fake()
         fake.answer(("python3", "-c"), rc=0)
-        rows = list(fake_doctor(True, machine=fake, sh=stub_shell()).workspaces_store())
+        rows = list(fake_doctor(True, machine=fake).workspaces_store())
         self.assertEqual([(MISS, "podman machine 'wk'", "./setup --stage machine")], [r for r in rows if r[0] == MISS])
 
     def test_a_running_machine_is_asked_for_the_probe_and_its_git_identity(self):
@@ -393,7 +376,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
         fake.answer(("podman", "machine", "ssh", "wk", "--"), out=FULL_STORE_BLOB)
         fake.answer(("python3", "-c"), rc=0)
         rows = list(fake_doctor(True, machine=fake).workspaces_store())
-        self.assertEqual((OK, "podman machine 'wk' running", ""), rows[2])
+        self.assertEqual((OK, "podman machine 'wk' running", ""), rows[0])
         self.assertTrue(any("container machine: git user.name" in r[1] for r in rows), rows)
 
     def test_a_machine_whose_tooling_answers_nothing_is_unknown(self):
@@ -475,37 +458,43 @@ class TestTheCredentialsSection(unittest.TestCase):
 
 
 class TestTheFleetIsWalkedOnlyWhenAsked(unittest.TestCase):
-    def _run(self, macos, everything):
-        return [(title, list(rows)) for title, rows in fake_doctor(macos, mc=stub_mc(probe=boom, findings=boom, stale=boom)).sections(everything)]
+    def test_without_all_no_machine_is_asked_and_with_it_every_one_is(self):
+        with deps(probe=boom), mock.patch.object(doctor, "device", boom):
+            for macos in (True, False):
+                titles = [t for t, _ in fake_doctor(macos).sections(False)]
+                self.assertIn("daemons", titles)
+                self.assertFalse([t for t in titles if "machine:" in t])
+            with self.assertRaises(AssertionError):
+                [list(rows) for t, rows in build_doctor().sections(True) if t.startswith("build machine")]
 
-    def test_without_all_no_machine_is_asked(self):
-        for macos in (True, False):
-            with self.subTest(macos=macos):
-                titles = [t for t, _ in self._run(macos, False)]
-                self.assertIn("host tools", titles)
-                self.assertNotIn("battery", titles)
-
-    def test_with_all_the_fleet_is_asked(self):
-        with self.assertRaises(AssertionError):
-            [list(rows) for _, rows in build_doctor(probe=boom).sections(True)]
+    def test_every_bench_machine_but_this_one_is_asked_with_all(self):
+        asked = []
+        with deps(), mock.patch.object(doctor, "device", lambda root, name, env, machine: asked.append(name) or []):
+            doc = fake_doctor(False, env={"WK_MACHINES_DIR": str(REAL_MACHINES), "WK_IN_VM": "1", "WK_ROW_LABEL": "rpi5"})
+            titles = [t for t, rows in doc.sections(True) if t.startswith("bench machine") and list(rows) == []]
+        self.assertIn("rpi4", asked)
+        self.assertNotIn("rpi5", asked)
+        self.assertEqual(len(titles), len(asked))
 
 
 class TestAMachineThatDoesNotAnswer(unittest.TestCase):
     def test_a_build_machine_is_unknown_never_missing(self):
-        rows = list(build_doctor().build_machine("farbox"))
+        with deps():
+            rows = list(build_doctor().build_machine("farbox"))
         self.assertEqual([(UNK, "farbox did not answer", "ssh farbox true  -- then re-run; nothing was changed")], rows)
 
     def test_a_build_machine_that_answers_gets_the_drivers_findings_and_its_provisioning_age(self):
-        rows = list(build_doctor(probe=lambda t, root: "family=debian\n",
-                                 findings=lambda root, probe, env=None, here=None: [("ok", "git (/usr/bin/git)", ""), ("required", "ninja", "apt install ninja"), ("note", "cores: 4", "")],
-                                 stale=lambda t, root: "remote/provision.sh or remote/deps.sh has changed since it ran").build_machine("box"))
+        with deps(probe=lambda t, root: "family=debian\n",
+                  findings=lambda root, probe, env=None, here=None: [("ok", "git (/usr/bin/git)", ""), ("required", "ninja", "apt install ninja"), ("note", "cores: 4", "")],
+                  stale=lambda t, root: "remote/provision.sh or remote/deps.sh has changed since it ran"):
+            rows = list(build_doctor().build_machine("box"))
         self.assertEqual([(OK, "git (/usr/bin/git)", ""), (MISS, "ninja", "apt install ninja"), (UNK, "cores: 4", ""),
                           (MISS, "provisioning on box predates its inputs: remote/provision.sh or remote/deps.sh has changed since it ran",
                            "wk machine setup box")], rows)
 
     def test_a_missing_remedy_names_the_setup_command(self):
-        rows = list(build_doctor(probe=lambda t, root: "family=debian\n",
-                                 findings=lambda root, probe, env=None, here=None: [("wanted", "ccache", "")]).build_machine("box"))
+        with deps(probe=lambda t, root: "family=debian\n", findings=lambda root, probe, env=None, here=None: [("wanted", "ccache", "")]):
+            rows = list(build_doctor().build_machine("box"))
         self.assertEqual((MISS, "ccache", "see 'wk machine setup box'"), rows[0])
         self.assertEqual((OK, "provisioned from this tree's remote/provision.sh + remote/deps.sh", ""), rows[1])
 
@@ -522,16 +511,12 @@ class TestRootAccess(unittest.TestCase):
 class TestPrivilegedHelpers(unittest.TestCase):
     """A helper whose sudoers rule is out-ranked is installed and useless, so what is asked is whether it answers."""
 
-    def setUp(self):
-        self.helpers = doctor.Host.priv_helpers(str(REPO), env=clean_env())
-
     def _rows(self, answers, executable=True):
         fake = Fake()
-        if executable:
-            for h in self.helpers:
-                fake.answer(["test", "-x", h[3]], 0)
-        sh = stub_shell(priv_helpers=lambda root, env=None: self.helpers, priv_answers=lambda root, path, machine: answers)
-        return list(fake_doctor(True, machine=fake, sh=sh).privileged_helpers())
+        for h in priv.helpers():
+            fake.answer(["test", "-x", h[3]], 0 if executable else 1)
+        fake.answer(["sudo", "-n", "-l"], out="".join("    (root) NOPASSWD: %s\n" % h[3] for h in priv.helpers()) if answers else "")
+        return list(fake_doctor(True, machine=fake).privileged_helpers())
 
     def test_a_helper_whose_grant_does_not_answer_is_missing_with_the_rule_named(self):
         rows = self._rows(False)
@@ -562,7 +547,7 @@ class ACachedCredentialIsNotAGrant(WkTest):
         fake = Fake()
         fake.answer(["sudo", "-n", "-l"], out=listing + "\n")
         fake.answer(["sudo", "-n", self.HELPER])
-        return doctor.Host.priv_answers(str(REPO), self.HELPER, fake)
+        return priv.answers(self.HELPER, fake)
 
     def test_only_a_listing_naming_the_exact_path_is_a_grant_though_every_run_succeeds(self):
         head = "User justinmichaud may run the following commands on Tolken:\n    (ALL) ALL\n"
@@ -624,6 +609,36 @@ class TestRpi5TuningIsBackedUp(unittest.TestCase):
         text = " ".join(self.rows("elsewhere"))
         self.assertNotIn("id_ed25519", text)
         self.assertNotIn("kbuild", text)
+
+
+class TestWhatWkStatusNoLongerJudges(unittest.TestCase):
+    """The daemons, the SDK image and the quiesce state are doctor rows."""
+
+    def test_a_stopped_service_and_one_running_older_code_are_missing(self):
+        fake = Fake()
+        fake.answer(HAVE + ("systemctl",))
+        fake.answer(["systemctl", "--user", "cat"])
+        fake.answer(["systemctl", "--user", "is-active"])
+        fake.answer(["systemctl", "--user", "is-active", "--quiet", "wk-proxy.service"], rc=3)
+        fake.answer(["systemctl", "--user", "show", "-p", "MainPID", "--value"], out="0\n")
+        rows = list(fake_doctor(False, machine=fake).daemons())
+        self.assertEqual([r[0] for r in rows], [MISS, OK, OK])
+        self.assertEqual(rows[0][2], "systemctl --user start wk-proxy")
+
+    def test_the_sdk_image_is_judged_against_the_registrys_newest(self):
+        self.assertEqual([doctor.sdk_newest(t, ["2.53-v9-a", "2.53-v11-b", "2.52-v12-c"]) for t in ("2.53-v9-a", "odd", "2.53-v12-d")],
+                         ["2.53-v11-b", None, "2.53-v12-d"])
+        ctr = types.SimpleNamespace(sdk_local=lambda: {"image": "sdk:2.53-v9-a"}, sdk_upstream=lambda timeout: ["2.53-v11-b"])
+        self.assertEqual(doctor.sdk_row(ctr)[0], MISS)
+        ctr.sdk_upstream = lambda timeout: None
+        self.assertEqual(doctor.sdk_row(ctr)[0], UNK)
+
+    def test_a_quiesced_machine_is_missing_until_it_is_put_back(self):
+        fake = Fake()
+        doc = fake_doctor(False, machine=fake, env={"WK_QUIESCE_STATE": "/q"})
+        self.assertEqual(list(doc.benchmarking())[1][0], OK)
+        fake.files["/q/raiser.pid"] = "1\n"
+        self.assertEqual(list(doc.benchmarking())[1], (MISS, "this machine is quiesced (raiser)", "wk quiesce off"))
 
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@
 #
 #   on      quiet the machine for one run: stop every process in bench/quiet/macos.tsv, disable App Nap, keep
 #           MiniBrowser frontmost and the display awake (macOS); in bench mode also write this account's desktop
-#           settings. Settles for WK_SETTLE_SECONDS (default 30) before returning.
+#           settings. Settles for 30 seconds before returning.
 #   off     undo everything `on` did.
 #   status  what is quiesced now, and the helper's own account of it.
 #

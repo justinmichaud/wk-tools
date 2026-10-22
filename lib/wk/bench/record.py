@@ -6,7 +6,7 @@ import re
 import sys
 import zipfile
 
-from wk import fleetwalk, project
+from wk import fleet, project
 from wk.act import Refused, die
 from wk.kv import kv_file
 from wk.machine import Local, PodmanVm, Ssh
@@ -396,11 +396,8 @@ class Listing:
         found = homes(self.store)
         return ls_rows(found, running_tasks(found, self.store.lock_path, self.alive), self.label)
 
-    def _label(self, driver, name):
-        return name if driver.kind == "remote" and not getattr(driver, "is_local", True) else self.label
-
     def fleet_rows(self):
-        return fleetwalk.fleet_rows(self.reg, "bench", "tasks", self._label, self.warn)
+        return fleet.listing(self.reg, ["bench", "ls", "--continued"], "tasks", self.warn)
 
     def rows(self):
         return self.store_rows() + self.fleet_rows()

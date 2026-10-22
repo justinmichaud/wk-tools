@@ -1,12 +1,13 @@
 """Two commands mutating one resource serialise or refuse naming the holder, each driven through the command's own
-entry with the resource held by a live process on the Fake. `guest start` is tests/test_guest.py's."""
+entry with the resource held by a live process on the Fake. `guest start` is tests/test_guest.py's; a workspace's job
+is a hold on its record (tests/test_wk_record.py)."""
 import contextlib
 import io
 import os
 import sys
 import unittest
 
-from tests import test_sync, test_sysimage_task, test_vm_base
+from tests import test_sync, test_vm_base
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -46,15 +47,6 @@ class TestTwoSyncs(test_sync.SyncTest):
         self.w.pids.discard(HOLDER)
         self.stderr(self.w.sync("mirror").run)
         self.assertIn(("run", ("sh", "-c", "REFRESH %s" % self.w.mirror)), self.w.effects)
-
-
-class TestTwoImageBuilds(test_sysimage_task.TaskTest):
-    def test_one_lock_per_resource_image_build(self):
-        """An image build refuses rather than queues behind the build holding the workspace's lock, naming the stop."""
-        hold(self.w, self.w.reg.load("box").store, "ws-" + test_sysimage_task.WS)
-        err = self.refused()
-        self.assertIn(test_sysimage_task.WS, err)
-        self.assertEqual([], [e for e in self.w.effects if e[0] == "watch"])
 
 
 class TestBaseRefreshDuringABuild(test_vm_base.BaseTest):

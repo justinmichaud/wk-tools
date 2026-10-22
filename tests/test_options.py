@@ -2,12 +2,8 @@
 import json
 import os
 import subprocess
-import sys
 
 from tests.support import REPO, WkTest, run, temp_store
-
-sys.path.insert(0, str(REPO / "lib"))
-from wk import dispatch  # noqa: E402
 
 
 def _clean(env):
@@ -72,12 +68,3 @@ class TestLsJson(WkTest):
                 set(row.keys()),
                 {"name", "place", "state", "base", "snap", "arch", "changes"},
             )
-
-
-    def test_json_merge_list_merges_concatenated_documents(self):
-        doc = dispatch.json_merge_list("workspaces", [
-            '{"workspaces": [{"name": "a"}]}\n', '{"workspaces": [{"name": "b"}]}{"workspaces": [{"name": "c"}]}\n', ""])
-        names = sorted(w["name"] for w in doc["workspaces"])
-        self.assertEqual(names, ["a", "b", "c"])
-
-

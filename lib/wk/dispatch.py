@@ -6,7 +6,6 @@ there: here, forwarded into the podman VM on a macOS host, or handed to the
 machine's own wk. The places are asked through one Registry (wk.places).
 """
 
-import json
 import os
 import re
 import shlex
@@ -17,10 +16,10 @@ from pathlib import Path
 
 from wk import completion as C
 from wk import decl as D
-from wk import act, clock, guest, images, places, presets, project, record, repos, setupstate, sshalias
+from wk import act, clock, guest, images, places, presets, project, repos, setupstate, sshalias
 from wk.act import info, log, warn
 from wk.lock import Lock
-from wk.machine import Local, is_macos
+from wk.machine import Local, PodmanVm, is_macos
 from wk.reach import Reach
 from wk.store import Store, build_preset, dispatch_place, in_vm, no_such_workspace, ws_name
 
@@ -530,8 +529,8 @@ def help_doc(topic):
     path = ROOT / "README.md"
     text = path.read_text()
     if not topic:
-        from wk import status
-        text = "%s\n\n%s" % (status.self_line(str(ROOT), os.environ, False), text)
+        from wk import fleet
+        text = "%s\n\n%s" % (fleet.self_line(str(ROOT), os.environ), text)
         if os.isatty(1) and shutil.which("less"):
             raise Exit(subprocess.run(["less"], input=text, text=True).returncode)
         sys.stdout.write(text)
@@ -560,7 +559,6 @@ def help_doc(topic):
     raise Exit(0)
 
 
-# -- machines
 
 def podman_vm():
     return places.podman_vm(Local(), MACHINE) if shutil.which("podman") else None
@@ -596,7 +594,7 @@ def forward_to_vm(inv, cmd, args):
     if os.isatty(0) and os.isatty(1):
         opts, dest = places.podman_vm_route(rec)
         exec_flushed(["ssh", "-t", *opts, dest, line])
-    exec_flushed(["podman", "machine", "ssh", MACHINE, "--", line])
+    exec_flushed(PodmanVm(MACHINE).argv(line))
 
 
 def exec_flushed(argv):
@@ -631,54 +629,6 @@ def delegate_driver(place):
 
 def delegate_run(driver, cmd, args, readonly=False):
     exec_flushed(driver.hand_over(cmd, args, tty=os.isatty(0) and os.isatty(1), readonly=readonly))
-
-
-def json_merge_list(key, texts):
-    """{"<key>": [...]} merged from texts of zero or more concatenated JSON documents, as a per-place `--json` listing prints."""
-    items, dec = [], json.JSONDecoder()
-    for text in texts:
-        i = 0
-        while text[i:].strip():
-            i = len(text) - len(text[i:].lstrip())
-            obj, i = dec.raw_decode(text, i)
-            items.extend(obj.get(key, []))
-    return {key: items}
-
-
-def bare_report(inv, cmd, args):
-    """A report with no subject, merged over every place here and the VM."""
-    hosts = [t for t in registry().all() if t != "container"]
-    ls_json = cmd == "ls" and "--json" in args
-    vm = machine_running()
-    worst, docs, empty = 0, [], []
-    if hosts:
-        more = ["--more-follows"] if cmd == "ls" and vm and not ls_json else []
-        cp = subprocess.run([str(inv.decl.path), *more, *args], stdout=subprocess.PIPE if ls_json or more else None,
-                            text=True, env=dict(os.environ, WK_PLACE=" ".join(hosts)))
-        worst = cp.returncode
-        if ls_json:
-            docs.append(cp.stdout)
-        elif more:
-            sys.stdout.write(cp.stdout)
-            sys.stdout.flush()
-            empty = ["--empty-so-far"] if len(cp.stdout.splitlines()) <= 1 else []
-    if vm:
-        env = dict(os.environ, WK_ROW_LABEL=record.machine_name())
-        cont = ["--continued"] if cmd == "ls" and hosts else []
-        if ls_json:
-            cp = subprocess.run([sys.executable, str(ROOT / "wk"), "--forward", cmd, *cont, *args],
-                                stdout=subprocess.PIPE, text=True, env=env)
-            docs.append(cp.stdout)
-            rc = cp.returncode
-        else:
-            rc = forward_status(inv, cmd, [*cont, *empty, *args], env=env)
-        worst = max(worst, rc)
-    elif shutil.which("podman"):
-        warn("the podman machine '%s' is stopped, so container workspaces are not included" % MACHINE)
-        log("  'wk start' to bring it up")
-    if ls_json:
-        print(json.dumps(json_merge_list("workspaces", docs)))
-    raise Exit(worst)
 
 
 # -- main
@@ -833,7 +783,8 @@ def main(argv):
                 sshalias.alias_remove(Local(), os.environ, name)
             raise Exit(0)
         if d.bare == "merged" and not positionals(args):
-            bare_report(inv, cmd, args)
+            line = command_line(inv, args)
+            os.execv(line[0], line)
         if d.is_readonly(args) and not shutil.which("podman"):
             warn("podman is not installed, so there are no container workspaces to read")
             log("  './setup' installs it; 'WK_PLACE=vm wk ls' lists the macOS guests, which do not need it")

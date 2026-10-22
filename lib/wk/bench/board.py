@@ -598,7 +598,7 @@ def claim(root, env, board, what):
 
 
 def fleet_holders(root, env, records):
-    return lambda res: progress.fleet_holders(res, records, progress.fleet_stores(root, env, records.machine))
+    return lambda res: progress.fleet_holders(res, progress.fleet_stores(root, env, records.machine))
 
 
 def for_board(root, reg, ws, clock, board, machine=None, driver=None):

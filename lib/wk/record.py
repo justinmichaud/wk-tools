@@ -9,6 +9,7 @@ from pathlib import Path
 
 from wk import act, store
 from wk.clock import Clock
+from wk.lock import Lock
 from wk.machine import here
 
 RUNNING = ("starting", "running", "silent", "unanswered")
@@ -50,14 +51,11 @@ def machine_name(env=None, machine=None):
 
 
 STALL_SECONDS = 300
+ASK_SECONDS = 5   # how long a report waits for a workspace to say whether its job's pid lives
 
 
 def watchdog_stall(env, default=STALL_SECONDS):
     return float(env.get("WK_STALL_SECONDS") or default)
-
-
-def task_ask_seconds(env):
-    return float(env.get("WK_TASK_ASK_SECONDS") or 5)
 
 
 def watchdog_abort(env, default=0):
@@ -237,25 +235,26 @@ class Task:
         self.set("exit", status)
 
     def alive(self, cap=None):
+        """The one liveness question: True or False, or None where it cannot be told (no answer within `cap`, an unreadable pid)."""
         if self.has("exit"):
             return False
-        pid = self.field("pid")
-        if not pid.isdigit():
+        pid = self.raw("pid")
+        if pid is None:
             return False
+        if not isinstance(pid, str) or not pid.isdigit():
+            return None
         if self.field("where") == "place":
             if self.ask_place is None:
                 raise RuntimeError("%s runs inside a workspace and no place is loaded" % self.id)
             return self.ask_place(self.field("name"), int(pid), cap)
         return self.machine.alive(int(pid))
 
-    def holder_gone(self):
-        """True only where the process that took this record's claim is provably gone."""
-        if self.has("exit"):
-            return True
-        pid = self.raw("pid")
-        if self.field("where") != "here" or not isinstance(pid, str) or not pid.isdigit():
-            return False
-        return not self.machine.alive(int(pid))
+    def holds(self):
+        got = self.raw("holds")
+        return None if got is UNREADABLE else (got or "").split()
+
+    def line(self):
+        return "\t".join((self.id, self.field("machine"), "%s %s" % (self.field("kind"), self.field("name")), self.field("kill")))
 
     def verdict(self, how="pid", stall_seconds=None, ask_seconds=None):
         if how not in ("pid", "capped"):
@@ -271,7 +270,7 @@ class Task:
             return "starting"
         cap = None
         if how == "capped" and self.field("where") == "place":
-            cap = ask_seconds if ask_seconds is not None else task_ask_seconds(self.env)
+            cap = ASK_SECONDS if ask_seconds is None else ask_seconds
         alive = self.alive(cap)
         if alive is None:
             return "unanswered"
@@ -288,7 +287,6 @@ class Task:
 
 
 def of_driver(driver, clock=None, machine=None, env=None):
-    """`place`'s records; a pid in a workspace is asked there, None where the workspace does not answer in time."""
     return Records(driver.store.records_dir(), clock=clock, ask_place=driver.pid_alive, env=driver.env if env is None else env,
                    machine=machine)
 
@@ -330,7 +328,7 @@ class Records:
             if self.stamp_of(t.id, kind, name) is not None and not t.alive(None):
                 self.machine.remove_own(str(t.path))
 
-    def begin(self, kind, where, name, kill, log, plan, holds=None, pid=None, argv=None):
+    def begin(self, kind, where, name, kill, log, plan, holds=(), pid=None, argv=None, fields=None):
         if where not in ("here", "place"):
             raise ValueError("where is here or place, not '%s'" % where)
         if not plan:
@@ -346,7 +344,9 @@ class Records:
         if where != "place":
             t.set("pid", pid)
         if holds:
-            t.set("holds", holds)
+            t.set("holds", "\n".join(holds))
+        for k, v in (fields or {}).items():
+            t.set(k, v)
         t.set("kind", kind)
         t.set("where", where)
         t.set("name", name)
@@ -364,21 +364,34 @@ class Records:
         return t
 
     def holders(self, resource):
-        """Every record naming `resource`, or whose claim cannot be read, with its holder not provably gone."""
+        """The live records holding `resource`; a parent's (WK_TASK_PARENT) holds are its child's own."""
+        parent = os.path.realpath(self.env.get("WK_TASK_PARENT") or "/nonexistent")
         out = []
         for t in self.list():
-            holds = t.raw("holds")
-            if holds is None or (holds is not UNREADABLE and holds != resource):
+            held = t.holds()
+            if held is not None and resource not in held or os.path.realpath(str(t.path)) == parent:
                 continue
-            if t.holder_gone():
-                continue
-            out.append((t.id, t.field("machine"), "%s %s" % (t.field("kind"), t.field("name")), t.field("kill")))
+            if t.alive() is not False:
+                out.append(t)
         return out
+
+    def locked(self):
+        return Lock(store.Store(self.env), self.machine, self.clock).held("holds")
+
+    def claim(self, kind, name, kill, log, plan, holds, refuse, pid=None, fields=None):
+        """`begin` holding `holds` under the store's lock: `refuse(resource, holders)` dies or crosses for each one held."""
+        with self.locked():
+            for resource in holds:
+                held = self.holders(resource)
+                if held:
+                    refuse(resource, held)
+            if act.dry_run():
+                return None
+            return self.begin(kind, "here", name, kill, log, plan, holds=holds, pid=pid, fields=fields)
 
     def wait(self, kind, name, log, timeout=0, pid=None, floor="", stream=None):
         """The verdict it ended on, or crashed/timeout; `stream` gets the log as it grows."""
-        offset = 0
-        waited = 0
+        offset, st = 0, ["starting"]
 
         def pump():
             nonlocal offset
@@ -393,83 +406,62 @@ class Records:
                 stream.write(data.decode(errors="replace"))
                 stream.flush()
 
-        while True:
-            pump()
+        def verdict():
             t = self.find(kind, name, floor)
-            st = "starting" if t is None else t.verdict("pid")
-            if st == "died":
-                st = "crashed"
-                break
-            if st not in ("starting", "running", "silent"):
-                break
+            return "starting" if t is None else t.verdict("pid")
+
+        def ended():
+            pump()
+            st[0] = verdict()
+            if st[0] not in ("starting", "running", "silent"):
+                return True
             if pid is not None and not self.machine.alive(pid):
-                # The child may be mid-write of its final state.
-                self.clock.sleep(1)
-                t = self.find(kind, name, floor)
-                st = "starting" if t is None else t.verdict("pid")
-                if st in ("starting", "running", "silent", "died"):
-                    st = "crashed"
-                break
-            if timeout and waited >= timeout:
-                st = "timeout"
-                break
-            self.clock.sleep(1)
-            waited += 1
+                self.clock.sleep(1)   # the child may be mid-write of its final state
+                st[0] = verdict()
+                return True
+            return False
+
+        if not self.clock.wait_until(ended, timeout or None, 1):
+            st[0] = "timeout"
         pump()
-        return st
+        return "crashed" if st[0] in ("starting", "running", "silent", "died") else st[0]
 
 
-def fleet_holders(resource, records, stores):
-    """This store's live holders of `resource`, then every other store's; an unread machine is an `unknown` row."""
-    rows = list(records.holders(resource))
-    for name, ask in stores:
-        got, why = ask(resource)
-        if got is None:
-            rows.append(("?", name, "unknown", why.replace("\t", " ")))
+def fleet_holders(resource, stores):
+    rows = []
+    for a in stores(["status", "--holds", resource]):
+        if a.side == "none":
+            continue
+        if a.why or a.rc:
+            rows.append(("?", a.name, "unknown", a.why or "its 'wk status --holds' exited %d" % a.rc))
         else:
-            rows += [tuple(l.split("\t")) for l in got.replace("\r", "").splitlines() if l]
+            rows += [tuple(line.split("\t")) for line in a.out.splitlines() if line]
     return rows
 
 
 def fleet_stores(root, env, machine):
-    """(name, ask) for the podman machine's store where this one is not it, and for each peer through its own wk."""
-    from wk import status
+    """Every other store a fleet resource is held in: the podman machine's where it is not this one, and each peer's."""
+    from wk import fleet
     from wk.places import Registry
     reg = Registry(root, env, machine)
-
-    def holds(driver, resource, why):
-        rc, out = driver.wk("status", "--holds", resource, quiet=True)
-        return (out, "") if rc == 0 else (None, why)
-
-    def peer(name):
-        def ask(resource):
-            t = reg.load(name)
-            side, why = t.probe()
-            if side != "answering":
-                return None, status.far_side_reason(t, side, why)
-            return holds(t, resource, "it answers, but its wk does not read --holds: wk sync --tools %s" % name)
-        return ask
-
-    stores = []
-    if not store.Store(env).is_local():
-        stores.append(("%s's podman machine" % machine_name(env, machine),
-                       lambda r: holds(reg.load("container"), r, "it did not answer: wk start, or wk sync --tools")))
-    return stores + [(p, peer(p)) for p in reg.peer_workstations()]
+    names = ([] if store.Store(env).is_local() else ["container"]) + [m for m in reg.machines() if reg.fleet.kind(m) == "peer"]
+    return lambda argv: fleet.each(reg, argv, names, env)
 
 
-def hold(records, fleet, machine, kind, name, kill, log, plan, pid, env):
-    """A hold on the holder's own record, or None under --dry-run or the claim a holding parent passed down (WK_DEVICE_HELD)."""
+def hold(records, fleet_rows, machine, kind, name, kill, log, plan, pid, env):
+    """A device claim on the holder's own record; None under --dry-run or when a holding parent passed it down (WK_DEVICE_HELD)."""
     res = "device:%s" % machine
     if env.get("WK_DEVICE_HELD") == res:
         return None
-    rows = fleet(res)
+    rows = fleet_rows(res)
     quiet = "".join("\n    %s -- %s" % (who, why) for _, who, what, why in rows if what == "unknown")
-    held = "".join("\n    %s on %s -- stop it there:  %s" % (what, who, stop) for _, who, what, stop in rows if what != "unknown")
     if quiet:
         act.warn("a machine that could be driving %s could not be asked:%s" % (machine, quiet))
-    if held:
-        act.barrier("%s is a fleet resource and another live task holds it:%s\n"
-                    "    Two drivers on one board make both results junk." % (machine, held))
-    if act.dry_run():
-        return None
-    return records.begin(kind, "here", name, kill, log, plan, holds=res, pid=pid)
+
+    def refuse(rows):
+        act.barrier("%s is a fleet resource and another live task holds it:%s\n    Two drivers on one board make both results junk."
+                    % (machine, "".join("\n    %s on %s -- stop it there:  %s" % (what, who, stop) for _, who, what, stop in rows)))
+    far = [r for r in rows if r[2] != "unknown"]
+    if far:
+        refuse(far)
+    return records.claim(kind, name, kill, log, plan, [res], lambda _, held: refuse([t.line().split("\t") for t in held]), pid=pid)

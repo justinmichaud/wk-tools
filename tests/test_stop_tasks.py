@@ -1,5 +1,7 @@
 """`wk stop --tasks` ends what is still running through the kill command each record names, and reads the tasks
 again afterwards for its exit status."""
+import contextlib
+import io
 import os
 from unittest import mock
 import shlex
@@ -100,6 +102,26 @@ class TestStopTasks(WkTest):
         cp = self.run_wk("stop", "--tasks", "--keep-vm", "--yes", env=self.env)
         self.assertNotEqual(0, cp.returncode, cp.stdout)
         self.assertIn("--keep-vm", cp.stdout)
+
+
+class TestEveryMachine(unittest.TestCase):
+    """`--all` asks each machine's own wk to stop its tasks; one that cannot be asked is a line and exit 3."""
+
+    def test_each_machine_answers_for_itself(self):
+        from wk import fleet
+        stop = load_cmd("stop")
+        reg = mock.Mock(machines=lambda: ["box", "here", "far"])
+        answers = [fleet.Answer("box", None, "answering", 1, "build ws -- left\n", ""), fleet.Answer("here", None, "none", None, "", ""),
+                   fleet.Answer("far", None, "unreachable", None, "", "unreachable over ssh")]
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(stop, "confirm", return_value=True), mock.patch.object(stop, "stop_tasks_here", return_value=0), \
+                mock.patch.object(stop.fleet, "each", return_value=answers) as each, mock.patch.dict(os.environ, {}), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(3, stop.stop_tasks_everywhere(reg, None))
+        self.assertEqual(each.call_args[0][1:], (["stop", "--tasks"], ["box", "here", "far"]))
+        self.assertIn("box", out.getvalue())
+        self.assertIn("far                    unreachable over ssh", err.getvalue())
+        self.assertNotIn("here", out.getvalue() + err.getvalue())
 
 
 class TestWhichVerdictsAreStillGoing(unittest.TestCase):

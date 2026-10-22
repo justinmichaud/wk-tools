@@ -44,7 +44,7 @@ class Sysimage:
     def building(self, ws):
         try:
             place = self.reg.load(self.reg.ws_place(ws))
-            return job.busy_reason(place, job.records_of(place, self.clock, self.machine), ws) is not None
+            return bool(job.records_of(place, self.clock, self.machine).holders("ws:" + ws))
         except (LookupError, OSError):
             return None
 
@@ -102,8 +102,7 @@ class Sysimage:
                 % (p["IMG_PRESET"], p["IMG_BUILDER"] or "no builder"))
 
     def ls(self, continued):
-        here = record.machine_name(self.env)
-        rows = lsmod.Listing(self.reg, record.row_label(self.env), here, self.building, clock=self.clock).rows()
+        rows = lsmod.Listing(self.reg, record.row_label(self.env), self.building, clock=self.clock).rows()
         if rows:
             if not continued:
                 print(lsmod.ROW % lsmod.HEADER)

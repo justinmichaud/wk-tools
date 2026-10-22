@@ -247,17 +247,17 @@ def bash(script, env=None, timeout=60, cwd=None):
 
 
 def builds_on_the_books_env(tmp, *labels):
-    """An environment in which builds_on_the_books() reads exactly `labels`:
-    a stub podman answers `machine ssh` with them and reports no running
-    machine (macOS), and the records hold one each (Linux)."""
+    """An environment in which builds_on_the_books() reads exactly `labels`: a stub podman answers `machine ssh` with
+    them (macOS), and this machine's records hold one live build each (Linux)."""
     tmp = Path(tmp)
-    records = tmp / "wk" / "builds"
-    records.mkdir(parents=True, exist_ok=True)
-    for i, label in enumerate(labels):
-        (records / str(i)).write_text(f"label={label}\n")
+    sys.path.insert(0, str(REPO / "lib"))
+    from wk import record
+    records = record.Records(env={"XDG_STATE_HOME": str(tmp), "HOME": str(tmp)})
+    for label in labels:
+        records.begin("build", "here", label, "true", "", ["compile"], holds=["build:" + record.host_name()])
     binp = tmp / "bin"
-    binp.mkdir(exist_ok=True)
-    lines = "".join(f"    echo 'label={label}'\n" for label in labels)
+    binp.mkdir(parents=True, exist_ok=True)
+    lines = "".join("    printf 'id\\tvm\\tbuild %s\\ttrue\\n'\n" % label for label in labels)
     (binp / "podman").write_text(
         '#!/bin/sh\ncase "$1 $2" in "machine ssh")\n' + lines + "    ;;\nesac\nexit 0\n")
     (binp / "podman").chmod(0o755)
@@ -598,25 +598,12 @@ def _build_in_the_way():
     return None
 
 
-# wk_state_dir (lib/common.sh), spelled for the shell that reads the records.
-# A record whose `pid:` holder is gone is a killed build (lib/wk/build.py's
-# holder_alive); any other holder is kept, since it cannot be read from here.
-_BUILD_RECORDS = r'''for f in "${XDG_STATE_HOME:-$HOME/.local/state}"/wk/builds/*; do
-    [ -f "$f" ] || continue
-    h=$(sed -n 's/^holder=//p' "$f")
-    case "$h" in pid:*) kill -0 "${h#pid:}" 2>/dev/null || continue ;; esac
-    cat "$f"
-done; true'''
-
-
 def builds_on_the_books():
-    """The builds recorded where a container workspace is really built: inside
-    the podman VM on macOS, on this machine on Linux (Budget.record,
-    lib/wk/resources.py). Read and never pruned -- `builds_running` deletes the
-    record of a holder it cannot see, and a reading may not mutate what it
-    reports on -- so a dead holder's record is skipped, not removed."""
-    out = container_side(_BUILD_RECORDS).stdout
-    return [l.split("=", 1)[1] for l in out.splitlines() if l.startswith("label=")]
+    """What holds the build budget where a container workspace is really built -- inside the podman VM on macOS, on
+    this machine on Linux -- as `wk status --holds` reads it there."""
+    tools = "/opt/wk-tools" if sys.platform == "darwin" else str(REPO)
+    out = container_side('python3 %s/cmd/status --holds "build:$(hostname -s | tr A-Z a-z)"' % tools).stdout
+    return [line.split("\t")[2] for line in out.splitlines() if line.count("\t") == 3]
 
 
 def machine_reachable(name, timeout=5):

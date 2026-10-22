@@ -31,7 +31,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, decl, places, record, status  # noqa: E402
+from wk import act, decl, fleet, places, record  # noqa: E402
 from wk.act import Refused, confirm, die, info, log, warn  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -80,17 +80,16 @@ def stop_tasks_everywhere(reg, records):
         die("nothing stopped")
     os.environ["WK_YES"] = "1"
     rc = stop_tasks_here(records)
-    for m in reg.machines():
-        driver = reg.load(m)
-        side, why = driver.probe()
-        if side != "answering":
-            sys.stderr.write("%-22s %s\n" % (m, status.far_side_reason(driver, side, why)))
+    for a in fleet.each(reg, ["stop", "--tasks"], reg.machines(), quiet=False):
+        if a.side == "none":
+            continue
+        if a.why:
+            sys.stderr.write("%-22s %s\n" % (a.name, a.why))
             rc = max(rc, 3)   # a machine that cannot be asked may be running something
             continue
-        rc_there, out = driver.wk("stop", "--tasks")
-        for line in out.splitlines():
-            sys.stdout.write("%-22s%s\n" % (m, line))
-        rc = max(rc, rc_there)
+        for line in a.out.splitlines():
+            sys.stdout.write("%-22s%s\n" % (a.name, line))
+        rc = max(rc, a.rc)
     return rc
 
 

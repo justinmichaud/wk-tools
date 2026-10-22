@@ -1,70 +1,46 @@
-"""A macOS `wk ls` is one table from two halves, and the "(no workspaces ...)" note appears only when both are empty:
-the dispatcher hands the halves --more-follows and --empty-so-far."""
+"""`wk ls` is one table: places with no wk of their own are read here, every other place's own `wk ls --json` is
+merged in, and a place that was not asked is named."""
 import contextlib
 import io
 import json
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, fake_workspace, temp_store
+from tests.fakes import FakeDriver, FakeRegistry
+from tests.support import REPO, fake_workspace, load_cmd
 from tests.test_options import run_impl
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl as D  # noqa: E402
-from wk import dispatch  # noqa: E402
+from wk.machine import Fake  # noqa: E402
+
+ls = load_cmd("ls")
 
 
-class TestTheEmptyNoteIsDecidedOnce(unittest.TestCase):
-    def _ls(self, *flags):
-        with temp_store() as store:
-            # A podman that lists nothing, wherever the real one is installed.
-            binp = store["path"] / "bin"
-            binp.mkdir(parents=True, exist_ok=True)
-            (binp / "podman").write_text("#!/bin/sh\n[ \"$1 $2\" = 'machine inspect' ] && echo '[{\"Name\": \"wk\", \"State\": \"stopped\"}]'\nexit 0\n")
-            (binp / "podman").chmod(0o755)
-            return run_impl("ls", *flags, env={
-                "WK_STORE": store["WK_STORE"],
-                "XDG_STATE_HOME": str(store["path"] / "state"),
-                "WK_PLACE": "container",
-                "PATH": f"{binp}:/usr/bin:/bin",
-            })
+class TestOneTable(unittest.TestCase):
+    def listed(self, drivers, *argv):
+        by_name = {d.name: d for d in drivers}
+        reg = FakeRegistry({}, Fake(), lambda name, env: by_name[name], names=list(by_name))
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(ls.places, "Registry", lambda root: reg), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            ls.main(list(argv))
+        return out.getvalue(), err.getvalue()
 
-    def test_only_a_bare_ls_or_a_second_half_after_nothing_prints_the_note(self):
-        for flags, note, header in ((("--more-follows",), False, True), (("--continued", "--empty-so-far"), True, False),
-                                    (("--continued",), False, False), ((), True, True)):
-            with self.subTest(flags=flags):
-                cp = self._ls(*flags)
-                self.assertEqual(cp.returncode, 0, cp.stdout)
-                self.assertEqual(note, "no workspaces" in cp.stdout, cp.stdout)
-                self.assertEqual(header, "NAME" in cp.stdout, cp.stdout)
+    def test_every_answering_place_s_rows_are_merged_and_a_silent_one_named(self):
+        far = {"name": "w1", "place": "box", "state": "present", "base": "main", "snap": "-", "arch": "native", "changes": "1G"}
+        box = FakeDriver("box", out=json.dumps({"workspaces": [far]}))
+        down = FakeDriver("down", side="unreachable", why="timed out")
+        out, err = self.listed([box, down], "--json")
+        self.assertEqual(json.loads(out), {"workspaces": [far]})
+        self.assertEqual(box.asked[0][0], ("ls", "--json"))
+        self.assertIn("down: unreachable over ssh: timed out, so its workspaces are not listed", err)
+        out, _ = self.listed([box])
+        self.assertEqual(out.splitlines()[1].split(), ["w1", "box", "present", "main", "-", "native", "1G"])
 
-    def _halves(self, first_half_lines):
-        with tempfile.TemporaryDirectory(prefix="wk-test-halves-") as tmp:
-            stub, argv = Path(tmp) / "ls", Path(tmp) / "argv"
-            stub.write_text("#!/bin/sh\n# wk ls -- a stub\n# wk: where=workspace name=none bare=merged readonly\n"
-                            f'echo "$@" > {argv}\n'
-                            + "".join(f"echo '{l}'\n" for l in first_half_lines))
-            stub.chmod(0o755)
-            inv = dispatch.Invocation("ls", D.Decl(stub), [])
-            forwarded = mock.Mock(return_value=0)
-            with mock.patch.object(dispatch, "registry", return_value=mock.Mock(all=mock.Mock(return_value=["container", "fakelocal"]))), \
-                 mock.patch.object(dispatch, "machine_running", return_value=True), \
-                 mock.patch.object(dispatch, "forward_status", forwarded), \
-                 contextlib.redirect_stdout(io.StringIO()):
-                with self.assertRaises(dispatch.Exit):
-                    dispatch.bare_report(inv, "ls", [])
-            return argv.read_text().split(), forwarded.call_args[0][2]
-
-    def test_the_dispatcher_owns_the_flags(self):
-        first, second = self._halves(["NAME"])
-        self.assertEqual(first, ["--more-follows"])
-        self.assertEqual(second, ["--continued", "--empty-so-far"])
-        first, second = self._halves(["NAME", "a-workspace"])
-        self.assertEqual(first, ["--more-follows"])
-        self.assertEqual(second, ["--continued"])
+    def test_an_answer_that_is_no_json_is_named(self):
+        _, err = self.listed([FakeDriver("box", out="not json")], "--json")
+        self.assertIn("box: its 'wk ls --json' printed no JSON", err)
 
 
 class TestInsideAWorkspace(unittest.TestCase):

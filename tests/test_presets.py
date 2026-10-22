@@ -221,10 +221,6 @@ class TestCompilerAndMemoryOverrides(unittest.TestCase):
         e = env_of(preset("gtk-debug"))
         self.assertEqual((e["CC"], e["CXX"]), ("clang", "clang++"))
 
-    def test_the_memory_floor_reaches_the_build_only_when_set(self):
-        self.assertEqual(env_of(preset("gtk-debug"), {"WK_MEM_FLOOR_MB": "1500"})["WK_MEM_FLOOR_MB"], "1500")
-        self.assertNotIn("WK_MEM_FLOOR_MB", env_of(preset("gtk-debug")))
-
 
 if __name__ == "__main__":
     unittest.main()

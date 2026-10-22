@@ -3,7 +3,6 @@ import contextlib
 import io
 import os
 import posix
-import re
 import signal
 import subprocess
 import sys
@@ -43,12 +42,8 @@ class World(JobWorld):
             t.set(k, v)
         return t
 
-    def budget_files(self):
-        d = os.path.join(self.env["XDG_STATE_HOME"], "wk", "builds")
-        return sorted(p for p in self.files if p.startswith(d + "/"))
-
     def state(self):
-        return ([(t.field("kind"), t.field("exit")) for t in self.recs().list()], len(self.budget_files()))
+        return [(t.field("kind"), t.field("exit"), t.holds()) for t in self.recs().list()]
 
 
 class BuildTest(FlowTest):
@@ -91,11 +86,9 @@ class TestTheRecordARunWrites(BuildTest):
 
     def test_the_budget_is_on_the_books_under_this_driver(self):
         self.run_()
-        (f,) = self.w.budget_files()
-        text = self.w.files[f]
-        self.assertIn("label=wk build ws (jsc-release)\n", text)
-        self.assertIn("holder=pid:%d\n" % os.getpid(), text)
-        self.assertIn("machine=here\n", text)
+        (t,) = self.w.recs().list()
+        self.assertEqual((t.holds(), t.field("pid"), t.field("preset")), (["ws:ws", "build:here"], str(os.getpid()), "jsc-release"))
+        self.assertTrue(int(t.field("jobs")) and int(t.field("budget_mb")))
 
     def test_a_branch_is_checked_out_first_as_its_own_step(self):
         rc, err = self.run_(None, "jsc-release", "--branch", "topic")
@@ -144,17 +137,12 @@ class TestTheRecordARunWrites(BuildTest):
         self.assertIn(("kill", 4242, int(signal.SIGTERM)), self.w.effects)
         self.assertEqual(self.w.recs().list()[0].field("exit"), "stalled")
 
-    def test_the_log_is_truncated_before_the_record_says_running(self):
-        Path(self.w.log).write_text("the previous build's log\n")
-        seen = []
-        real = record.Records.begin
-
-        def begin(recs, *a, **kw):
-            seen.append(self.w.files.get(self.w.log))
-            return real(recs, *a, **kw)
-        with mock.patch.object(record.Records, "begin", begin):
-            self.run_()
-        self.assertEqual(seen, [""])
+    def test_a_refused_build_leaves_the_running_ones_log_alone(self):
+        self.w.files[self.w.log] = "the running build's log\n"
+        self.w.begin("yocto", holds="ws:ws")
+        self.w.pids.add(4242)
+        self.refused()
+        self.assertEqual(self.w.files[self.w.log], "the running build's log\n")
 
 
 class TestInterrupted(BuildTest):
@@ -218,7 +206,7 @@ class TestRefusals(BuildTest):
         with unittest.mock.patch.object(JobDriver, "info", lambda self, ws: "stopped"):
             err = self.refused(w, "mac-release")
         self.assertIn("'ws' is not running (wk start ws)", err)
-        self.assertEqual(w.state(), ([], 0))
+        self.assertEqual(w.state(), [])
         self.assertFalse(os.path.exists(w.log))
 
     def test_no_config_prints_the_usage_and_the_list(self):
@@ -249,35 +237,25 @@ class TestRefusals(BuildTest):
     def test_a_bad_env_is_refused(self):
         self.assertIn("--env takes NAME=VALUE, got nope", self.refused(None, "jsc-release", "--env", "nope"))
 
-    def test_a_held_workspace_lock_is_refused_at_once_naming_kill(self):
-        lock = self.w.reg.load("box").store.lock_path("ws-ws")
-        self.w.files[lock] = "pid=5555 tok=x at=now cmd=wk"
-        self.w.pids.add(5555)
-        err = self.refused()
-        self.assertIn("ws-ws", err)
-        self.assertIn("Stop it:    wk build ws --kill", err)
-        self.assertEqual(self.w.recs().list(), [])
-
-    def test_a_job_holding_the_checkout_is_a_barrier_naming_its_stop(self):
-        self.w.begin("yocto", kill="wk sysimage build x --stop")
+    def test_a_job_holding_the_checkout_is_refused_naming_its_stop(self):
+        held = self.w.begin("yocto", kill="wk sysimage build x --stop", holds="ws:ws")
         self.w.pids.add(4242)
         err = self.refused()
-        self.assertIn("'ws' already has a job running in it: yocto (pid 4242, here)  stop it: wk sysimage build x --stop", err)
-        self.assertIn("--force proceeds anyway", err)
+        self.assertIn("'ws' already has a job running in it:\n    yocto (pid 4242 on here)  stop it: wk sysimage build x --stop", err)
+        self.assertEqual([t.id for t in self.w.recs().list()], [held.id])
 
     def test_the_job_that_started_this_build_is_not_counted(self):
-        t = self.w.begin("babysit")
+        t = self.w.begin("babysit", holds="ws:ws")
         self.w.pids.add(4242)
         self.w.env["WK_TASK_PARENT"] = str(t.path)
         rc, err = self.run_()
         self.assertEqual(rc, 0, err)
 
     def test_another_build_on_this_machine_is_a_retry_barrier(self):
-        from wk.resources import Budget
         self.w.pids.add(99)
-        Budget(self.w, self.w.env).record("wk build other (gtk-release)", 6, 9216, "pid:99")
+        self.w.begin("build", name="other", pid=99, holds="build:here", jobs="6", budget_mb="9216")
         err = self.refused(status=act.RETRY_EXIT)
-        self.assertIn("here is already building:\n      wk build other (gtk-release) (6 jobs, 9216 MB)", err)
+        self.assertIn("here is already building:\n      build other (6 jobs, 9216 MB)", err)
         self.assertIn("minus 9216MB other builds", err)
 
     def test_a_full_disk_is_a_barrier_and_a_guest_is_asked_about_its_own(self):
@@ -361,10 +339,10 @@ class TestDryRun(BuildTest):
         dry = Recording(self.tmp)
         os.environ["WK_DRY_RUN"] = "1"
         rc, err = self.run_(dry)
-        rel = [tuple(re.sub(r"/builds/.*", "/builds/*", str(x).replace(str(w.tmp), "")) for x in e) for w in (wet, dry) for e in mutations(w)]
+        rel = [tuple(str(x).replace(str(w.tmp), "") for x in e) for w in (wet, dry) for e in mutations(w)]
         n = len(mutations(wet))
         self.assertEqual(rel[:n], rel[n:])
-        self.assertGreaterEqual(n, 4)
+        self.assertGreaterEqual(n, 3)
         self.assertIn("would run: exec ws python3 -I -c", err)
         self.assertEqual(dry.pids, {os.getpid()})
 
@@ -547,33 +525,6 @@ class TestBabysitStates(BuildTest):
         self.assertEqual(self.record().field("exit"), "cancelled")
         dead = self.w.begin("babysit", name="other", pid=31)
         self.assertEqual(dead.verdict("pid"), "died")
-
-
-class TestBusyReason(BuildTest):
-    def driver(self):
-        return self.w.reg.load("box")
-
-    def test_a_pid_file_in_the_home_alive_in_the_workspace_is_busy(self):
-        home = os.path.join(self.w.ws_dir, "home")
-        self.w.dirs.add(home)
-        self.w.files[os.path.join(home, "buildroot-image.pid")] = "77\n"
-        self.w.answer(["exec", "ws", "kill", "-0", "77"])
-        self.assertEqual(job.busy_reason(self.driver(), self.w.recs(), "ws"), "buildroot-image (pid 77 in the workspace)")
-        self.w.answer(["exec", "ws", "kill", "-0", "77"], rc=1)
-        self.assertIsNone(job.busy_reason(self.driver(), self.w.recs(), "ws"))
-
-    def test_a_pid_a_target_record_names_is_judged_by_its_kind_alone(self):
-        home = os.path.join(self.w.ws_dir, "home")
-        self.w.files[os.path.join(home, "jsc-tests.pid")] = "88\n"
-        self.w.begin("test", pid=88, where="place")
-        self.w.pids.add(88)
-        self.w.answer(["exec", "ws", "kill", "-0", "88"])
-        self.assertIsNone(job.busy_reason(self.driver(), self.w.recs(), "ws"))
-
-    def test_another_workspaces_job_is_not_this_ones(self):
-        self.w.begin("build", name="other", pid=4242)
-        self.w.pids.add(4242)
-        self.assertIsNone(job.busy_reason(self.driver(), self.w.recs(), "ws"))
 
 
 class TestJob(BuildTest):

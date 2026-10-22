@@ -17,7 +17,7 @@ from tests.test_bench_report import in_process
 from tests.test_bench_task import TASK, add_run, make_task, refusal, registry
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places, status  # noqa: E402
+from wk import places  # noqa: E402
 from wk.bench import cli, record, report  # noqa: E402
 from wk.clock import FakeClock  # noqa: E402
 from wk.act import Refused  # noqa: E402
@@ -74,8 +74,6 @@ class TestATaskLivesInItsWorkspace(WkTest):
         self.assertIn(str(in_ws), listed)
         self.assertIn(str(in_other), listed)
         self.assertIn("data      %s" % in_ws, in_process(b.report, ["20260901T000000Z-w"], "", True).stdout)
-        (rec,) = status.bench_records(reg.store, "here", lambda pid: False)
-        self.assertEqual((rec["task"], rec["path"]), ("20260901T000000Z-w", str(in_ws)))
 
 
 class TestTheReportConfirmsWhatWasBuiltAndChecked(WkTest):

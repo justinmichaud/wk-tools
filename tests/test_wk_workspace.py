@@ -717,19 +717,19 @@ class TestNewDriver(WorkspaceTest):
     def test_the_sdk_is_refreshed_under_its_lock_before_the_store_lock_and_the_create(self):
         self.stderr(lambda: self.detached())
         self.assertEqual(self.lock_takes(heads=("sdk-refresh", "wkdev-create")),
-                         ["lock sdk", "sdk-refresh", "lock ws-ws", "lock store", "wkdev-create"])
+                         ["lock sdk", "sdk-refresh", "lock holds", "lock store", "wkdev-create"])
         for kind in ("vm", "remote"):
             w = self.make_world(kinds={"fakebox": kind})
             self.attempt(w)
             takes = self.lock_takes(w, heads=("sdk-refresh",))
-            self.assertEqual(takes[0], "lock ws-ws", kind)
+            self.assertEqual(takes[0], "lock holds", kind)
             self.assertNotIn("lock sdk", takes, kind)
             self.assertNotIn("sdk-refresh", takes, kind)
 
     def test_the_mirror_is_refreshed_alone_before_the_store_lock_and_only_where_the_checkout_reads_it(self):
         self.stderr(lambda: self.detached())
         self.assertEqual(self.lock_takes(heads=(WK, "wkdev-create")),
-                         ["lock sdk", "lock ws-ws", WK, "lock store", "wkdev-create", WK])
+                         ["lock sdk", "lock holds", WK, "lock store", "wkdev-create", WK])
         self.assertEqual(self.runs(head=WK)[0], (WK, "sync", "--mirror"))
         for kind, want in (("vm", [(WK, "sync", "--mirror")]), ("remote", [])):
             w = self.make_world(kinds={"fakebox": kind})
@@ -992,14 +992,14 @@ class TestRmOne(WorkspaceTest):
         self.gone()
         self.assertEqual(self.runs(head="podman"), [])
 
-    def test_a_running_job_refuses_before_any_lock_or_effect(self):
+    def test_a_running_job_refuses_before_any_effect(self):
         self.w.begin("build", pid=4242)
         self.w.pids.add(4242)
         err = self.refused(self.rm)
         self.assertIn("'ws' has work running in it, and destroying it under a running job\n    leaves that job compiling into a directory that is gone:\n"
                       "    build (pid 4242 on here)  stop it:  wk build ws --kill", err)
         self.assertIn("wk-ws", self.w.containers)
-        self.assertEqual(self.lock_takes(), [])
+        self.assertEqual(self.lock_takes(), ["lock holds"], "the check is under the claim lock, so nothing starts after it")
 
     def test_a_local_target_refuses_naming_the_host(self):
         w = self.make_world(kinds={"fakebox": "local"})

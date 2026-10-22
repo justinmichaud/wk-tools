@@ -83,7 +83,7 @@ def remedy(ws):
     return "a publish is made from a shell of your own:  wk enter %s" % ws
 
 
-def walk_up(proc, pid, ws, until):
+def walk_up(proc, pid, ws, until, agents=True):
     """The chain from `pid` up to the first process `until` takes, left out; None past pid 1 or a gone parent; Denied past an agent."""
     chain, seen = [], set()
     while pid and pid > 1 and pid not in seen:
@@ -93,7 +93,7 @@ def walk_up(proc, pid, ws, until):
         parent = proc.ppid(pid)
         if parent is None:
             return None
-        agent = agent_word(proc.cmdline(pid), proc.exe(pid))
+        agent = agents and agent_word(proc.cmdline(pid), proc.exe(pid))
         if agent:
             raise Denied("an agent session (%s, pid %d) is behind this caller, and nothing an agent runs may publish" % (agent, pid),
                          "end the session, then " + remedy(ws), "agent")
@@ -115,7 +115,12 @@ def person(proc, pid, ws):
 
 
 def bridged(proc, pid, command, ws):
-    if walk_up(proc, pid, ws, lambda p: p == command) is None:
+    try:
+        person(proc, command, ws)
+        persons = True
+    except Denied:
+        persons = False
+    if walk_up(proc, pid, ws, lambda p: p == command, persons) is None:
         raise Denied("pid %s is not under the command this bridge serves (pid %d)" % (pid or "?", command), remedy(ws), "orphan")
 
 

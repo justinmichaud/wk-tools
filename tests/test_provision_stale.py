@@ -61,14 +61,15 @@ class TestTheBuildMachineRecord(unittest.TestCase):
 
 class TestDoctorReportsIt(unittest.TestCase):
     def test_doctor_reports_the_machine_through_that_one_function(self):
-        from tests.test_doctor import MISS, OK, build_doctor
+        from tests.test_doctor import MISS, OK, build_doctor, deps
         asked = []
 
         def stale(driver, root):
             asked.append(driver.name)
             return "provisioned before this record existed" if driver.name == "old" else None
-        doc = build_doctor(probe=lambda t, root: "family=debian\n", stale=stale)
-        (old,), (fresh,) = list(doc.build_machine("old")), list(doc.build_machine("fresh"))
+        with deps(probe=lambda t, root: "family=debian\n", stale=stale):
+            doc = build_doctor()
+            (old,), (fresh,) = list(doc.build_machine("old")), list(doc.build_machine("fresh"))
         self.assertEqual((old[0], old[2]), (MISS, "wk machine setup old"))
         self.assertEqual(fresh[0], OK)
         self.assertEqual(["old", "fresh"], asked)
