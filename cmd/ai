@@ -24,6 +24,7 @@ import os
 import shlex
 import signal
 import sys
+import uuid
 
 from wk import agents, images, job, pushgate, secrets, store, wall
 from wk.act import barrier, die, info, warn
@@ -46,13 +47,13 @@ def _ending(signum, frame):
     raise job.Interrupted(signum)
 
 
-def end_session(driver, ws, env, clock=None):
-    """The agents in `ws`, TERM then KILL after job.kill's grace: a client of the place's exec dying leaves them running."""
+def end_session(driver, ws, env, session, clock=None):
+    """This session's agents (by WK_SESSION), TERM then KILL after job.kill's grace; another session's are not its to end."""
     def send(signum):
-        pids = pushgate.agent_pids(driver, ws)
+        pids = pushgate.agent_pids(driver, ws, session)
         if pids:
             driver.exec(ws, ["kill", "-" + job.signal_name(signum)] + pids)
-    return job.terminate(send, lambda: not pushgate.agent_pids(driver, ws), clock or Clock(), job.kill_wait(env), 5)
+    return job.terminate(send, lambda: not pushgate.agent_pids(driver, ws, session), clock or Clock(), job.kill_wait(env), 5)
 
 
 def foreground(machine, argv, cwd, end):
@@ -137,9 +138,11 @@ class Ai:
         words = prefix + [agent_bin] + mode + self.remote_control() + args
         line = "cd %s && exec %s" % (shlex.quote(t.src(name)), shlex.join(words))
         # The babysitter's fix loop runs this under nohup with -p, where a terminal of its own would be demanded.
-        argv, cwd = t.exec_argv(name, ["env", "WK_AGENT=" + self.agent, "WK_WORKSPACE=" + name, "bash", "-lc", line],
+        session = uuid.uuid4().hex
+        argv, cwd = t.exec_argv(name, ["env", "WK_AGENT=" + self.agent, "WK_WORKSPACE=" + name, "WK_SESSION=" + session,
+                                       "bash", "-lc", line],
                                 on_a_terminal())
-        return foreground(self.machine, argv, cwd, lambda: end_session(t, name, self.env))
+        return foreground(self.machine, argv, cwd, lambda: end_session(t, name, self.env, session))
 
     def run(self, args):
         t, name = self.driver, self.name

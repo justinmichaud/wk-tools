@@ -190,7 +190,10 @@ class TestItVerifiesTheWall(_Host):
 
     def test_every_hand_over_names_the_agent_and_the_workspace(self):
         self.ai("claude")
-        self.assertEqual(["env", "WK_AGENT=claude", "WK_WORKSPACE=demo", "bash", "-lc"], self.handed[0][-6:-1])
+        words = self.handed[0][-7:-1]
+        self.assertEqual(["env", "WK_AGENT=claude", "WK_WORKSPACE=demo"], words[:3])
+        self.assertRegex(words[3], r"^WK_SESSION=[0-9a-f]{32}$")   # the id end_session ends this session's agents by
+        self.assertEqual(["bash", "-lc"], words[4:])
 
     def test_a_checkout_path_with_a_space_survives_the_login_shell(self):
         with mock.patch.object(places.Container, "src", return_value="/src/Web Kit"):

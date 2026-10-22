@@ -125,8 +125,12 @@ def bridged(proc, pid, command, ws):
         raise Denied("pid %s is not under the command this bridge serves (pid %d)" % (pid or "?", command), remedy(ws), "orphan")
 
 
-def agent_pids(t, ws):
-    r = t.exec(ws, ["sh", "-c", AGENT_PS_SCAN])
+def agent_pids(t, ws, session=""):
+    scan = AGENT_PS_SCAN
+    if session:
+        scan = ("for p in $(%s); do tr '\\0' '\\n' </proc/$p/environ 2>/dev/null | grep -qx 'WK_SESSION=%s' && echo $p; done"
+                % (AGENT_PS_SCAN.replace("\n", " "), session))
+    r = t.exec(ws, ["sh", "-c", scan])
     if not r.ok:
         return [] if t.info(ws) in NOT_RUNNING else None
     return [p for p in r.out.replace("\r", "").split() if p.isdigit()]
