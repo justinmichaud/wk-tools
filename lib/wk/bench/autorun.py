@@ -1,5 +1,5 @@
 """A planted A/B run by the bench install itself at autologin: the machine readied, the job's `AB` into the task the plant
-wrote, the machine handed back or off however it ends. State advances before a step, so a power cut repeats none."""
+wrote, the machine held and powered off however it ends. State advances before a step, so a power cut repeats none."""
 
 import json
 import os
@@ -92,54 +92,30 @@ class Autorun:
     def sudo(self, *argv):
         return self.m.act_run(["sudo", "-n"] + list(argv)).ok
 
-    def host_install(self):
-        try:
-            names = self.m.listdir("/Volumes")
-        except OSError:
-            names = []
-        here = self.m.run(["stat", "-f", "%d", "/"]).out.strip()
-        found = [v for v in ("/Volumes/" + n for n in names)
-                 if self.m.exists(v + "/System/Library/CoreServices/SystemVersion.plist") and not self.m.exists(v + MARKER)
-                 and self.m.run(["stat", "-f", "%d", v]).out.strip() != here]
-        return found[0] if len(found) == 1 else ""
-
     def hold(self):
-        """Host mode needs a password typed at the machine, so a boot with no number is held where its log can be read."""
-        task = os.path.join(self.root, "results", self.job.get("task") or "-", "runs")
-        if not self.had_job or self.hold_secs <= 0 or (self.m.isdir(task) and self.m.listdir(task)):
+        """The install stays up and reachable a while after its job, so the log and the legs can be read over the tailnet."""
+        if self.hold_secs <= 0:
             return
         try:
             node = kv(self.m.read(self.root + "/tailnet/tailnet.conf")).get("hostname") or "<the bench node>"
         except OSError:
             node = "<the bench node>"
-        self.say("no number came out of this boot. Holding the machine here for %ds, reachable as host mode would not be:"
-                 % self.hold_secs, "    ssh %s tail -120 %s" % (node, self.log_path))
+        self.say("holding this install up for %ds, reachable:" % self.hold_secs, "    ssh %s tail -120 %s" % (node, self.log_path))
         self.pause(self.hold_secs)
 
     def leave(self, why):
+        """A boot that ran a job holds, then powers off; one that ran none stays at its login window. Nothing is blessed:
+        the firmware default stays this volume, and the host install is the person's pick at the power button."""
         with self.lock:
             if self.left:
                 return
             self.left = True
         self.state_set(left_at=self.clock.iso())
+        if not self.had_job:
+            self.say("%s: nothing ran, so this install stays at its login window" % why)
+            return
         self.hold()
-        host = self.host_install()
-        if host:
-            r = self.wkmac("volume-group", host)
-            want = r.out.strip() if r.ok else ""
-            self.sudo("bless", "--mount", host, "--setBoot")
-            got = self.wkmac("boot-volume").out.strip().split(":")[-1]
-            if want and got == want:
-                self.say("handing the machine back: %s" % why, "  the firmware now names %s, so this reboot comes up in host mode" % host)
-                self.m.act_run(["sync"])
-                if not self.sudo("/sbin/reboot"):
-                    self.say("WARNING: could not reboot")
-                return
-            self.say("  the firmware still names this volume (reads '%s', wanted '%s'), so it powers off: a reboot would measure again"
-                     % (got or "nothing", want or "unreadable"))
-        else:
-            self.say("  no single host install is mounted, so there is nothing to hand back to")
-        self.say("powering off: %s" % why)
+        self.say("powering off: %s" % why, "  the host install is the power-button pick at the next startup")
         self.m.act_run(["sync"])
         # halt, not `shutdown -h`: that asks loginwindow, and any modal dialog on the screen vetoes it.
         if not self.sudo("/sbin/halt"):
@@ -173,7 +149,7 @@ class Autorun:
             self.say("no job at %s -- nothing to run" % self.job_path)
             self.quit("no job", agent=True)
         if self.state().get("phase") == "done":
-            self.say("the job is already finished and this volume, the firmware default, booted again: powering off rather than looping")
+            self.say("the job is already finished; this volume is the firmware default and booted again")
             self.quit("job already complete", agent=True)
         attempts = int(self.state().get("attempts") or 0) + 1
         self.state_set(attempts=attempts)

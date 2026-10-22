@@ -129,7 +129,7 @@ class Side:
     def refuse_on_bench(self):
         if self.ch.side == "bench":
             die("%s answers as its bench install, and nothing is staged onto a running measurement.\n"
-                "    Stage once it is back:  wk boot %s --status" % (self.d.who(), self.d.who()))
+                "    Stage from its host install; %s." % (self.d.who(), self.d.way_back()))
 
     def land(self, src, dest, steps):
         tmp = "/tmp/wk-put-%d-%s" % (os.getpid(), os.path.basename(src))
@@ -181,14 +181,10 @@ class VolumeSide(Side):
         return TOOLS if m.run(["test", "-x", TOOLS + "/wk"]).ok else None
 
     def restart_ready(self):
-        # A helper too old to name its detach mechanism exits 0 having rebooted nothing.
-        return any(l.startswith("wk-boot-priv: detach=") for l in self.d.priv("status")[1].splitlines())
+        return not self.d.helper_problem()
 
     def restart_detail(self):
-        if self.d.priv("status")[1].startswith("wk-boot-priv: ok"):
-            return ("the boot helper on %s answers, but names no detach mechanism, so it is older than this tree -- "
-                    "its reboot exits 0 having rebooted nothing" % self.d.c("ssh"))
-        return "no boot helper on %s, and plain sudo there wants a password" % self.d.c("ssh")
+        return self.d.helper_problem()
 
 
 class GuestSide(Side):
@@ -538,7 +534,7 @@ class Volume(System):
         if not act.dry_run() and self.scanned() != self.stamp:
             warn("a software-update scan ran during this leg; the report drops it")
             record.write_env(os.path.join(leg.out, "env.json"), {"unclean": "a software-update scan ran across it"}, update=True, machine=leg.machine)
-        log("  it is on the bench volume, so it survives the way back:  wk bench ab --devices %s --collect" % self.machine_name)
+        log("  it is on the bench volume, read from the host install:  wk bench ab --devices %s --collect" % self.machine_name)
 
     def after(self, leg):
         """ASLR cannot be turned off on Apple Silicon, so what is recorded is the load address slide that happened."""

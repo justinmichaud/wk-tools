@@ -1,5 +1,5 @@
 """The planted A/B a macOS bench install runs by itself (lib/wk/bench/autorun.py): the machine readied, the job's AB
-handed what the job names, the machine handed back or off however it ends; and the readings it judges the install by
+handed what the job names, the machine held and powered off however it ends; and the readings it judges the install by
 (bench/mac-quiet-desktop.sh)."""
 import contextlib
 import io
@@ -109,7 +109,6 @@ AGENT = HOME + "/Library/LaunchAgents/com.wk.bench-ab.plist"
 STATE = ROOT + "/autorun.state"
 STATE_TEXT = "phase=planted\ntask=T1\nattempts=0\n"
 TASK = ROOT + "/results/T1"
-HOST = "/Volumes/Macintosh HD"
 WKMAC = ["python3", TOOLS + "/" + mac.WKMAC]
 CHECK = ["/usr/bin/python3", TOOLS + "/" + mac.CHECK]
 HALT = ("sudo", "-n", "/sbin/halt")
@@ -130,7 +129,7 @@ def job(**over):
 
 
 class World:
-    """A planted bench install: marker, job, state, agent, one host install to hand back to; the job's AB a recorder."""
+    """A planted bench install: marker, job, state, agent; the job's AB a recorder."""
 
     def __init__(self, job_doc=None, env=None, outcome="resolved-at-round-2", legs=2):
         self.fake, self.clock = Fake("bench"), FakeClock()
@@ -143,12 +142,10 @@ class World:
         f._set_file(STATE, STATE_TEXT)
         f._set_file(AGENT, "<plist/>")
         f._set_file(TOOLS + "/wk", "")
-        f._set_file(HOST + "/System/Library/CoreServices/SystemVersion.plist", "")
         f.dirs.update({"/var/folders/T", TASK + "/runs"})
         answers = {("sysctl",): "{ sec = 1757000000, usec = 0 } Thu", ("stat", "-f", "%d", "/"): "1",
                    ("stat", "-f", "%d"): "2", tuple(WKMAC + ["brightness"]): "0.0", tuple(WKMAC + ["auto-brightness"]): "off",
-                   tuple(WKMAC + ["display-mode"]): "1512x982", tuple(WKMAC + ["volume-group"]): "HOSTGRP",
-                   tuple(WKMAC + ["boot-volume"]): "AAA:HOSTGRP", tuple(CHECK + ["--displays-only"]): "displays=built-in",
+                   tuple(WKMAC + ["display-mode"]): "1512x982", tuple(CHECK + ["--displays-only"]): "displays=built-in",
                    ("getconf",): "/var/folders/T", tuple(lib(screen.WINDOWS, "wk_window_probe")): "windows=MiniBrowser:Speedometer\n",
                    tuple(lib(screen.WINDOWS, "wk_window_unexpected")): ""}
         for prefix, out in answers.items():
@@ -193,12 +190,12 @@ class World:
 
 
 class TestTheJobRuns(unittest.TestCase):
-    def test_a_planted_job_measures_into_its_task_and_hands_the_machine_back(self):
+    def test_a_planted_job_measures_into_its_task_and_powers_off(self):
         w = World()
         self.assertEqual(0, w.run(), w.log())
         s = w.state()
         self.assertEqual(("done", "resolved-at-round-2", "1"), (s["phase"], s["outcome"], s["attempts"]))
-        self.assertEqual([REBOOT], w.power())
+        self.assertEqual([HALT], w.power())
         self.assertIn(AGENT, w.fake.files, "a finished job's next boot removes the agent, not this one")
 
     def test_the_ab_is_the_jobs_plans_arms_and_rule_over_this_volume_under_the_plants_task(self):
@@ -218,7 +215,7 @@ class TestTheJobRuns(unittest.TestCase):
         env = w.abs[0]["env"]
         self.assertEqual((env["WK_BENCH_ASLR"], env["WK_FORCE"]), ("off", "1"))
 
-    def test_an_ab_that_ends_with_nothing_still_hands_back_and_records_it_failed(self):
+    def test_an_ab_that_ends_with_nothing_still_powers_off_and_records_it_failed(self):
         w = World(outcome="")
         w.run()
         self.assertEqual("failed", w.state()["outcome"])
@@ -268,29 +265,19 @@ class TestTheSettle(unittest.TestCase):
 
 
 class TestTheMachineEndsUpOff(unittest.TestCase):
-    def leave(self, w):
+    def test_leaving_after_a_job_holds_then_powers_off_once_and_blesses_nothing(self):
+        w = World(env={"WK_MAC_BENCH_HOLD": "120"})
         a = autorun.Autorun(w.fake, w.clock, w.env, background=w.armed.append)
+        a.had_job = True
         with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()) as w.out:
             a.leave("the reason")
             a.leave("a second reason")
-        return w
-
-    def test_a_bless_that_took_hands_the_machine_back(self):
-        w = self.leave(World())
-        self.assertIn(("sudo", "-n", "bless", "--mount", HOST, "--setBoot"), w.calls())
-        self.assertEqual([REBOOT], w.power())
+        self.assertEqual([120], w.clock.slept)
+        self.assertIn("tail -120 %s/autorun.log" % ROOT, w.log())
+        self.assertEqual([HALT], w.power())
         self.assertIn("the reason", w.log())
         self.assertNotIn("a second reason", w.log())
-
-    def test_with_no_one_host_install_to_hand_back_to_it_halts(self):
-        for why, setup in (("a bless that did not take", lambda f: f.answer(WKMAC + ["boot-volume"], out="AAA:BENCHGRP")),
-                           ("no host install", lambda f: f._drop("/Volumes")),
-                           ("a volume carrying the bench marker", lambda f: f._set_file(HOST + MARKER, "id=x\n")),
-                           ("two host installs", lambda f: f._set_file("/Volumes/Other/System/Library/CoreServices/SystemVersion.plist", ""))):
-            with self.subTest(why):
-                w = World()
-                setup(w.fake)
-                self.assertEqual([HALT], self.leave(w).power())
+        self.assertFalse([a for a in w.calls() if "bless" in a or "boot-volume" in a])
 
     def test_host_mode_is_the_one_exit_that_touches_nothing_but_the_agent(self):
         w = World()
@@ -305,39 +292,38 @@ class TestTheMachineEndsUpOff(unittest.TestCase):
         w.fake.react(["getconf"], lambda a, f: 1 / 0)
         with self.assertRaises(ZeroDivisionError):
             w.run()
-        self.assertEqual([REBOOT], w.power())
+        self.assertEqual([HALT], w.power())
 
 
 class TestTheRefusals(unittest.TestCase):
-    def refused(self, w, rc=0):
+    def refused(self, w, rc=0, power=(HALT,)):
         self.assertEqual(rc, w.run(), w.log())
         self.assertEqual([], w.abs)
-        self.assertEqual(1, len(w.power()), w.power())
+        self.assertEqual(list(power), w.power())
         return w
 
-    def test_no_job_removes_the_agent_and_powers_off(self):
-        w = self.refused(World(job_doc=False))
-        self.assertNotIn(AGENT, w.fake.files)
-
-    def test_a_finished_job_booting_again_retires_the_agent(self):
-        w = World()
-        w.fake._set_file(STATE, "phase=done\nattempts=1\n")
-        w = self.refused(w)
-        self.assertNotIn(AGENT, w.fake.files)
-        self.assertEqual("1", w.state()["attempts"])
+    def test_a_boot_with_no_job_or_a_finished_one_retires_the_agent_and_stays_at_its_login_window(self):
+        for why, w in (("no job", World(job_doc=False)), ("finished", World())):
+            with self.subTest(why):
+                if why == "finished":
+                    w.fake._set_file(STATE, "phase=done\nattempts=1\n")
+                self.refused(w, power=())
+                self.assertNotIn(AGENT, w.fake.files)
+                self.assertEqual([], w.clock.slept)
+                self.assertIn("stays at its login window", w.log())
 
     def test_a_job_that_cannot_run_ends_with_its_outcome_and_retires_the_agent(self):
         """A mode written once that still does not come up is unsettable; a tree with no wk is the one failing exit."""
         mode = lambda f: f.answer(WKMAC + ["display-mode"], out="1800x1169")   # noqa: E731
-        for outcome, w, setup, rc in (
-                ("abandoned", World(), lambda f: f._set_file(STATE, "phase=running\ntask=T1\nattempts=3\n"), 0),
-                ("no-display-expectation", World(job(display="")), lambda f: None, 0),
-                ("display-mode-unsettable", World(), lambda f: (mode(f), f._set_file(STATE, STATE_TEXT + "mode_declared=1512x982\n")), 0),
-                ("display-mode-unwritable", World(), lambda f: (mode(f), f.answer(["sudo", "-n"] + WKMAC, rc=1)), 0),
-                ("no-wk-tools", World(), lambda f: f._drop(TOOLS + "/wk"), 1)):
+        for outcome, w, setup, rc, power in (
+                ("abandoned", World(), lambda f: f._set_file(STATE, "phase=running\ntask=T1\nattempts=3\n"), 0, ()),
+                ("no-display-expectation", World(job(display="")), lambda f: None, 0, (HALT,)),
+                ("display-mode-unsettable", World(), lambda f: (mode(f), f._set_file(STATE, STATE_TEXT + "mode_declared=1512x982\n")), 0, (HALT,)),
+                ("display-mode-unwritable", World(), lambda f: (mode(f), f.answer(["sudo", "-n"] + WKMAC, rc=1)), 0, (HALT,)),
+                ("no-wk-tools", World(), lambda f: f._drop(TOOLS + "/wk"), 1, (HALT,))):
             with self.subTest(outcome):
                 setup(w.fake)
-                self.assertEqual(("done", outcome), (self.refused(w, rc).state()["phase"], w.state()["outcome"]))
+                self.assertEqual(("done", outcome), (self.refused(w, rc, power).state()["phase"], w.state()["outcome"]))
                 self.assertNotIn(AGENT, w.fake.files)
 
     def test_each_unmeasurable_state_measures_nothing(self):
@@ -371,31 +357,24 @@ class TestTheRefusals(unittest.TestCase):
         self.assertEqual(0, w.run())
         self.assertIn(("sudo", "-n") + tuple(WKMAC) + ("display-mode", "--declare", "1512x982"), w.calls())
         self.assertEqual([REBOOT], w.power())
-        self.assertNotIn(("sudo", "-n", "bless", "--mount", HOST, "--setBoot"), w.calls())
         self.assertEqual(("0", "1512x982"), (w.state()["attempts"], w.state()["mode_declared"]))
 
 
-class TestANumberlessBootIsHeld(unittest.TestCase):
-    def test_a_boot_with_no_runs_is_held_for_a_reader_unless_turned_off(self):
-        w = World(env={"WK_MAC_BENCH_HOLD": "120"}, legs=0)
+class TestAJobsEndIsHeld(unittest.TestCase):
+    def test_a_boot_that_ran_a_job_is_held_for_a_reader_unless_turned_off(self):
+        w = World(env={"WK_MAC_BENCH_HOLD": "120"})
         w.run()
         self.assertIn(120, w.clock.slept)
-        self.assertIn("tail -120 %s/autorun.log" % ROOT, w.log())
-        w = World(env={"WK_MAC_BENCH_HOLD": "0"}, legs=0)
+        w = World(env={"WK_MAC_BENCH_HOLD": "0"})
         w.run()
-        self.assertEqual([REBOOT], w.power())
-        self.assertNotIn("Holding", w.log())
-
-    def test_a_boot_whose_legs_landed_or_that_never_reached_the_job_is_not_held(self):
-        for w in (World(env={"WK_MAC_BENCH_HOLD": "120"}), World(job_doc=False, env={"WK_MAC_BENCH_HOLD": "120"})):
-            w.run()
-            self.assertNotIn(120, w.clock.slept)
+        self.assertEqual([HALT], w.power())
+        self.assertNotIn("holding", w.log())
 
 
 class TestTheWatchdog(unittest.TestCase):
     def watch(self, w, mtime):
         a = autorun.Autorun(w.fake, w.clock, w.env, background=w.armed.append)
-        a.stall = 1000
+        a.stall, a.had_job = 1000, True   # armed only once begin has found a job
         w.fake.react(["stat", "-f", "%m"], lambda argv, f: Result(0, str(mtime(a))))
         with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
             a.watchdog()
@@ -428,7 +407,8 @@ class TestTheWatchdog(unittest.TestCase):
 
 
 class TestAKilledRunResumes(unittest.TestCase):
-    """A kill is a power cut: the next boot starts the agent again and the job still ends done and off."""
+    """A kill is a power cut: the next boot starts the agent again and the job still ends done, then off, or up at its
+    login window when the cut fell after the job was done."""
 
     def test_a_run_killed_after_any_effect_finishes_on_the_next_boot(self):
         for n in range(400):
@@ -445,7 +425,7 @@ class TestAKilledRunResumes(unittest.TestCase):
             w.run()
             with self.subTest(killed_after=n):
                 self.assertEqual("done", w.state().get("phase"))
-                self.assertEqual(1, len(w.power()))
+                self.assertIn(w.power(), ([HALT], []))
         self.fail("the run made more than 400 effects")
 
     def test_a_resumed_run_counts_its_attempt(self):
@@ -463,7 +443,7 @@ class TestDryRun(unittest.TestCase):
             w.run()
         self.assertEqual((files, dirs), (w.fake.files, w.fake.dirs))
         self.assertEqual([], w.calls("run_tty"))
-        self.assertRegex(w.err.getvalue(), r"would run[^:\n]*: sudo -n /sbin/reboot\n")
+        self.assertRegex(w.err.getvalue(), r"would run[^:\n]*: sudo -n /sbin/halt\n")
 
     def test_it_takes_no_arguments(self):
         with contextlib.redirect_stderr(io.StringIO()):

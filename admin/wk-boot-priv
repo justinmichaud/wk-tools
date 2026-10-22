@@ -6,7 +6,7 @@
 # written, nothing mounted, no path named; the sole argument any verb takes is a
 # boot order matched against 0x plus at most eight hex digits, and the mailbox
 # tag it reaches is fixed below, so this cannot be turned into "call any
-# mailbox".
+# mailbox". It blesses nothing: a Mac's startup disk is the owner's, set by hand.
 
 set -euo pipefail
 
@@ -21,14 +21,13 @@ check_order() {
     [[ "${1:-}" =~ ^0x[0-9a-fA-F]{1,8}$ ]] || deny "'${1:-}' is not a boot order (0x and up to eight hex digits)"
 }
 
-# A Pi has no `bless`, a Mac has neither vcmailbox nor /run/systemd.
+# A Mac has neither vcmailbox nor /run/systemd.
 v_status() {
     say "ok"
     command -v vcmailbox >/dev/null 2>&1 && say "order=yes" || say "order=no (no vcmailbox here)"
     say "reboot=yes"
     say "detach=nohup"
     [ -d /run/systemd ] && say "tryboot=yes" || say "tryboot=no (no /run/systemd, so the flag cannot ride the reboot)"
-    command -v bless >/dev/null 2>&1 && say "bless=yes" || say "bless=no (not a Mac)"
 }
 
 v_order() {
@@ -55,51 +54,11 @@ v_reboot_tryboot() {
     say "rebooting into tryboot in 3s"
 }
 
-# `bless --help` (macOS 26.6.2) lists --user/--stdinpass only under Snapshot options, so
-# this blesses with root alone. The gate is the volume, not an argument: the one mounted
-# macOS system volume, not the running one, whose /etc/wk-image names a perf-macos image preset.
-bench_install() {
-    local v found="" n=0
-    for v in /Volumes/*; do
-        [ -f "$v/System/Library/CoreServices/SystemVersion.plist" ] || continue
-        [ -f "$v/etc/wk-image" ] || continue
-        grep -q '^profile=perf-macos' "$v/etc/wk-image" 2>/dev/null || continue
-        if [ "$(stat -f %d "$v" 2>/dev/null)" = "$(stat -f %d / 2>/dev/null)" ]; then continue; fi
-        found="$v"; n=$((n + 1))
-    done
-    [ "$n" -eq 1 ] || deny "$n mounted wk benchmark installs; this blesses exactly one"
-    printf '%s' "$found"
-}
-
-_bless() {   # <mount>
-    command -v bless >/dev/null 2>&1 || fail "bless is not on this machine"
-    local out rc=0
-    out=$(bless --mount "$1" --setBoot 2>&1) || rc=$?
-    say "bless said: ${out:-nothing}"
-    [ "$rc" -eq 0 ] || fail "bless exited $rc, so the firmware was not told"
-}
-
-v_boot_volume() {
-    [ $# -eq 0 ] || deny "boot-volume takes no arguments"
-    local v; v=$(bench_install) || exit $?   # bench_install's deny is a subshell's
-    _bless "$v"
-    say "blessed $v"
-}
-
-# The way back: --setBoot is sticky, so `wk boot` proves this before it arms.
-v_boot_host() {
-    [ $# -eq 0 ] || deny "boot-host takes no arguments"
-    _bless /
-    say "blessed the running install"
-}
-
 verb="${1:-}"; shift || true
 case "$verb" in
     status)         v_status ;;
     order)          v_order "$@" ;;
     reboot)         v_reboot "$@" ;;
     reboot-tryboot) v_reboot_tryboot "$@" ;;
-    boot-volume)    v_boot_volume "$@" ;;
-    boot-host)      v_boot_host "$@" ;;
-    *) fail "usage: wk-boot-priv status|order <0xNNNN>|reboot|reboot-tryboot|boot-volume|boot-host" ;;
+    *) fail "usage: wk-boot-priv status|order <0xNNNN>|reboot|reboot-tryboot" ;;
 esac

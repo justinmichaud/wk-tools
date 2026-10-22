@@ -163,12 +163,6 @@ $(wk_priv_helpers)
 ROWS
 unset _pname _pwhere _pwhat
 
-# Keeping a login password on disk stays the owner's call; nothing here creates that file.
-if is_macos && [ ! -f /usr/local/share/wk-bench/owner-password ]; then
-    log "  no volume-owner credential here, which may not be needed: 'wk boot mbp'"
-    log "  blesses with root alone and reports what bless answered."
-fi
-
 # Root-owned and argument-free: an argument would widen the allowlist to "as anybody".
 _sessenv="$_libexec/wk-session.env"
 _sessline="WK_SESSION_USER=$(id -un)"

@@ -1,5 +1,5 @@
-"""admin/wk-boot-priv's grant (a fixed verb list, a checked argument, a fixed mailbox tag, a bless of one mounted
-wk install) with its tools stubbed, and admin/install.sh's convergent install of all three helpers."""
+"""admin/wk-boot-priv's grant (a fixed verb list, a checked argument, a fixed mailbox tag, no bless) with its tools
+stubbed, and admin/install.sh's convergent install of all three helpers."""
 import os
 import pwd
 import re
@@ -37,21 +37,6 @@ def _q(word):
 def _dispatcher():
     return re.search(r"(?ms)^case \"\$verb\" in.*?^esac",
                      HELPER.read_text()).group(0)
-
-
-# `stat -f %d`: a volume named `running` shares the root's device number.
-_STAT = """#!/bin/sh
-case "$3" in /|*running*) echo 1 ;; *) echo 2 ;; esac
-"""
-
-_BLESS = """#!/bin/sh
-echo "bless-args: $*"
-"""
-
-_BLESS_REFUSES = """#!/bin/sh
-echo "bless: Error -60005: unable to sign the LocalPolicy" >&2
-exit 1
-"""
 
 
 class TestTheGrantIsNarrow(WkTest):
@@ -104,8 +89,8 @@ class TestStatusReportsWhatThisMachineCanDo(unittest.TestCase):
                     for l in cp.stdout.splitlines() if "=" in l)
 
     def test_each_machine_reports_what_it_can_do(self):
-        for have, systemd, want in ((("vcmailbox",), True, {"order": "yes", "tryboot": "yes", "bless": "no"}),
-                                    (("bless",), False, {"order": "no", "tryboot": "no", "bless": "yes"})):
+        for have, systemd, want in ((("vcmailbox",), True, {"order": "yes", "tryboot": "yes"}),
+                                    ((), False, {"order": "no", "tryboot": "no"})):
             with self.subTest(have=have):
                 cp = self._status(have=have, systemd=systemd)
                 self.assertEqual("wk-boot-priv: ok", cp.stdout.splitlines()[0])
@@ -116,7 +101,7 @@ class TestStatusReportsWhatThisMachineCanDo(unittest.TestCase):
 
 class TestTheDispatcherHasNoDefaultThatRuns(unittest.TestCase):
     def test_an_unknown_verb_is_a_usage_error(self):
-        for verb in ("wat", "", "bless", "boot", "boot-volume ", "BOOT-HOST",
+        for verb in ("wat", "", "bless", "boot", "boot-volume", "boot-host",
                      "--help", "status;id", "$(id)"):
             with self.subTest(verb=verb):
                 cp = bash(_SAY + '''
@@ -124,86 +109,6 @@ verb=%s; shift || true
 ''' % _q(verb) + _dispatcher() + "\n")
                 self.assertEqual(1, cp.returncode, cp.stdout + cp.stderr)
                 self.assertIn("usage: wk-boot-priv", cp.stderr)
-
-MARKER = "profile=perf-macos\nid=webkit-2.52-perf-macos\n"
-
-
-class TestTheBlessGateIsTheVolumeAndNotAnArgument(WkTest):
-    """bench_install's `/Volumes/*` glob is the gate; each test points it at a fake /Volumes."""
-
-    def _volumes(self, *installs):
-        root = self.tmp / "Volumes"
-        root.mkdir(parents=True, exist_ok=True)
-        for name, marker in installs:
-            v = root / name
-            (v / "System/Library/CoreServices").mkdir(parents=True)
-            (v / "System/Library/CoreServices/SystemVersion.plist").write_text("<plist/>\n")
-            (v / "etc").mkdir(parents=True)
-            if marker is not None:
-                (v / "etc/wk-image").write_text(marker)
-        return root
-
-    def _bless(self, root, verb="boot-volume", args="", bless=_BLESS):
-        lifted = _lift("bench_install", "_bless", "v_boot_volume", "v_boot_host")
-        lifted = lifted.replace("/Volumes/*", f"{root}/*")
-        script = (_SAY + lifted
-                  + "\nv_%s %s\n" % (verb.replace("-", "_"), args))
-        with stub_path({"bless": bless, "stat": _STAT}) as binp:
-            return bash(script, env={"PATH": f"{binp}:/usr/bin:/bin"})
-
-    def test_the_one_install_is_blessed_with_root_alone(self):
-        root = self._volumes(("WK Bench", MARKER))
-        cp = self._bless(root)
-        out = cp.stdout + cp.stderr
-        self.assertEqual(0, cp.returncode, out)
-        self.assertIn("bless-args: --mount %s/WK Bench --setBoot" % root, out)
-        self.assertIn("blessed %s/WK Bench" % root, out)
-
-    def test_a_refusal_repeats_what_bless_said(self):
-        root = self._volumes(("WK Bench", MARKER))
-        cp = self._bless(root, bless=_BLESS_REFUSES)
-        out = cp.stdout + cp.stderr
-        self.assertEqual(1, cp.returncode, out)
-        self.assertIn("Error -60005: unable to sign the LocalPolicy", out)
-        self.assertIn("bless exited 1", out)
-        self.assertNotIn("blessed", out)
-
-    def test_nothing_is_blessed_where_the_count_is_not_one(self):
-        for installs, want in (((), "0 mounted"),
-                               ((("WK Bench", MARKER),
-                                 ("WK Bench 2", MARKER)), "2 mounted")):
-            with self.subTest(want=want):
-                cp = self._bless(self._volumes(*installs))
-                out = cp.stdout + cp.stderr
-                self.assertEqual(3, cp.returncode, out)
-                self.assertIn(want, out)
-                self.assertNotIn("bless-args", out)
-
-    def test_a_volume_that_is_not_a_wk_benchmark_install_is_not_a_candidate(self):
-        for name, marker in (("running-install", MARKER),
-                             ("Some Other HD", None),
-                             ("Yocto Scratch", "profile=webkit-yocto\n")):
-            with self.subTest(volume=name):
-                cp = self._bless(self._volumes((name, marker)))
-                out = cp.stdout + cp.stderr
-                self.assertEqual(3, cp.returncode, out)
-                self.assertIn("0 mounted", out)
-                self.assertNotIn("bless-args", out)
-
-    def test_the_bless_verbs_take_no_arguments(self):
-        for verb in ("boot-volume", "boot-host"):
-            with self.subTest(verb=verb):
-                cp = self._bless(self._volumes(), verb=verb, args="/Volumes/x")
-                self.assertEqual(3, cp.returncode, cp.stdout + cp.stderr)
-                self.assertIn("takes no arguments", cp.stderr)
-
-    def test_the_running_install_is_blessed_by_mount_point_and_nothing_else(self):
-        cp = self._bless(self._volumes(), verb="boot-host")
-        out = cp.stdout + cp.stderr
-        self.assertEqual(0, cp.returncode, out)
-        self.assertIn("bless-args: --mount / --setBoot", out)
-        self.assertIn("blessed the running install", out)
-
 
 class SetupRefusesRoot(WkTest):
     """Every grant is written for `id -un`, so ./setup under sudo would grant root alone."""

@@ -16,6 +16,7 @@ from wk.bench.ab import PLANTED, Task, check_plan, cost_line, flags, pair, refus
 from wk.bench.mac import BENCH_ROOT, PUT_SKIP, WKMAC, side
 from wk.bench.pipeline import check, variance
 from wk.boot import open_driver
+from wk.boot.mac import STARTUP_DISK
 from wk.kv import kv
 from wk.machine import Ssh, lib_argv
 from wk.quiet import DESKTOP
@@ -175,8 +176,7 @@ class Plant(Task):
         ok, said = self.display()
         rows.append((ok, "one display", said, "Disconnect it: a second panel changes what MotionMark draws. No --force crosses it."))
         ok, said = self.firmware()
-        rows.append((ok, "firmware default", said, "wk boot %s arms it (or pick '%s' in the startup manager); --plant reboots nothing."
-                     % (n, self.d.c("volume"))))
+        rows.append((ok, "firmware default", said, STARTUP_DISK % self.d.c("volume")))
         ready = self.mac.restart_ready()
         rows.append((ready, "restartable", "this restarts %s itself" % n if ready else self.mac.restart_detail(),
                      "any application can refuse a graceful restart, so an unattended one uses the helper: wk machine setup %s" % n))
@@ -485,12 +485,12 @@ class Plant(Task):
     def outcome(self, came):
         n, vol = self.name, self.d.c("volume") or "the bench install"
         if came == "bench":
-            return info("%s answers in BENCH mode -- the A/B is running there. 'wk bench ab --devices %s --status' follows it,\n"
-                        "  and the machine powers itself off when the job ends." % (n, n))
+            return info("%s answers in BENCH mode -- the A/B is running there. 'wk bench ab --devices %s --status' follows it;\n"
+                        "  when the job ends it holds a while and powers off, and --collect reads it from the host install." % (n, n))
         if came == "silent":
             return info("%s answers on neither node: still restarting, halted, or its join did not come up. Each leg is written\n"
                         "  to the volume as it ends:  wk bench ab --devices %s --status   once one answers." % (n, n))
-        why, fix = {"host": ("came back to host mode", "the reboot did not enter '%s'; 'wk boot %s' arms the firmware" % (vol, n)),
+        why, fix = {"host": ("came back to host mode", "the reboot did not enter '%s'; %s" % (vol, STARTUP_DISK % vol)),
                     "noreboot": ("never rebooted", "reboot %s by any means, the startup manager too, and it runs by itself" % n)}[came]
         warn("%s %s, so the A/B has not run. The job is planted and still valid: %s." % (n, why, fix))
         self.notify("mac-ab: %s %s" % (n, why), "the A/B has not run. The job is planted and still valid: %s." % fix)

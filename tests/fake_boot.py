@@ -1,7 +1,8 @@
 """Machines in memory behind the real Channel, each side a Fake answering the argv the Channel sends -- an on-board
 file under `sh -c`, a helper verb, a plain command. FakeBoard is a Pi: its media, a firmware one-shot, its EEPROM and a
-clock. FakeMac is a Mac's two installs, its firmware's boot-volume and its boot helper. FakeGuest is the vm place
-holding one Tart guest. `stuck` makes every arming write land nowhere, as an older helper does; `up` False silences
+clock. FakeMac is a Mac's two installs, its firmware's boot-volume (the bench volume, set by hand) and its boot helper. FakeGuest is the vm place
+holding one Tart guest. `stuck` makes every arming write land nowhere, as an older helper does (a Mac's: the startup
+disk it was set to); `up` False silences
 every side; `stop_after` kills the driving process at that effect, as tests/killpoints.py asks."""
 
 import hashlib
@@ -14,7 +15,7 @@ from tests.support import REPO
 from wk import act, fleet
 from wk.boot import drivers
 from wk.boot.driver import BOOT_PRIV, CARD_PRIV, Channel, disk_of, part
-from wk.boot.mac import HELPER, MacGuest
+from wk.boot.mac import MacGuest
 from tests.fakes import FakeClock
 from wk.kv import kv
 from wk.machine import Result
@@ -368,7 +369,7 @@ class FakeMac(Board, Channel):
         self.vol = "/Volumes/" + self.conf["volume"]
         self.roots = {"host": {"id": "", "group": HOST_GROUP, "name": "Macintosh HD"},
                       "bench": {"id": "", "group": BENCH_GROUP, "name": self.conf["volume"]}}
-        self.running = self.firmware = "host"
+        self.running, self.firmware = "host", "bench"
         self.attached, self.data, self.helper_is, self.said, self.fact_input = True, True, "current", {}, None
 
     def driver(self):
@@ -381,12 +382,12 @@ class FakeMac(Board, Channel):
         return self.running == "host"
 
     def enter_bench(self):
-        self.firmware = "bench"
         self.restart()
 
     def leave_bench(self):
-        self.firmware = "host"
-        self.restart()
+        """The person's pick at the power button: the host install for one boot, the default left as it was."""
+        self.running = "host"
+        self.boot()
 
     def restart(self):
         self.running = self.firmware
@@ -394,7 +395,7 @@ class FakeMac(Board, Channel):
         return Result(0)
 
     def priv_asked(self):
-        return [a[4] for a in self.asked if a[1:4] == ("sudo", "-n", HELPER)]
+        return [a[4] for a in self.asked if a[1:4] == ("sudo", "-n", BOOT_PRIV)]
 
     def landed(self, src, dest, data):
         if src and src.endswith(".tar"):
@@ -413,7 +414,7 @@ class FakeMac(Board, Channel):
             name, p = onboard(argv[2])
             if name:
                 return self.script(name, p, input)
-        if argv[:3] == ["sudo", "-n", HELPER]:
+        if argv[:3] == ["sudo", "-n", BOOT_PRIV]:
             return self.helper(argv[3])
         if argv == ["sysctl", "-n", "kern.boottime"]:
             return Result(0, "{ sec = %d, usec = 451078 } Sat Aug 15 04:12:16 2026\n" % self.booted)
@@ -422,8 +423,7 @@ class FakeMac(Board, Channel):
             out = self.fact(argv[2], (argv[3:] or [""])[0])
             return Result(0 if out else 1, out + "\n" if out else "")
         if argv[:1] == ["test"] and argv[2] in self.known():
-            hit = argv[2] in self.dirs_() if argv[1] == "-d" else bool(self.helper_is)
-            return Result(0 if hit else 1)
+            return Result(0 if argv[2] in self.dirs_() else 1)
         if argv[:1] == ["cat"] and argv[1] in ("/etc/wk-image", self.vol + "/etc/wk-image"):
             owner = me if argv[1] == "/etc/wk-image" else self.roots["bench"]
             return Result(0, "id=%s\n" % owner["id"] if owner["id"] else "")
@@ -434,7 +434,7 @@ class FakeMac(Board, Channel):
         return self.sh(shlex.join(argv))
 
     def known(self):
-        return {self.vol + "/System/Library/CoreServices", self.vol + " - Data", HELPER}
+        return {self.vol + "/System/Library/CoreServices", self.vol + " - Data"}
 
     def dirs_(self):
         return ({self.vol + "/System/Library/CoreServices"} | ({self.vol + " - Data"} if self.data else set())) if self.attached else set()
@@ -449,7 +449,7 @@ class FakeMac(Board, Channel):
 
     def fact(self, what, arg):
         if what == "boot-volume":
-            return "EF57347C-0000-AA11-AA11-00306543ECAC:D7E4E11B:" + self.roots[self.firmware]["group"]
+            return "EF57347C-0000-AA11-AA11-00306543ECAC:D7E4E11B:" + self.roots["host" if self.stuck else self.firmware]["group"]
         if what == "volume-name" and arg == "/":
             return self.roots[self.running]["name"]
         if what == "volume-group":
@@ -466,10 +466,6 @@ class FakeMac(Board, Channel):
             return Result(*self.said[verb])
         if verb == "status":
             return Result(0, "wk-boot-priv: ok\n" + ("wk-boot-priv: detach=nohup\n" if self.helper_is == "current" else ""))
-        if verb in ("boot-host", "boot-volume"):
-            if not self.stuck:
-                self.firmware = self.running if verb == "boot-host" else "bench"
-            return Result(0, "wk-boot-priv: blessed %s\n" % ("/" if verb == "boot-host" else self.vol))
         if verb == "reboot":
             return self.restart()
         return Result(2, "wk-boot-priv: usage\n")

@@ -8,9 +8,9 @@ import time
 from wk import act, guest, images
 from wk.boot.driver import Channel, Driver, Onboard
 from wk.machine import Result, is_macos
-from wk.sudo import BOOT_PRIV
 
-HELPER = BOOT_PRIV
+STARTUP_DISK = ("set '%s' as the startup disk once: System Settings > General > Startup Disk, with your password; "
+                "wk never blesses")
 BOOTTIME = re.compile(r"\{ *sec *= *(\d+)")   # `{ sec = 1786800736, usec = 451078 }`: anchored on the brace, or usec matches
 
 
@@ -54,7 +54,9 @@ class MacDriver(Driver):
         return ids[0] if ids else ""
 
 class MacVolume(MacDriver):
-    """Only the boot helper blesses the install the firmware boots next; --setBoot is sticky, so the bench task hands back."""
+    """The bench volume is the firmware default, set once by hand: arming is a restart, and leaving bench mode is the
+    person's pick at the power button. Root's bless does not take on Apple Silicon (the Secure Enclave wants a volume
+    owner), so wk blesses nothing."""
 
     name = "mac-volume"
     sticky = True
@@ -85,19 +87,25 @@ class MacVolume(MacDriver):
             r = self.run(["python3", "-", what] + ([arg] if arg else []), input=f.read())
         return r.out.replace("\r", "").strip() if r.ok else ""
 
-    def firmware_default(self):
-        bv = self.fact("boot-volume")
-        if not bv:
-            return "unknown (the firmware publishes no boot-volume)"
-        grp = bv.rsplit(":", 1)[-1]
+    def firmware_reading(self):
+        """(the group the firmware boots, "bench", "host" or ""); the group is "" when the firmware publishes none."""
+        grp = self.fact("boot-volume").rsplit(":", 1)[-1]
+        if not grp:
+            return "", ""
         on_bench = self.ch.side == "bench"
         host = self.fact("volume-group", "/") if self.ch.side == "host" else ""
         bench = self.fact("volume-group", "/") if on_bench else self.fact("volume-group", self.volume()) if self.volume_present() else ""
-        if bench and grp == bench:
-            return "%s ('%s' -- a plain reboot is expected to enter bench mode)" % (grp, self.c("volume"))
-        if host and grp == host:
-            return "%s (the host install -- a plain reboot stays in host mode)" % grp
-        if on_bench:
+        return grp, "bench" if bench and grp == bench else "host" if host and grp == host else ""
+
+    def firmware_default(self, fw=None):
+        grp, which = fw or self.firmware_reading()
+        if not grp:
+            return "unknown (the firmware publishes no boot-volume)"
+        if which == "bench":
+            return "%s (%s -- a plain reboot is expected to enter bench mode)" % (self.c("volume"), grp)
+        if which == "host":
+            return "the host install (%s -- a plain reboot stays in host mode)" % grp
+        if self.ch.side == "bench":
             return "%s (not '%s', so a plain reboot leaves bench mode)" % (grp, self.c("volume"))
         return "%s (matches neither install on this disk)" % grp
 
@@ -153,63 +161,49 @@ class MacVolume(MacDriver):
         r = self.ch.priv(verb, side="host", mutates=verb != "status")
         return r.ok, (r.out + r.err).replace("\r", "").strip()
 
+    def helper_problem(self):
+        """"" when the boot helper answers and names its detach: an older one's reboot exits 0 having rebooted nothing."""
+        said = self.priv("status")[1]
+        if any(l.startswith("wk-boot-priv: detach=") for l in said.splitlines()):
+            return ""
+        if said.startswith("wk-boot-priv: ok"):
+            return ("the boot helper on %s answers, but names no detach mechanism, so it is older than this tree -- "
+                    "its reboot exits 0 having rebooted nothing" % self.c("ssh"))
+        return "no boot helper on %s, and plain sudo there wants a password" % self.c("ssh")
+
     def arm_sequence(self, p, image):
-        vol = self.c("volume")
-        attached = "attached" if self.volume_present() else "NOT attached -- arming would refuse"
-        return [("check        '%s' is a macOS install (%s) and the boot helper is installed" % (vol, attached), self.armable_here),
-                ("prove        the firmware takes this install back (now: %s)" % self.firmware_default(), self.prove_return),
-                ("bless        '%s', and read the firmware's default back" % vol, self.bless),
+        fw = self.firmware_reading()
+        return [("default      '%s' is the firmware default (now: %s)" % (self.c("volume"), self.firmware_default(fw)),
+                 lambda: self.require_default(fw)),
+                ("helper       the boot helper on %s answers" % self.who(), self.require_helper),
                 self.record_step(image), self.reboot_step(image)]
 
-    def armable_here(self):
+    def require_default(self, fw):
         name, vol = self.who(), self.c("volume")
         if not self.volume_present():
             act.die("'%s' is not attached to %s, or is not a macOS system volume.\n"
                     "    It has to be a full macOS install on another volume of this Mac ('wk help hardware').\n"
                     "    A different name:  WK_BENCH_VOLUME='...' wk boot %s" % (vol, name, name))
-        if not self.test("-x", HELPER):
-            act.die("the privileged boot helper is not installed on %s:  ./setup --stage quiesce\n"
-                    "    Without it: shut down, hold the power button, pick '%s'." % (name, vol))
+        if fw[1] != "bench":
+            act.die("%s's firmware default is %s, so a restart would not enter '%s'. Nothing was armed.\n    The remedy: %s."
+                    % (name, self.firmware_default(fw), vol, STARTUP_DISK % vol))
 
-    def prove_return(self):
-        # The return first: Apple Silicon has no one-shot form, so an unproven way back boots bench mode forever.
-        name, vol = self.who(), self.c("volume")
-        ok, said = self.priv("boot-host")
-        if not ok:
-            act.die("%s cannot be told to boot itself again, so it is not told to boot '%s'. What it answered:\n%s"
-                    % (name, vol, said or "(nothing -- %s did not answer)" % self.c("ssh")))
-        act.log(said)
-        back = self.firmware_default()
-        if "the host install" not in back:
-            act.die("bless blessed %s's running install and the firmware names: %s\n    Nothing was armed." % (name, back))
+    def require_helper(self):
+        why = self.helper_problem()
+        if why:
+            act.die("%s cannot be restarted unattended: %s.\n    The remedy:  wk machine setup %s" % (self.who(), why, self.who()))
 
-    def bless(self):
-        name, vol = self.who(), self.c("volume")
-        ok, said = self.priv("boot-volume")
-        if not ok:
-            act.die("%s's firmware would not take '%s', and nothing was changed. What it answered:\n%s"
-                    % (name, vol, said or "(nothing -- %s did not answer)" % self.c("ssh")))
-        act.log(said)
-        now = self.firmware_default()
-        if "'%s'" % vol not in now:
-            act.die("bless reported success and %s's firmware still names: %s\n    Nothing was rebooted." % (name, now))
-        act.info("the firmware will boot '%s' next" % vol)
-
-    def disarm(self, spent=False):
-        ok, said = self.priv("boot-host")
-        if not ok:
-            act.die("%s's firmware still names the benchmark volume, and this could not set it back:\n%s\n"
-                    "    The record stays. The remedy:  wk machine setup %s, then wk boot %s --disarm"
-                    % (self.who(), said or "  (nothing -- %s did not answer)" % self.c("ssh"), self.who(), self.who()))
-        return 0
+    def way_back(self):
+        return ("leaving bench mode is the person's: at startup hold the power button and pick the host install "
+                "(the firmware boots that pick once; its default stays '%s')" % self.c("volume"))
 
     def disarm_note(self):
-        return "  the firmware is set back to this install; a plain reboot stays here."
+        return "  only the record was cleared: the firmware default stays '%s', so a plain reboot still enters bench mode." % self.c("volume")
 
     def reboot(self, armed=False):
         if self.ch.side == "bench":
-            act.die("%s answers as its benchmark install, which carries no boot helper; its job hands it back.\n"
-                    "    Read it meanwhile:  wk bench ab --devices %s --status" % (self.who(), self.who()))
+            act.die("%s answers as its benchmark install, which carries no boot helper; %s.\n"
+                    "    Read it meanwhile:  wk bench ab --devices %s --status" % (self.who(), self.way_back(), self.who()))
         if self.priv("reboot")[0]:
             return 0
         act.die("could not restart %s: its boot helper is not installed:  wk machine setup %s" % (self.who(), self.who()))

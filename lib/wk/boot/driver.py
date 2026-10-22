@@ -165,7 +165,8 @@ class Channel:
 
 
 class Driver:
-    """`arm_from_bench`: armed where it stands; `on_medium`: armed on its medium, record or none; `sticky`: not spent by a reboot."""
+    """`arm_from_bench`: armed where it stands; `on_medium`: armed on its medium, record or none; `sticky`: the bench system
+    is the firmware default, so a reboot does not spend it and only a person's pick leaves it (`way_back`)."""
 
     name, record_at = "", RECORD
     arm_from_bench = on_medium = sticky = False
@@ -341,8 +342,11 @@ class Driver:
 
     def reboot_step(self, image, tryboot=False):
         return ("then         reboot into %s; %s" % (image, "the watchdog returns it in %ss unless claimed" % self.watchdog()
-                                                     if self.watchdog() else "the job it was armed for returns it"),
+                                                     if self.watchdog() else self.way_back()),
                 lambda: self.reboot_into(image, tryboot))
+
+    def way_back(self):
+        return "the job it was armed for returns it"
 
     def reboot_into(self, image, tryboot=False):
         name = self.c("name")
@@ -355,7 +359,7 @@ class Driver:
             act.log("  it returns by itself in %ss unless claimed:\n    wk boot %s --keep     claim it\n"
                     "    wk boot %s --back     hand it back now" % (self.watchdog(), name, name))
         else:
-            act.log("  the job it was armed for returns it:  wk boot %s --status" % name)
+            act.log("  %s:  wk boot %s --status" % (self.way_back(), name))
         act.log("  if it never appears, its own account of that boot says why: wk boot %s --diag" % name)
 
     def reboot(self, armed=False):

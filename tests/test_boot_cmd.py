@@ -87,13 +87,13 @@ class TestStatus(unittest.TestCase):
         self.assertIn("bench mode -- system sys-a", err)
         self.assertIn("a plain reboot returns it to host mode", err)
 
-    def test_a_sticky_firmware_default_is_returned_by_its_job(self):
+    def test_a_bench_default_names_the_power_button_as_the_way_back(self):
         """The Mac's next boot enters what the evidence line names; a reboot does not undo it."""
         fake, d = board("mac-volume")
         fake.enter_bench()
         rc, err = run(boot_over(fake, d).status)
         self.assertEqual(rc, 0, err)
-        self.assertIn("hands the machine back when it ends", err)
+        self.assertIn("hold the power button", err)
         self.assertNotIn("a plain reboot returns it", err)
 
     def test_unreachable_is_3(self):
@@ -135,7 +135,7 @@ class TestArm(unittest.TestCase):
         rc, err = run(boot_over(fake, d).arm)
         self.assertEqual(rc, 0, err)
         self.assertNotIn("--keep", err)
-        self.assertIn("the job it was armed for returns it", err)
+        self.assertIn("pick the host install", err)
 
     def test_the_dry_run_arms_nothing(self):
         fake, d, b = pi("pi-sd")
@@ -195,6 +195,15 @@ class TestBackAndDisarm(unittest.TestCase):
                 rc, err = run(b.back)
                 self.assertEqual(rc, 0, err)
                 self.assertTrue(fake.on_rescue(), err)
+
+    def test_back_is_refused_where_leaving_is_the_persons_pick(self):
+        fake, d = board("mac-volume")
+        fake.enter_bench()
+        boots = fake.boots
+        rc, err = run(boot_over(fake, d).back)
+        self.assertEqual(rc, (act.Refused, 1), err)
+        self.assertIn("hold the power button", err)
+        self.assertEqual((fake.boots, fake.priv_asked()), (boots, []))
 
     def test_back_from_host_mode_clears_the_record_first(self):
         fake, d, b = pi("rpi5-usb")

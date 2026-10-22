@@ -27,7 +27,7 @@ from wk.act import Refused  # noqa: E402
 from wk.boot import cli, driver_class, drivers, open_driver  # noqa: E402
 from wk.boot.cli import load_conf  # noqa: E402
 from wk.boot.driver import BOOT_PRIV, CARD_PRIV, Channel, Driver, Onboard, disk_of, part, partno  # noqa: E402
-from wk.boot.mac import HELPER, MacVolume  # noqa: E402
+from wk.boot.mac import MacVolume  # noqa: E402
 from wk.machine import Result, here  # noqa: E402
 from wk.sysimage import buildroot  # noqa: E402
 
@@ -101,14 +101,14 @@ class Conformance:
         d.probe()
         self.assertTrue(fake.on_rescue(), "leaving bench mode did not return it")
 
-    def test_a_disarm_before_the_reboot_boots_the_rescue(self):
+    def test_a_disarm_before_the_reboot_boots_the_rescue_unless_bench_is_the_default(self):
         fake, d = board(self.kind)
         d.armable(d.probe())
         for _, step in d.arm_sequence(*d.choose(""))[:-1]:
             step()
         d.disarm()
         fake.restart() if self.kind == "mac-volume" else d.reboot()
-        self.assertTrue(fake.on_rescue())
+        self.assertEqual(fake.on_rescue(), not d.sticky)
 
     def test_an_arming_that_did_not_take_is_refused(self):
         fake, d = board(self.kind)
@@ -588,7 +588,7 @@ class TestProbe(unittest.TestCase):
 
 
 class TestArm(unittest.TestCase):
-    """--setBoot is sticky and Apple Silicon has no one-shot form, so the return is proven before the trip out."""
+    """The bench volume is the firmware default, set by hand: an arming reads that, asks the helper and restarts."""
 
     def arm(self, **fake_state):
         fake, d = volume()
@@ -599,53 +599,49 @@ class TestArm(unittest.TestCase):
         got, err = quiet(lambda: [step() for _, step in steps[:-1]] and 0)
         return fake, got, err, fake.priv_asked()
 
-    def test_it_arms_and_asserts_the_firmware_afterwards(self):
+    def test_it_reads_the_default_asks_the_helper_and_blesses_nothing(self):
         fake, got, err, verbs = self.arm()
         self.assertEqual(got, 0, err)
-        self.assertIn("the firmware will boot 'WK Bench' next", err)
-        self.assertLess(verbs.index("boot-host"), verbs.index("boot-volume"))
-        self.assertEqual(fake.firmware, "bench")
-        self.assertEqual({a[0] for a in fake.asked if a[1:4] == ("sudo", "-n", HELPER)}, {"host"})
+        self.assertEqual(verbs, ["status"])
+        self.assertIn("image=WK Bench", fake.record)
 
-    def test_each_refusal_reports_what_the_mac_said_and_arms_nothing_past_it(self):
-        for state, words, blessed in (
-                ({"said": {"boot-host": (1, "wk-boot-priv: bless said: Error -60005: cannot sign\n")}}, "Error -60005: cannot sign", False),
-                ({"said": {"boot-volume": (1, "wk-boot-priv: bless exited 1, so the firmware was not told\n")}}, "nothing was changed", True),
-                ({"firmware": "bench", "said": {"boot-host": (0, "wk-boot-priv: blessed /\n")}}, "Nothing was armed", False),
-                ({"stuck": True}, "mbp's firmware still names", True)):
-            with self.subTest(words=words):
-                fake, got, err, verbs = self.arm(**state)
-                self.assertIs(got, act.Refused)
-                self.assertIn(words, err)
-                self.assertEqual("boot-volume" in verbs, blessed)
+    def test_a_default_that_is_not_the_bench_volume_is_refused_with_the_one_time_remedy(self):
+        fake, got, err, verbs = self.arm(firmware="host")
+        self.assertIs(got, act.Refused)
+        for words in ("the host install", "System Settings > General > Startup Disk", "wk never blesses", "Nothing was armed"):
+            self.assertIn(words, err)
+        self.assertEqual((verbs, fake.record), ([], None))
 
-    def test_an_absent_volume_or_helper_is_refused_before_anything_is_asked(self):
-        for state, words in (({"attached": False}, "is not attached to mbp"), ({"helper_is": None}, "boot helper is not installed")):
+    def test_an_absent_volume_or_helper_is_refused_before_anything_is_recorded(self):
+        for state, words, asked in (({"attached": False}, "is not attached to mbp", []),
+                                    ({"helper_is": None}, "no boot helper on tolken", ["status"]),
+                                    ({"helper_is": "old"}, "older than this tree", ["status"])):
             with self.subTest(state=state):
                 fake, got, err, verbs = self.arm(**state)
                 self.assertIs(got, act.Refused)
                 self.assertIn(words, err)
-                self.assertEqual(verbs, [])
+                self.assertEqual((verbs, fake.record), (asked, None))
 
 
-class TestReturn(unittest.TestCase):
-    def test_a_reboot_from_the_bench_side_is_refused_with_the_reason(self):
+class TestTheWayBack(unittest.TestCase):
+    """Leaving bench mode is the person's pick at the power button; nothing in firmware is wk's to undo."""
+
+    def test_a_reboot_from_the_bench_side_is_refused_naming_the_power_button(self):
         fake, d = volume()
         fake.enter_bench()
         d.probe()
         got, err = quiet(d.reboot)
         self.assertIs(got, act.Refused)
-        self.assertIn("carries no boot helper", err)
+        for words in ("carries no boot helper", "hold the power button"):
+            self.assertIn(words, err)
         self.assertEqual(fake.priv_asked(), [])
 
-    def test_a_disarm_that_cannot_bless_back_is_refused(self):
+    def test_a_disarm_asks_nothing_and_says_the_default_stays(self):
         fake, d = volume()
-        fake.said = {"boot-host": (1, "wk-boot-priv: bless exited 1\n")}
         d.probe()
-        got, err = quiet(d.disarm)
-        self.assertIs(got, act.Refused)
-        for remedy in ("wk machine setup mbp", "wk boot mbp --disarm"):
-            self.assertIn(remedy, err)
+        self.assertEqual(quiet(d.disarm)[0], 0)
+        self.assertEqual(fake.priv_asked(), [])
+        self.assertIn("default stays 'WK Bench', so a plain reboot still enters bench mode", d.disarm_note())
 
 
 class TestReports(unittest.TestCase):
@@ -665,10 +661,10 @@ class TestReports(unittest.TestCase):
 
     def test_evidence_reads_the_facts_with_the_trees_own_reader(self):
         fake, d = volume()
-        fake.firmware = "bench"
         d.probe()
         ev = d.evidence()
-        for want in ("booted_volume=Macintosh HD", "attached at /Volumes/WK Bench", "a plain reboot is expected to enter bench mode"):
+        for want in ("booted_volume=Macintosh HD", "attached at /Volumes/WK Bench", "firmware_default=WK Bench (",
+                     "a plain reboot is expected to enter bench mode"):
             self.assertIn(want, ev)
         self.assertTrue(fake.fact_input.startswith("#!/usr/bin/env python3"), "lib/wk/mac.py travels on stdin")
 
@@ -684,15 +680,15 @@ class TestReports(unittest.TestCase):
 
 class TestOnTheMac(unittest.TestCase):
     @requires_machine("tolken")
-    def test_what_an_arming_proves_first_reads_true_on_mbp(self):
-        """`live boot.arm[mbp]`, read-only as `requires_machine` is: host mode, the volume attached, and a firmware
-        default naming one of its installs. The bless round trip itself is the owed half."""
+    def test_what_an_arming_reads_first_holds_on_mbp(self):
+        """`live boot.arm[mbp]`, read-only as `requires_machine` is: host mode, the volume attached, and the firmware
+        default naming the bench volume. The restart into it is the owed half."""
         d = open_driver(REPO, conf_for("mac-volume"))
         if d.probe() != "host":
             self.skipTest("mbp answers as %s, and an arming starts from host mode" % d.mode)
         self.assertTrue(d.volume_present(), d.media())
         fw = d.firmware_default()
-        self.assertTrue("the host install" in fw or "'WK Bench'" in fw, fw)
+        self.assertTrue(fw.startswith("WK Bench ("), fw)
 
 
 def guest(env=None, **state):

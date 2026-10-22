@@ -123,7 +123,7 @@ class Boot:
             act.log("%s: bench mode -- system %s (booted %s)" % (name, mode[6:], self.booted))
             self.evidence()
             if self.d.sticky:
-                act.log("  the job it was armed for hands the machine back when it ends.")
+                act.log("  " + self.d.way_back())
             else:
                 act.log("  a plain reboot returns it to host mode: wk boot %s --back" % name)
             return 0
@@ -148,7 +148,7 @@ class Boot:
             return 2
         if self.d.sticky:
             act.warn("%s is ARMED for '%s' %s" % (name, image, who))
-            act.log("  a plain reboot enters bench mode; cancel with: wk boot %s --disarm" % name)
+            act.log("  a plain reboot enters bench mode, the firmware default; --disarm clears this record and nothing else")
             return 0
         act.warn("%s is ARMED to reboot into system %s %s" % (name, image, who))
         act.log("  the next reboot leaves host mode; cancel with: wk boot %s --disarm" % name)
@@ -179,6 +179,8 @@ class Boot:
         return 0
 
     def back(self):
+        if self.d.sticky:
+            act.die("%s is not sent back by wk: %s." % (self.name, self.d.way_back()))
         mode = self.read_state()
         if mode == "unreachable":
             act.die("%s is not answering; a power cycle returns it, since any boot spends the one-shot." % self.name)

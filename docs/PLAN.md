@@ -917,10 +917,8 @@ exist.
      only their read-only half (`tests/test_owed_bench.py`'s `TestBenchReachesTheRealMbp`, gated
      `requires_machine("tolken")`) -- staging a real build, rebooting mbp into bench mode, running a
      plan and comparing against a container run needs a decision about which workspace and plan to
-     spend that machine's time on, left to whoever runs the live tier next; `MacHostSystem.after()`
-     cannot bless the machine back to host mode from its own benchmark install (only the host
-     install carries the boot helper -- measured against 5.12's own driver, not theorised), so a
-     real run stops there and names the two-click remedy, same as arming does.
+     spend that machine's time on, left to whoever runs the live tier next; a real run ends in bench
+     mode, and the way back is the person's power-button pick.
    - Closes: marks live `bench[mbp]`, `bench.first_run_after_stage[mbp]`.
    - Decision: `bench mac` is the pipeline run with `--system mbp`, not a
      verb of its own. `mac` stays only as a tombstone.
@@ -971,7 +969,7 @@ exist.
      `python3 -m wk.sysimage.macvolume stage-payload /` and `python3 -m wk.sysimage.mactailnet install / <vol>`
      directly; the tree the autorun runs from is its `wk-tools`. The job's outcome is the stopping rule's
      (`resolved-at-round-N`, `hit-max-rounds`, `rounds-done`, `all-failed-round-N`). `tests/test_mac_autorun.py` runs it against the Fake and the fake clock: each
-     phase, each refusal, the drift refusal after the quiesce, the settle, the hold, the watchdog, the hand-back, a run
+     phase, each refusal, the drift refusal after the quiesce, the settle, the hold, the watchdog, the power-off, a run
      killed after any effect finishing on the next boot, and the dry run. Owed: nothing has run on the Mac: a planted job measured end to end
      spends hours of mbp, a decision for whoever runs the live tier.
    - Decision: port it, because firstboot guarantees python3 before the
@@ -993,32 +991,24 @@ exist.
    - Decision: the install's `/etc/wk-image` marker is the builder's done
      marker, the same as a board's.
 
-   **Zero-touch Mac nights.** The goal is a bench run nobody attends: no reboot typed at night, SIP
-   on in the host install. What the tree knows (read 2026-10-21, nothing of it run on the Mac):
-   - Arming and returning are both `bless --mount <volume> --setBoot` run as root with no owner credential
-     (`admin/wk-boot-priv` from the host, `autorun.leave` from the bench account's NOPASSWD sudo). The
-     bash version's own notes say a bare `bless --setBoot` exited 0 having done nothing on this Mac, and
-     name the credentialed form `--user <owner> --stdinpass`; `machines/mbp.conf` says the selection is
-     signed with a volume owner's credential. Measured 2026-10-22 07:07 MST (`wk boot mbp` on tolken): root's
-     `bless --mount "/Volumes/WK Bench" --setBoot` printed `Password for justinmichaud:` with no credential to
-     give, exited 0, and the readback named 'WK Bench'; the reboot at 07:09 came up in the host install with
-     the firmware naming it. Root alone does not take on Apple Silicon: the owner's password is a secret of
-     the keyring (`wk key set mac-owner`), spent only inside the helper's `boot-volume`/`boot-host` verbs and
-     the bench install's `leave`, and the arm's readback must be the firmware's answer, not bless's.
-   - After the return the host install stops at its login window. Zero-touch needs the host reachable
-     over the tailnet there, which depends on FileVault being off on the host volume and on tailscale
-     running as a daemon rather than the logged-in user's app; `wk doctor mbp` must read both
-     (`fdesetup status`, how tailscaled is installed) and the first measurement is one unattended
-     reboot of the host with nobody at the keyboard. Until that holds, the return is deferred to the
-     morning: the night belongs to the bench install, and `wk boot mbp --back` is the person's one
-     command.
-   - The pipeline's `MacHostSystem.after()` cannot return from the bench side; the bench job's own
-     `autorun.leave` is the one return, and the pipeline waits for the host node rather than blessing.
+   **Zero-touch Mac nights.** Decided 2026-10-22: the Mac is a bench machine by default, and the desktop is the
+   exception.
+   - `WK Bench` is the firmware default, set once by hand in System Settings > General > Startup Disk with the
+     owner's password, and wk blesses nothing after that. The arm was measured (2026-10-22 07:07 MST, `wk boot mbp`
+     on tolken): root's `bless --mount "/Volumes/WK Bench" --setBoot` asked for the owner's password with nothing to
+     answer it, exited 0, and the Mac came up in the host install -- root's bless does not take on Apple Silicon,
+     which is why wk does not bless.
+   - Entering bench mode is a plain restart (`wk boot mbp`, or the A/B's own), and the arm refuses while the default
+     is not the bench volume. A boot that ran a job holds the install up for `WK_MAC_BENCH_HOLD` seconds, then powers
+     it off; a boot with no job stays at its login window.
+   - Leaving is the person's: at startup hold the power button and pick the host install (the firmware boots that
+     pick once), or `sudo bless` by hand. `wk boot mbp --back` refuses naming that, and `wk bench ab --devices mbp
+     --collect` reads the result from the host install.
    - SIP is per install on Apple Silicon: `csrutil` in recoveryOS acts on the selected volume, so the
      bench volume runs with it off (the six `unstoppable` daemons in `bench/quiet/macos.tsv` then stop)
      while the host keeps it on. It is set once at install, by hand, like the tailscale key; `wk doctor
      mbp` reads both (`unit doctor.sip_rows`).
-   Rows: `live boot.arm[mbp]` (both directions), `live doctor.bench_readiness[mbp]`, `live bench[mbp]`.
+   Rows: `live boot.arm[mbp]`, `live doctor.bench_readiness[mbp]`, `live bench[mbp]`.
 
    *Group 4, ∥ Group 3*
 
@@ -1228,7 +1218,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `wk run --rr` records jsc and `wk gui --rr` MiniBrowser's process tree in a container workspace (seccomp, the perf counters in the podman VM, the web process sandbox), and `wk run --replay` reaches lldb with rr's commands | 3 | `live run.rr_record_replay` |
 | `wk bench run --a-args/--b-args` runs a JetStream3 subtest in the jsc shell with an option toggled, in alternating rounds, and `wk bench report <task>` compares it per subtest | 5 | `live bench.options_ab` |
 | rpi4 boots its bench system reliably: EEPROM sd-first with `BOOT_WATCHDOG_TIMEOUT` and `MAX_RESTARTS`, a medium that holds the bus under write load, the stick reproduced from the repo by `wk sysimage write --disk rpi4:/dev/sda`, and `--back` reaches the rescue | 5 | `live boot[rpi4]` |
-| The Mac's bench volume runs the whole lifecycle: `wk boot mbp` against the real install, a stage from a guest onto it, a measured run, `wk quiesce status` before it, the screen watch during it, and `wk bench compare` against a container run | 5 | `live bench[mbp]` |
+| The Mac's bench volume runs the whole lifecycle: `wk boot mbp` against the real install, a stage from a guest onto it, a measured run that holds and powers off, `--collect` from the host install after the power-button pick, `wk quiesce status` before it, the screen watch during it, and `wk bench compare` against a container run | 5 | `live bench[mbp]` |
 | A second spelling of a bench system (`system image`) or a warmup profile (`warmup capture`) fails lint; `round` and `slot` have no second spelling in the tree, and `device` is the CLI's word (`--devices`) for a bench machine | 5 | `lint.vocabulary` (landed 2026-10-21) |
 | A failed leg on a board leaves evidence readable afterwards: a persistent journal, browser and tunnel logs on every leg, a board-at-failure capture, and warmup evidence on a leg that timed out | 5 | `unit bench.failed_leg_keeps_evidence`, `live bench.evidence[<board>]` |
 | The live tier runs against the container place on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
@@ -1283,7 +1273,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A deploy routed through a macOS workstation's podman VM reaches a board in bench mode over Tailscale SSH with no key of its own | 5 | `live bench.routed_deploy` |
 | A board PGO collection records its cost per plan, its coverage against the floor, and what the collecting browser rendered and JITted with; the kill waits long enough for the profile dump | 5 | `live bench.pgo_collection[<board>]` |
 | Upstream carries what the lane patches locally (OSXMiniDriver's pgo dirs, `locate_binary_xcrun` off macOS, an optional `pgo-profile compress`, the JIT-report crash in JSC, the SSID redaction), and the local patch file goes | 5 | `unit pgo.no_local_patch` |
-| The Mac's startup volume is set by the privileged helper, proven round trip before arming, and read back from firmware | 5 | `live boot.arm[mbp]` |
+| `wk boot mbp` restarts into the bench default and refuses when the default is not the bench volume | 5 | `live boot.arm[mbp]` |
 | A fresh bench volume provisions itself: python3 present before it is needed, Command Line Tools fetched and the update denial restored, no FileVault, the `bench` account, room checked, network credentials checked | 5 | `live sysimage.mac_volume_provision` |
 | A second build of one profile reuses sstate, and `--keep-work` leaves the kernel tree to configure | 5 | `live sysimage.sstate_reuse` |
 | A disk written from any image is unique per disk (`LABEL=` images included) and mountable whatever the medium held | 5 | `unit sysimage.write_identity`, `live sysimage.write[<board>]` |
@@ -1340,8 +1330,6 @@ decides is a row; one still open is listed under "Decisions for the user".
 
 Decisions are asked as questions, and their answers are recorded under "Decisions taken".
 
-- Zero-touch Mac nights: the arm is measured (above): root's bless does not take, so the owner's credential
-  goes into the keyring as `mac-owner` and the helper spends it -- is storing it there acceptable? If the host
-  install cannot be reached at its login window after a return, the return stays the morning's `wk boot mbp
-  --back`. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`,
+- Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
+  wk never blesses; the way back is the person's power-button pick. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`,
   `unit bench.variance_pairing`).

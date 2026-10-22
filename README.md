@@ -506,6 +506,7 @@ board is handed back to its rescue with its arming record cleared.
 # on the Mac, once: ./setup --stage quiesce   (the helpers; one password)
 wk boot mbp --status                    # which volume the firmware default is
 wk sysimage build perf-macos-tolken --all   # on the Mac: the WK Bench volume, installed and armed
+# on the Mac, once, by hand: System Settings > General > Startup Disk > WK Bench (your password)
 wk bench ab --devices mbp --patch <ref> --base <ref> --workspace mac-rel --detect 0.3
 wk bench ab --devices mbp --systems <staged-a>,<staged-b> --workspace mac-rel   # two builds already staged
 wk bench ab --devices mbp --status     # the planted job, read over either install
@@ -515,8 +516,12 @@ wk bench precision <run-a> <run-b>      # what the rounds so far resolve
 
 Driven from another machine. The bench install is its own tailnet node, so
 results read back the moment a leg ends. The run stops when every plan
-resolves `--detect` (0.3% by default), or at `--max-rounds`. Getting the
-desktop back is the one manual step: the host install stops for a password.
+resolves `--detect` (0.3% by default), or at `--max-rounds`. The Mac is a
+bench machine by default: `WK Bench` is its startup disk, so a plain restart
+enters bench mode, and a finished job holds the install up for
+`WK_MAC_BENCH_HOLD` seconds, then powers it off. Getting the desktop is the
+one manual step: at startup hold the power button and pick the host install
+(the firmware boots that pick once), then `--collect` from there.
 
 Every macOS number is from `mac-release-pgo`: an instrumented build, a
 collection through the three benchmarks, then the measured build, per arm.
@@ -738,9 +743,12 @@ partition number, bounded. Every system a write makes carries the helper;
 installing this checkout's onto a running one is `wk machine setup <board>`.
 
 **mbp — `mac-volume`.** The `WK Bench` APFS volume beside the host install.
-`wk boot mbp` arms it through the boot helper (`bless`) and `--status` reads
-the firmware default back; returning to the desktop is the one manual step
-the workflow above names. `wk sysimage write` refuses a Mac's own disks.
+It is the firmware default, set once by hand in Startup Disk with the owner's
+password: on Apple Silicon a root `bless` does not take, so wk blesses
+nothing. `wk boot mbp` restarts into it through the boot helper; `--status`
+reads the default, and the arm refuses while it is not the bench volume.
+The way back is the power-button pick, so `--back` refuses and `--disarm`
+clears the record only. `wk sysimage write` refuses a Mac's own disks.
 
 **benchvm — `mac-guest`.** A Tart guest rehearsing the Mac path. Nothing
 measured in it is comparable with hardware.
