@@ -293,5 +293,38 @@ class TestNewKillStopsTheCreation(unittest.TestCase):
         self.assertIn("no new is running", cp.stdout)
 
 
+@requires_container_place()
+class TestSudoReachesTheNetwork(WkTest):
+    """`live sudo.network_in_workspace`: in a fresh workspace, root under a plain `sudo` keeps the exec's bridge and
+    CA bundle (`/etc/sudoers.d/wk-egress`, container/firstrun.sh through lib/wk/sudo.py), so `sudo apt-get update` reads
+    the archive through the egress proxy."""
+
+    def setUp(self):
+        super().setUp()
+        self.name = f"wk-test-{rand_suffix()}"
+        cp = run("new", self.name, "--on", "container", timeout=1200)
+        self._created = cp.returncode == 0
+        self.assertEqual(cp.returncode, 0, f"wk new failed: {cp.stdout}")
+        run("status", self.name, "--wait", "--timeout", "900", timeout=960)
+
+    def tearDown(self):
+        if getattr(self, "_created", False):
+            cp = run("rm", self.name, env={"WK_YES": "1"}, timeout=900)
+            if cp.returncode != 0:
+                print(f"[teardown] 'wk rm {self.name}' exited {cp.returncode}: {cp.stdout}")
+        super().tearDown()
+
+    def test_a_plain_sudo_keeps_the_bridge_and_apt_reads_the_archive(self):
+        cp = run("enter", self.name, "--", "sudo", "-n", "visudo", "-c", "-f", "/etc/sudoers.d/wk-egress", timeout=300)
+        self.assertEqual(cp.returncode, 0, "the first run installed no drop-in that parses; firstrun said:\n"
+                         + firstrun_lines(container_log(self.name)) + "\n" + cp.stdout)
+        cp = run("enter", self.name, "--", "bash", "-c", "sudo -n env | grep -E '^(https_proxy|CURL_CA_BUNDLE)='", timeout=300)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("https_proxy=http://127.0.0.1:", cp.stdout, "root under sudo has no bridge: " + cp.stdout)
+        self.assertIn("CURL_CA_BUNDLE=", cp.stdout, "root under sudo has no CA bundle: " + cp.stdout)
+        cp = run("enter", self.name, "--", "sudo", "-n", "apt-get", "update", timeout=900)
+        self.assertEqual(cp.returncode, 0, f"'sudo apt-get update' in {self.name} failed:\n{cp.stdout[-3000:]}")
+
+
 if __name__ == "__main__":
     unittest.main()

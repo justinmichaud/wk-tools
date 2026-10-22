@@ -1,11 +1,11 @@
-"""`wk key sudo`: root costs a password with a 30-second window, through one drop-in; the verdict, its install, and the fleet's answers."""
+"""`wk key sudo`: root costs a password with a 30-second window, through one drop-in; the verdict, its install, and the fleet's answers. `python3 -m wk.sudo workspace` (container/firstrun.sh): the drop-in keeping what ensure-bridge.sh exports across sudo's env_reset, installed by the same path."""
 
 import os
 import re
 import sys
 
 from wk import act, fleet, priv, record
-from wk.act import die, log
+from wk.act import Refused, die, log
 from wk.store import ws_name
 
 DROPIN_FMT = "/etc/sudoers.d/zz-%s-passwd"
@@ -18,6 +18,44 @@ SUDOERS_BODY = ("# Installed by 'wk key sudo setup'. Do not edit; re-run the com
 BLANKET = re.compile(r'(^|\s)(NO)?PASSWD:\s*ALL\s*$|\)\s*ALL\s*$')
 # [0-9.-]: a bare [0-9-] would read '0.5' as '0', a different policy.
 TIMEOUT = re.compile(r'timestamp_timeout=([0-9.-]*)')
+WS_DROPIN = "/etc/sudoers.d/wk-egress"
+WS_KEEP = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY", "REQUESTS_CA_BUNDLE",
+           "CURL_CA_BUNDLE", "GIT_SSL_CAINFO", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS")
+WS_BODY = ("# Installed by container/firstrun.sh (lib/wk/sudo.py). Do not edit; 'wk rm' and 'wk new' remake the workspace.\n"
+           "Defaults env_keep += \"%s\"\n")
+
+
+def require_visudo(machine):
+    if not machine.have("visudo"):
+        die("visudo is required (part of the sudo package) but not on PATH -- refusing to write a sudoers file that cannot be validated")
+
+
+def install(machine, dropin, text, linux):
+    """`text` at `dropin`, once `visudo -c` takes it; removed again if sudoers stops parsing with it in."""
+    tmp = "/tmp/wk-sudoers.%d" % os.getpid()
+    machine.write(tmp, text)
+    if not act.dry_run() and not machine.run(["visudo", "-c", "-f", tmp]).ok:
+        machine.remove_now(tmp)
+        die("the sudoers file wk generated does not parse -- refusing to install it")
+    r = machine.act_run(["sudo", "install", "-m", "0440", "-o", "root", "-g", "root" if linux else "wheel", tmp, dropin])
+    machine.remove(tmp)
+    if not r.ok:
+        die("could not install %s" % dropin)
+    if not machine.act_run(["sudo", "visudo", "-c"]).ok:
+        act.warn("sudoers does not parse after the install -- removing what we added")
+        machine.act_run(["sudo", "rm", "-f", dropin])
+        die("sudoers was left as it was; nothing changed")
+
+
+def workspace_dropin():
+    return WS_BODY % " ".join(WS_KEEP)
+
+
+def workspace_setup(machine):
+    require_visudo(machine)
+    install(machine, WS_DROPIN, workspace_dropin(), True)
+    act.info("%s installed: the egress bridge and its CA bundle are kept across sudo" % WS_DROPIN)
+    return 0
 
 
 def seconds(minutes):
@@ -64,30 +102,18 @@ class Sudo:
 
     def setup(self):
         """visudo -c before and after the install, then `sudo -k` and the property itself: `sudo -n true` refused."""
-        if not self.machine.have("visudo"):
-            die("visudo is required (part of the sudo package) but not on PATH -- refusing to write a sudoers file that cannot be validated")
+        require_visudo(self.machine)
         rc, v = self.verdict()
         host = record.host_name(self.machine)
         if rc == 0:
             act.info("already set up on %s: %s" % (host, v))
             return 0
-        user, dropin, tmp = self.machine.run(["id", "-un"]).out.strip(), self.dropin(), "/tmp/wk-sudoers.%d" % os.getpid()
-        self.machine.write(tmp, SUDOERS_BODY % (user, TIMEOUT_MIN, user))
-        if not act.dry_run() and not self.machine.run(["visudo", "-c", "-f", tmp]).ok:
-            self.machine.remove_now(tmp)
-            die("the sudoers file wk generated does not parse -- refusing to install it")
+        user, dropin = self.machine.run(["id", "-un"]).out.strip(), self.dropin()
         if self._linux is None:
             from wk.machine import is_linux
             self._linux = is_linux()
         act.info("installing %s on %s -- sudo will ask for your password; after this every sudo here asks" % (dropin, host))
-        r = self.machine.act_run(["sudo", "install", "-m", "0440", "-o", "root", "-g", "root" if self._linux else "wheel", tmp, dropin])
-        self.machine.remove(tmp)
-        if not r.ok:
-            die("could not install %s" % dropin)
-        if not self.machine.act_run(["sudo", "visudo", "-c"]).ok:
-            act.warn("sudoers does not parse after the install -- removing what we added")
-            self.machine.act_run(["sudo", "rm", "-f", dropin])
-            die("sudoers was left as it was; nothing changed")
+        install(self.machine, dropin, SUDOERS_BODY % (user, TIMEOUT_MIN, user), self._linux)
         self.machine.act_run(["sudo", "-k"])
         if act.dry_run():
             return 0
@@ -162,3 +188,18 @@ def main(words, on, all_flag, reg, env=None):
         return all_machines(reg, action, env)
     sudo = Sudo(reg.machine, env)
     return sudo.setup() if action == "setup" else status_here(sudo, env)
+
+
+def cli(argv):
+    if argv != ["workspace"]:
+        sys.stderr.write("usage: python3 -m wk.sudo workspace\n")
+        return 2
+    from wk.machine import Local
+    try:
+        return workspace_setup(Local())
+    except Refused as e:
+        return e.status
+
+
+if __name__ == "__main__":
+    sys.exit(cli(sys.argv[1:]))

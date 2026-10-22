@@ -13,6 +13,10 @@ warn() { printf '[firstrun] warning: %s\n' "$*" >&2; }
 [ "${1:-}" = --bridged ] || exec "$WK_TOOLS/container/proxy/ensure-bridge.sh" "$0" --bridged
 [ -S /run/wk/proxy.sock ] || log "WARNING: no egress proxy socket at /run/wk/proxy.sock -- no network"
 
+# root keeps this bridge and its CA bundle across sudo's env_reset (lib/wk/sudo.py), so `sudo apt-get` reaches the proxy.
+PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.sudo workspace \
+    || warn "the sudoers drop-in was not installed (above) -- 'sudo apt-get' in here has no network"
+
 if [ -S /run/wk/broker.sock ]; then
     log "fleet-request broker present -- 'wk boot' / 'wk bench' become requests"
 else
@@ -74,16 +78,13 @@ done
 
 ln -sfn /skills "$HOME/.claude/skills"  # one mutable dir, shared by every ws
 
-# apt runs as root, whose sockets this run's bridge cannot read, so it is given a bridge of its own.
-apt_get() { sudo "$WK_TOOLS/container/proxy/ensure-bridge.sh" apt-get "$@"; }
-
 _install_profilers() {                  # wrapped: not load-bearing
-    if apt_get update -qq >/dev/null 2>&1 \
-       && apt_get install -y --no-install-recommends heaptrack valgrind sysprof >/dev/null 2>&1; then
+    if sudo apt-get update -qq >/dev/null 2>&1 \
+       && sudo apt-get install -y --no-install-recommends heaptrack valgrind sysprof >/dev/null 2>&1; then
         log "heaptrack, valgrind and sysprof-cli installed"
     else
         warn "apt install of heaptrack/valgrind/sysprof failed -- check egress. Retry by hand:
-         sudo $WK_TOOLS/container/proxy/ensure-bridge.sh apt-get update && sudo $WK_TOOLS/container/proxy/ensure-bridge.sh apt-get install heaptrack valgrind sysprof
+         sudo apt-get update && sudo apt-get install heaptrack valgrind sysprof
          Until then 'wk run --profile=heaptrack|massif' refuses by name."
     fi
 
@@ -134,18 +135,18 @@ if [ -f "$DDEBS_SOURCES" ]; then
 else
     _ddebs_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
     log "provisioning ddebs.ubuntu.com for $_ddebs_codename"
-    if apt_get update -qq >/dev/null 2>&1 \
-       && apt_get install -y --no-install-recommends ubuntu-dbgsym-keyring >/dev/null 2>&1 \
+    if sudo apt-get update -qq >/dev/null 2>&1 \
+       && sudo apt-get install -y --no-install-recommends ubuntu-dbgsym-keyring >/dev/null 2>&1 \
        && printf 'deb http://ddebs.ubuntu.com %s main restricted universe multiverse\ndeb http://ddebs.ubuntu.com %s-updates main restricted universe multiverse\ndeb http://ddebs.ubuntu.com %s-proposed main restricted universe multiverse\n' \
               "$_ddebs_codename" "$_ddebs_codename" "$_ddebs_codename" \
               | sudo tee "$DDEBS_SOURCES" >/dev/null \
-       && apt_get update -qq >/dev/null 2>&1; then
-        log "ddebs.ubuntu.com added ($DDEBS_SOURCES) -- 'sudo $WK_TOOLS/container/proxy/ensure-bridge.sh apt-get install <pkg>-dbgsym' now works"
+       && sudo apt-get update -qq >/dev/null 2>&1; then
+        log "ddebs.ubuntu.com added ($DDEBS_SOURCES) -- 'sudo apt-get install <pkg>-dbgsym' now works"
     else
         warn "ddebs.ubuntu.com provisioning failed -- check egress. Retry by hand:
-         sudo $WK_TOOLS/container/proxy/ensure-bridge.sh apt-get install ubuntu-dbgsym-keyring
+         sudo apt-get install ubuntu-dbgsym-keyring
          sudo tee $DDEBS_SOURCES <<<'deb http://ddebs.ubuntu.com $_ddebs_codename main restricted universe multiverse'
-         sudo $WK_TOOLS/container/proxy/ensure-bridge.sh apt-get update"
+         sudo apt-get update"
     fi
 fi
 
@@ -209,7 +210,7 @@ if ! command -v lazygit >/dev/null 2>&1; then
     _install_lazygit || warn "lazygit install failed -- continuing without it"
 fi
 if ! command -v npm >/dev/null 2>&1; then
-    if apt_get install -y --no-install-recommends nodejs npm >/dev/null 2>&1; then
+    if sudo apt-get install -y --no-install-recommends nodejs npm >/dev/null 2>&1; then
         log "node $(node -v) and npm installed (Ubuntu's archive), for 'wk new' to install pi with"
     else
         warn "apt install of nodejs/npm failed -- check egress; this workspace is made without pi"
