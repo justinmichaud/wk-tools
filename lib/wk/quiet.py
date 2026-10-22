@@ -3,7 +3,7 @@
 import os
 import sys
 
-from wk import act, images, project, status
+from wk import act, images, project
 from wk.act import die, info, log, warn
 from wk.machine import TIMED_OUT, is_macos, lib_argv
 from wk.store import Store
@@ -15,7 +15,7 @@ HOSTS = "bench/mac-quiet-hosts.sh"
 RAISER = "bench/mac-raiser.sh"
 COMMON = "lib/common.sh"
 READ_SECS = 20   # bench/mac-quiet-desktop.sh's _WK_QD_READ_SECS: a paused daemon answers no XPC request
-SETTLE = 30
+PAUSED_DAEMONS_QUIET_SECONDS = 30
 SETUP = "./setup --stage quiesce"
 RENDER = '_wk_render() { render_findings <<<"$1"; }; _wk_render'
 
@@ -35,6 +35,10 @@ def require_helper(machine):
         die(NOT_INSTALLED)
 
 
+def state_dir(store):
+    return store.env.get("WK_QUIESCE_STATE") or os.path.join(store.state_dir(), "quiesce")
+
+
 def bench_mode(machine, env):
     return machine.exists(images.marker(env))
 
@@ -43,7 +47,7 @@ class Quiesce:
     def __init__(self, root, machine, clock, env, macos=None):
         self.root, self.m, self.clock, self.env = str(root), machine, clock, env
         self.macos = is_macos() if macos is None else macos
-        self.state = status.quiesce_dir(Store(env))
+        self.state = state_dir(Store(env))
         self.bench = bench_mode(machine, env)
 
     def _lib(self, rel, fn, *args):
@@ -103,11 +107,10 @@ class Quiesce:
             info("measured, now that both halves have run:")
             if self.noise():
                 warn("the machine is noisier than a benchmark install should be (above)")
-        settle = int(self.env.get("WK_SETTLE_SECONDS") or SETTLE)
         if act.dry_run():
-            sys.stderr.write("would settle for %ds\n" % settle)
+            sys.stderr.write("would settle for %ds\n" % PAUSED_DAEMONS_QUIET_SECONDS)
         else:
-            self.clock.sleep(settle)
+            self.clock.sleep(PAUSED_DAEMONS_QUIET_SECONDS)
         info("quiesced; settle time elapsed")
 
     def off(self):

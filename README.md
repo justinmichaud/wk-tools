@@ -680,8 +680,8 @@ sudo, whose sockets the bridge cannot read, is given its own:
 **Housekeeping**
 
 ```sh
-wk status                               # every workspace, task, machine and bench machine
-wk doctor --all                         # this machine (its wk-tools and disk too) and every build machine
+wk status                               # every workspace and task, on every machine
+wk doctor --all                         # this machine (its daemons, wk-tools and disk too), every build and bench machine
 wk gc                                   # asks once, takes what loses no work, names the rest with what takes it
 wk gc --purge-rubble                    # half-made workspaces nothing is creating, instrumented slots on a board
 wk gc --purge-mirror                    # the mirror and every snapshot; refused with a live workspace
@@ -836,8 +836,7 @@ check out the pin; moving it is a new `SDK_PIN`.
 **The macOS guest** — `WK_VM_IMAGE`, `WK_VM_BASE`, `WK_VM_USER`,
 `WK_VM_PASSWORD`, `WK_VM_CPUS`, `WK_VM_MEM_MB`, `WK_VM_BASE_CPUS`,
 `WK_VM_BASE_MEM_MB`, `WK_VM_DISK_GB`, `WK_VM_DISPLAY`, `WK_VM_SUBNET`,
-`WK_VM_PROXY_ADDR`, `WK_VM_PROXY_PORT`, `WK_HOST_FREE_WARN_GB`,
-`WK_VM_SHELLS_WARN`, `WK_VM_MEM_FREE_WARN_PCT`, `WK_VM_SWAP_WARN_MB`,
+`WK_VM_PROXY_ADDR`, `WK_VM_PROXY_PORT`,
 `WK_VM_FORCE` (crosses a stale base or a blocked desktop, recorded),
 `WK_VM_STORE` (the guests' store and records, apart from the container's).
 
@@ -860,7 +859,6 @@ check out the pin; moving it is a new `SDK_PIN`.
 - `WK_BENCH_GUEST` the name of the bench guest workspace (default `wk-bench`).
 - `WK_BENCH_NEED_GB` free GB the bench volume's container must have before the volume is added.
 - `WK_BENCH_WIRED` set when the bench install is on ethernet, so no Wi-Fi credential is copied.
-- `WK_HOST_FREE_MIN_GB` free GB on the host below which a macOS guest is refused (`WK_HOST_FREE_WARN_GB` only warns).
 - `WK_HOST_SECRETS` the macOS host's keyring (default `~/.config/wk/secrets`).
 - `WK_IMAGE_HOST` the address the bench image is reached at, ahead of the fleet peer lookup.
 - `WK_JOB_PID_TRIES` polls a watched job gets to announce its pid (default 900).

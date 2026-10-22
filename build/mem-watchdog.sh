@@ -8,7 +8,7 @@ set -uo pipefail
 PID="${1:?usage: mem-watchdog.sh <pid> <budget-mb> [floor-mb]}"
 BUDGET="${2:?budget in MB}"
 FLOOR="${3:-0}"
-INTERVAL="${WK_MEM_INTERVAL:-30}"
+INTERVAL=30   # a link climbs over minutes: a sample each half minute is ahead of the OOM killer
 
 _tree() {   # every process in the tree under $1: pid list plus total RSS in MB. One `ps` per sample walked in awk rather than a pgrep recursion, eight passes covering any depth
     ps -eo pid=,ppid=,rss= 2>/dev/null | awk -v root="$1" '

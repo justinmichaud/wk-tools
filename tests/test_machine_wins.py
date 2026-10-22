@@ -16,8 +16,8 @@ LATER = "Host added-later\n    User me\n"
 
 class TestMachineWins(RmFinalStateTest):
     def status_of(self, w):
-        walk = status.Walk(REPO, env=w.env, reg=w.reg, fleet=False, devices=False, clock=w.clock)
-        rec, _ = walk.workspace(w.driver, "here", "native", "ws", w.records)
+        walk = status.Walk(REPO, env=w.env, reg=w.reg, clock=w.clock)
+        rec, _ = walk.workspace(w.driver, "here", "ws", w.records)
         return rec["ws"], [n["text"] for n in rec.get("notes", [])]
 
     def runs_of(self, w, head):

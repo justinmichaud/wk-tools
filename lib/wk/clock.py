@@ -1,4 +1,4 @@
-"""Time as a parameter: a fake clock advances when asked to sleep."""
+"""Time as a parameter: every wait polls through Clock.wait_until, and a fake clock advances when asked to sleep."""
 
 import time
 
@@ -22,7 +22,7 @@ class Clock:
     def wait_until(self, done, timeout, interval):
         start = self.monotonic()
         while not done():
-            if self.monotonic() - start >= timeout:
+            if timeout is not None and self.monotonic() - start >= timeout:
                 return False
             self.sleep(interval)
         return True

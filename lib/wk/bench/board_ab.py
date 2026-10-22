@@ -207,7 +207,7 @@ class AB(Task):
 
     def hold(self):
         recs = progress.Records(self.reg.store.records_dir(), clock=self.clock, env=self.reg.env, machine=self.reg.machine)
-        return progress.hold(recs, lambda r: progress.fleet_holders(r, recs, progress.fleet_stores(self.root, self.reg.env, recs.machine)), self.name,
+        return progress.hold(recs, lambda r: progress.fleet_holders(r, progress.fleet_stores(self.root, self.reg.env, recs.machine)), self.name,
                              "bench", self.ws, "wk bench run %s --kill --system %s" % (self.ws, self.name), "",
                              ["%s on %s, %s" % (self.plan, self.name, " vs ".join(self.labels))], os.getpid(), self.reg.env)
 

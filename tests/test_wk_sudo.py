@@ -63,15 +63,14 @@ class TestVerdict(unittest.TestCase):
     """0 exactly when a password is required and the window is 30s or less."""
 
     def test_each_listing_s_verdict(self):
-        half = {"WK_SUDO_TIMEOUT_MIN": "0.5"}
         timeout = lambda t: "    timestamp_timeout=%s\n\n" % t + LISTING_UNSET  # noqa: E731
         head = "User justinmichaud may run the following commands on tolken:\n"
         # sudoers' last match wins: a later blanket NOPASSWD overrides an earlier ALL; one naming a program is no blanket.
         for name, free, listing, rc_l, dropin, env, want, msg in (
-                ("our window", False, timeout("0.5"), 0, False, half, 0, "30 seconds"),
-                ("longer window", False, timeout("15"), 0, False, half, 1, "wanted 30 seconds"),
-                ("zero", False, timeout("0"), 0, False, half, 0, "stricter"),
-                ("never expires", False, timeout("-1"), 0, False, half, 1, ""),
+                ("our window", False, timeout("0.5"), 0, False, {}, 0, "30 seconds"),
+                ("longer window", False, timeout("15"), 0, False, {}, 1, "wanted 30 seconds"),
+                ("zero", False, timeout("0"), 0, False, {}, 0, "stricter"),
+                ("never expires", False, timeout("-1"), 0, False, {}, 1, ""),
                 ("unset", False, LISTING_UNSET, 0, False, {}, 1, "sudo's default"),
                 ("blanket last", True, head + "    (ALL : ALL) ALL\n    (root) NOPASSWD: ALL\n", 0, False, {}, 1,
                  "NOPASSWD: ALL is granted"),
@@ -152,7 +151,7 @@ class TestSetup(unittest.TestCase):
     def test_already_set_up_is_a_no_op(self):
         f = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
         f.answer(HAVE + ("visudo",))
-        s = Sudo(f, {"WK_SUDO_TIMEOUT_MIN": "0.5"}, linux=False)
+        s = Sudo(f, {}, linux=False)
         rc = s.setup()
         self.assertEqual(rc, 0)
         self.assertEqual([e for e in f.effects if e[0] != "run"], [], "no write, install or removal at all")
@@ -221,7 +220,7 @@ class TestPlaceAndAll(unittest.TestCase):
     def test_all_reports_the_local_machine_and_fans_out(self):
         local = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
         reg = registry({"box": FakeDriver("box", out="box status line\n")}, machine=local)
-        rc = key_sudo(["status", "--all"], env={"WK_SUDO_TIMEOUT_MIN": "0.5"}, reg=reg)
+        rc = key_sudo(["status", "--all"], env={}, reg=reg)
         self.assertEqual(rc, 0)
 
     def test_all_setup_never_sets_up_the_local_machine(self):
@@ -229,7 +228,7 @@ class TestPlaceAndAll(unittest.TestCase):
         box = Fake("box")
         box.answer(["sh", "-c"])
         reg = registry({"box": FakeDriver("box", machine=box)}, machine=local)
-        key_sudo(["setup", "--all"], env={"WK_SUDO_TIMEOUT_MIN": "0.5"}, reg=reg)
+        key_sudo(["setup", "--all"], env={}, reg=reg)
         self.assertFalse(any(e[0] == "run" and e[1][:2] == ("sudo", "install") for e in local.effects))
 
 

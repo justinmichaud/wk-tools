@@ -116,7 +116,7 @@ class QuiesceTest(unittest.TestCase):
         p = mock.patch.dict(os.environ, {}, clear=False)
         p.start()
         self.addCleanup(p.stop)
-        for v in ("WK_DRY_RUN", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_SETTLE_SECONDS"):
+        for v in ("WK_DRY_RUN", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED"):
             os.environ.pop(v, None)
 
     def quiet_run(self, fn):
@@ -147,10 +147,6 @@ class TestOn(QuiesceTest):
         self.assertIn(STATE + "/caffeinate.pid", w.files)
         self.assertEqual([30], w.clock.slept)
         self.assertIn("quiesced; settle time elapsed", out)
-        w = World()
-        w.env["WK_SETTLE_SECONDS"] = "3"
-        self.quiet_run(w.q().on)
-        self.assertEqual([3], w.clock.slept)
 
     def test_the_user_half_is_written_only_on_a_bench_install_and_linux_is_the_privileged_half_alone(self):
         bench, desk, linux = World(bench=True), World(), World(macos=False)

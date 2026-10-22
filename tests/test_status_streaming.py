@@ -2,11 +2,10 @@
 import contextlib
 import io
 import json
-import os
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, rand_suffix, requires_container_place, run, scratch_dir, stub_path
+from tests.support import REPO, WkTest, requires_container_place, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import statusview  # noqa: E402
@@ -118,18 +117,11 @@ class TestABlockWaitsForEveryPlannedJob(unittest.TestCase):
         self.assertIn("ws-c", out)
         self.assertNotIn("no workspaces", out)
 
-    def test_a_job_with_no_machine_completes_no_block(self):
-        tap, _ = _render([_plan(("alpha", "alpha"), ("devices", None)), dict(kind="flush", job="devices"), *_machine_lines("alpha"),
-                          dict(kind="exit", code=0)])
-        out = "\n".join(l for _, l in tap.lines)
-        self.assertEqual(len([l for l in out.splitlines() if l.startswith("alpha")]), 1, out)
-        self.assertIn("ws-alpha", out)
-
 
 class TestJsonModeUnchangedByStreamMarkers(unittest.TestCase):
     def test_json_output_equals_the_merge_of_the_same_stream_without_markers(self):
         records = ([_plan(("alpha", "alpha"), ("beta", "beta"))] + _machine_lines("alpha") + _machine_lines("beta")
-                   + [dict(kind="fleet", machine="rpi3", role="bench-device", mode="bench mode", media="sd"), dict(kind="exit", code=2)])
+                   + [dict(kind="exit", code=2)])
         with_markers = statusview.merge(records)
         without = statusview.merge([r for r in records if r["kind"] not in ("plan", "flush")])
         self.assertEqual(with_markers, without)
@@ -138,84 +130,17 @@ class TestJsonModeUnchangedByStreamMarkers(unittest.TestCase):
         self.assertEqual(json.loads(json.dumps(with_markers)), with_markers)
 
 
-_ANSWERING_SSH = '''#!/bin/sh
-for last; do :; done
-exec bash -c "$last"
-'''
-
-
-class TestCollectorMarkers(WkTest):
-    """A run asked for `--records` carries no plan or flush."""
-
-    def _status(self, *args):
-        with scratch_dir(prefix="wk-test-machines-") as machdir, stub_path({"ssh": _ANSWERING_SSH}) as binp:
-            env = {"WK_MACHINES_DIR": str(machdir), "WK_PLACE": "remote", "WK_REMOTE_HOST": "fake-reachable-" + rand_suffix(4),
-                   "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "WK_PROBE_SECONDS": "1"}
-            return run("status", *args, env=env, timeout=60)
-
-    def test_records_carry_no_markers(self):
-        cp = self._status("--records")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        kinds = [json.loads(l)["kind"] for l in cp.stdout.splitlines() if l.startswith("{")]
-        self.assertIn("machine", kinds, cp.stdout)
-        self.assertNotIn("plan", kinds, cp.stdout)
-        self.assertNotIn("flush", kinds, cp.stdout)
-
-
-_MARKER_LEAKING_SSH = '''#!/bin/sh
-for last; do :; done
-case "$last" in
-    *.wk-remote*) exit 0 ;;
-    *--records*)
-        printf '%s\\n' '{"kind":"machine","name":"remote"}' \\
-            '{"kind":"flush","job":"remote"}' \\
-            '{"kind":"workspace","machine":"remote","method":"native","name":"leaky-ws","state":"running","ws":"present"}'
-        exit 0 ;;
-esac
-exec bash -c "$last"
-'''
-
-
-class TestARemotesMarkersStayItsOwn(WkTest):
-    """A remote's plan and flush records end its jobs, not this walk's."""
-
-    def test_a_flush_in_a_remotes_records_does_not_draw_its_block_early(self):
-        with scratch_dir(prefix="wk-test-machines-") as machdir, stub_path({"ssh": _MARKER_LEAKING_SSH}) as binp:
-            cp = run("status", "--no-devices", env={
-                "WK_MACHINES_DIR": str(machdir), "WK_PLACE": "remote", "WK_REMOTE_HOST": "fake-leaky-" + rand_suffix(4),
-                "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "WK_PROBE_SECONDS": "1"}, timeout=60)
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("probing remote", cp.stdout)
-        self.assertEqual(len([l for l in cp.stdout.splitlines() if l.startswith("remote")]), 1, cp.stdout)
-        self.assertRegex(cp.stdout, r"(?m)^\s+leaky-ws\s", cp.stdout)
-
-
 class TestEveryWorkspaceIsInTheListing(WkTest):
     @requires_container_place()
     def test_bare_status_lists_every_workspace_ls_lists(self):
         ls = run("ls", "--json", timeout=120)
         self.assertEqual(ls.returncode, 0, ls.stdout)
         names = [w["name"] for w in json.loads(ls.stdout)["workspaces"]]
-        st = run("status", "--no-devices", env={"NO_COLOR": "1"}, timeout=180)
+        st = run("status", env={"NO_COLOR": "1"}, timeout=180)
         self.assertIn(st.returncode, (0, 2, 4), st.stdout)
         for n in names:
             self.assertRegex(st.stdout, r"(?m)^\s+%s\s" % n, f"'{n}' missing from a bare 'wk status':\n{st.stdout}")
 
 
-_STOPPED_PODMAN = '''#!/bin/sh
-case "$*" in
-    *"machine inspect"*) echo '[{"Name": "wk", "State": "stopped"}]' ;;
-    *) exit 1 ;;
-esac
-'''
-
-
-class TestAStoppedPodmanMachineSaysSo(WkTest):
-    @unittest.skipUnless(sys.platform == "darwin", "the container place has a far side only on macOS")
-    def test_the_block_names_wk_start(self):
-        with stub_path({"podman": _STOPPED_PODMAN}) as binp:
-            cp = run("status", "--records", env={"WK_PLACE": "container", "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}"}, timeout=60)
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        raws = [json.loads(l) for l in cp.stdout.splitlines() if l.startswith('{"kind":"raw"')]
-        self.assertEqual(len(raws), 1, cp.stdout)
-        self.assertIn("is stopped -- 'wk start' brings it up", raws[0]["text"])
+if __name__ == "__main__":
+    unittest.main()

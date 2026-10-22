@@ -1273,7 +1273,8 @@ class Vm(Driver):
         return "" if r.ok else (r.err.strip() or r.out.strip() or "exit %d" % r.rc)
 
     def check_rows(self, ws):
-        return guest.check_rows(self, ws)
+        from wk import doctor
+        return doctor.guest_rows(self, ws)
 
     def vm_store_apart(self):
         return Store(self.env).vm_store_apart()

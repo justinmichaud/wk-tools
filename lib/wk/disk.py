@@ -3,7 +3,6 @@ store's rows as probe_store writes them."""
 
 import glob
 import os
-import shlex
 import sys
 
 from wk import gc, kv, places, project, rubble
@@ -124,8 +123,7 @@ def machine_report(root, reg):
         rep.section("the container store, inside that image (already counted above)")
         if ctr.machine_state() == "running":
             with open(__file__) as me:   # this file, not the VM's copy, which is only as new as `wk sync --tools container`
-                cp = here.run(["podman", "machine", "ssh", vm_name, "--",
-                               "WK_STORE=/var/lib/wk python3 -c %s" % shlex.quote(RUN_AS_VM_COPY)], input=me.read())
+                cp = ctr.store_machine.run(["env", "WK_STORE=/var/lib/wk", "python3", "-c", RUN_AS_VM_COPY], input=me.read())
             if cp.out.strip():
                 rep.render(cp.out, add=False)
             else:

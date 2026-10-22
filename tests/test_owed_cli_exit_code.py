@@ -1,37 +1,9 @@
 """The fleet exit code aggregates the worst state found anywhere -- owed"""
-import contextlib
-import io
 import os
-import sys
 import unittest
-from unittest import mock
 
-from tests.support import REPO, WkTest, rand_suffix, run, scratch_dir, stub_path
+from tests.support import WkTest, rand_suffix, run, scratch_dir, stub_path
 from tests.test_build_liveness import write_task
-
-sys.path.insert(0, str(REPO / "lib"))
-from wk import decl as D  # noqa: E402
-from wk import dispatch  # noqa: E402
-
-
-class TestDispatcherBump(WkTest):
-    def _report(self, here, vm):
-        stub = self.tmp / "probe"
-        stub.write_text("#!/bin/sh\n# wk probe -- a stub\n# wk: where=workspace name=none bare=merged readonly\n"
-                        f"exit {here}\n")
-        stub.chmod(0o755)
-        inv = dispatch.Invocation("probe", D.Decl(stub), [])
-        with mock.patch.object(dispatch, "registry", return_value=mock.Mock(all=mock.Mock(return_value=["container", "fakelocal"]))), \
-             mock.patch.object(dispatch, "machine_running", return_value=True), \
-             mock.patch.object(dispatch, "forward_status", return_value=vm), \
-             contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(dispatch.Exit) as raised:
-                dispatch.bare_report(inv, "probe", [])
-        return raised.exception.status
-
-    def test_the_larger_of_two_halves_wins_whichever_is_second(self):
-        self.assertEqual(self._report(here=1, vm=3), 3)
-        self.assertEqual(self._report(here=2, vm=0), 2)
 
 
 _ANSWERING_SSH = '''#!/bin/sh

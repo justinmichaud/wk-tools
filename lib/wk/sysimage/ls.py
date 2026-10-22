@@ -6,7 +6,7 @@ import os
 import time
 from collections import namedtuple
 
-from wk import act, fleetwalk, images, project
+from wk import act, fleet, images, project
 from wk.clock import Clock
 
 Image = namedtuple("Image", "builder ws path")   # path None: an image workspace holding none right now
@@ -140,8 +140,8 @@ def slot_holds(ws, name, commit, env):
 
 class Listing:
 
-    def __init__(self, reg, label, here_label, building, warn=act.warn, clock=None):
-        self.reg, self.label, self.here_label, self.building, self.warn = reg, label, here_label, building, warn
+    def __init__(self, reg, label, building, warn=act.warn, clock=None):
+        self.reg, self.label, self.building, self.warn = reg, label, building, warn
         self.clock = clock or Clock()
 
     def image_rows(self, image):
@@ -185,5 +185,4 @@ class Listing:
 
     def rows(self):
         mine = [row for image in scan(self.reg.machine, self.reg.store) for row in self.image_rows(image)] + self.host_rows()
-        return mine + fleetwalk.fleet_rows(self.reg, "sysimage", "images",
-                                           lambda d, name: self.here_label if d.is_here() else name, self.warn)
+        return mine + fleet.listing(self.reg, ["sysimage", "ls", "--continued"], "images", self.warn)

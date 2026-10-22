@@ -8,7 +8,7 @@ from unittest import mock
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import status  # noqa: E402
+from wk import doctor, status  # noqa: E402
 from wk.machine import TIMED_OUT, Local  # noqa: E402
 
 
@@ -38,21 +38,19 @@ class TestCeilings(WkTest):
         (boot.parent / "__init__.py").write_text("")
         (boot / "__init__.py").write_text("")
         (boot / "cli.py").write_text("import time\ntime.sleep(600)\n")
-        self.assertIsNone(status.fleet_probe(self.tmp, "rpi4", 0.5, env={}))
-        rec = status.fleet_record("rpi4", {"role": "bench-device"}, None, 0)
-        self.assertEqual((rec["machine"], rec["mode"]), ("rpi4", "no answer within 0s"))
+        self.assertIsNone(doctor.fleet_probe(self.tmp, "rpi4", 0.5))
 
     def test_status_parallel_keeps_starting_order(self):
-        w = status.Walk(REPO, env={"WK_ROW_LABEL": "here", "WK_IMAGE_MARKER": str(self.tmp / "none")},
-                        fleet=False, devices=False)
+        w = status.Walk(REPO, env={"WK_ROW_LABEL": "here"})
         w.places = lambda: ["a", "b", "c"]
-        w._is_here = lambda t: False
+        w.machine_of = lambda driver: "here"
+        w.driver = lambda name: None
         delays = {"a": (0.6, 2), "b": (0.3, 4), "c": (0, 0)}
 
-        def job(tname, name):
+        def job(tname):
             def run():
                 time.sleep(delays[tname][0])
-                return [status.Rec("raw", machine="here", text=tname).done()], delays[tname][1]
+                return [status.rec("raw", machine="here", text=tname)], delays[tname][1]
             return run
         w._job = job
         recs = list(w.records(markers=False))

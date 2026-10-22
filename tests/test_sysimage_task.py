@@ -108,19 +108,21 @@ class World(Fake):
     def recs(self):
         return job.records_of(self.reg.load("box"), self.clock, self)
 
-    def budget_files(self):
-        d = os.path.join(self.env["XDG_STATE_HOME"], "wk", "builds")
-        return sorted(p for p in self.files if p.startswith(d + "/"))
+    def booking(self):
+        """(jobs, MB) the record holding this machine's build budget names."""
+        (t,) = [t for t in self.recs().list() if "build:here" in t.holds()]
+        return int(t.field("jobs")), int(t.field("budget_mb"))
 
     def watched(self):
         (w,) = [e for e in self.effects if e[0] == "watch"]
         return list(w[1])
 
     def state(self):
-        return ([(t.field("kind"), t.field("exit")) for t in self.recs().list()], len(self.budget_files()))
+        return [(t.field("kind"), t.field("exit"), t.holds()) for t in self.recs().list()]
 
-    def running(self, stage="image", pid=77):
-        t = self.recs().begin(self.KIND, "here", self.ws, self.KILL, self.log, ["a"], pid=pid)
+    def running(self, stage="image", pid=77, kill=None, holds=None):
+        t = self.recs().begin(self.KIND, "here", self.ws, kill or self.KILL, self.log, ["a"], pid=pid,
+                              holds=["ws:" + self.ws] if holds is None else holds)
         self.pids.add(pid)
         return t
 
@@ -168,19 +170,12 @@ class TaskTest(unittest.TestCase):
         self.w = self.WORLD(self.tmp)
         return self.w
 
-    def ended(self):
-        """An earlier call's budget is booked to this process, which outlives it; a real one's ends with its process."""
-        for f in [f for f in self.w.budget_files() if "holder=pid:%d\n" % os.getpid() in self.w.files[f]]:
-            del self.w.files[f]
-
     def build(self, *rest, verb="build", **preset):
-        self.ended()
         with contextlib.redirect_stderr(io.StringIO()) as err:
             rc = getattr(self.w.driver(**preset), verb)(list(rest))
         return rc, err.getvalue()
 
     def refused(self, *rest, status=1, verb="build", **preset):
-        self.ended()
         with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused) as cm:
             getattr(self.w.driver(**preset), verb)(list(rest))
         self.assertEqual(cm.exception.status, status, err.getvalue())
@@ -201,9 +196,7 @@ class Lifecycle:
         self.assertEqual((t.plan(), t.steps()), (w.plan(), w.steps()))
         self.assertEqual((t.field("log"), t.field("kill"), t.field("subject")), (w.log, w.KILL, w.SUBJECT))
         self.assertEqual(Path(w.log).read_bytes(), w.out)
-        (f,) = w.budget_files()
-        self.assertIn("label=wk sysimage image %s\n" % w.ws, w.files[f])
-        self.assertIn("\njobs=%d\nbudget_mb=%d\nholder=pid:%d\n" % (w.booked() + (os.getpid(),)), w.files[f])
+        self.assertEqual((t.holds(), w.booking()), (["ws:" + w.ws, "build:here"], w.booked()))
 
     def test_the_stage_runs_its_preset_under_the_wrapper_in_the_workspace(self):
         self.build()
@@ -242,27 +235,16 @@ class Lifecycle:
         self.assertEqual(self.w.driver().host_image()[0], "docker.io/library/debian:13")
 
     def test_what_holds_the_workspace_is_refused_naming_the_stop(self):
-        for alive in (False, True):
-            w = self.fresh()
-            w.dirs.add(os.path.join(w.ws_dir, "home"))
-            w.files[os.path.join(w.ws_dir, "home", "%s-image.pid" % w.KIND)] = "99999\n"
-            if not alive:
-                self.assertEqual(self.build()[0], 0, "a pid file a killed build left is not busy")
-                continue
-            w.pids.add(99999)
-            self.assertIn("%s-image (pid 99999 in the workspace)" % w.KIND, self.refused())
-        with mock.patch("wk.lock.Lock.holder_pid", return_value=55):
-            self.fresh().pids.add(55)
-            err = self.refused()
-        self.assertIn("ws-%s" % self.w.ws, err)
-        self.assertIn("Stop it:    " + self.w.KILL, err)
+        self.w.running(kill="wk sysimage build x --stop")
+        err = self.refused()
+        self.assertIn(self.w.ws, err)
+        self.assertIn("wk sysimage build x --stop", err)
 
     def test_another_build_on_this_machine_is_a_barrier_and_too_little_disk_another(self):
-        from wk.resources import Budget
-        Budget(self.w, self.w.env, self.w.clock).record("wk build other", 4, 8192, "pid:66")
+        self.w.recs().begin("build", "here", "other", "k", "/l", ["x"], pid=66, holds=["build:here"], fields={"jobs": 4})
         self.w.pids.add(66)
-        with mock.patch.object(job, "holder_alive", return_value=lambda h: True):
-            self.assertIn("is already building", self.refused(status=75))
+        self.assertIn("is already building", self.refused(status=75))
+        self.assertEqual(len(self.w.recs().list()), 1)
         self.fresh().answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 1048576 1% /\n")
         self.assertIn("1 GB free", self.refused())
         self.assertEqual(self.w.recs().list(), [])
@@ -395,9 +377,9 @@ class YoctoWorld(World):
                    else self.sections if a[4].startswith("cat ") else Result(self.checkout_rc))
         self.lock = os.path.join(yocto.host_workdir(self.ws_dir, "rpi4-64bits-mesa"), "build", "bitbake.lock")
 
-    def running(self, stage="image", pid=77):
-        t = self.recs().begin("yocto", "here", self.ws, "wk sysimage build %s --stage %s --stop" % (self.PRESET, stage), self.log,
-                              list(yocto.STAGES), pid=pid)
+    def running(self, stage="image", pid=77, kill=None, holds=None):
+        t = self.recs().begin("yocto", "here", self.ws, kill or "wk sysimage build %s --stage %s --stop" % (self.PRESET, stage), self.log,
+                              list(yocto.STAGES), pid=pid, holds=["ws:" + self.ws] if holds is None else holds)
         t.step_state(yocto.stage_index(stage), "running")
         self.pids.add(pid)
         return t
@@ -437,10 +419,10 @@ class TestTheYoctoLifecycle(Lifecycle, TaskTest):
         self.w.out = b"wk-yocto: stage 'webkit' done\n"
         rc, err = self.build("--commit", SHA, "--slot", "base", "--preset", pgo.COLLECT, verb="webkit")
         self.assertEqual(rc, 0, err)
-        argv, (t,), (f,) = self.w.watched(), self.w.recs().list(), self.w.budget_files()
+        argv, (t,) = self.w.watched(), self.w.recs().list()
         self.assertEqual([argv[argv.index(k) + 1] for k in ("--stage", "--commit", "--slot", "--cross-preset")], ["webkit", SHA, "base", pgo.COLLECT])
         jobs = int(argv[argv.index("--webkit-jobs") + 1])
-        self.assertIn("jobs=%d\nbudget_mb=%d\n" % (jobs, jobs * yocto.WEBKIT_MB_PER_JOB), self.w.files[f])
+        self.assertEqual(self.w.booking(), (jobs, jobs * yocto.WEBKIT_MB_PER_JOB))
         self.assertEqual(t.field("abort_after"), "")
         self.assertIn("slot base in %s at aaaaaaaaaaaa" % self.w.ws, t.field("subject"))
 

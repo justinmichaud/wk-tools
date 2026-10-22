@@ -9,7 +9,7 @@ import types
 import unittest
 import unittest.mock
 
-from tests.fakes import FakeRegistry, FakeDriver
+from tests.fakes import FakeDriver, FakeRegistry
 from tests.support import NO_REGISTRY, REPO, WkTest, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -124,7 +124,7 @@ class TestTheListing(WkTest):
         with scratch_dir() as d:
             yocto_image(d)
             far = FakeDriver("fakebox", out="yocto-faraway  rpi4  fakebox\r\n    /elsewhere/faraway.wic.xz\n")
-            rows = ls.Listing(registry(d, [far]), "", "here", lambda ws: False, [].append).rows()
+            rows = ls.Listing(registry(d, [far]), "", lambda ws: False, [].append).rows()
         self.assertTrue(rows[0].startswith(YWS))
         self.assertEqual(rows[-2:], ["yocto-faraway  rpi4  fakebox", "    /elsewhere/faraway.wic.xz"])
         self.assertEqual(far.asked[0][0], ("sysimage", "ls", "--continued"))

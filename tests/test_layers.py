@@ -1,5 +1,4 @@
 """A layer is reached through its own Python API: no command runs `wk status` as a subprocess to read"""
-import io
 import os
 import subprocess
 import sys
@@ -10,9 +9,7 @@ from unittest import mock
 from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import priv, status  # noqa: E402
-from wk.act import Refused  # noqa: E402
-from wk.machine import Result  # noqa: E402
+from wk import priv  # noqa: E402
 
 
 def no_subprocess(*a, **kw):
@@ -40,29 +37,8 @@ class TestPrivilegedHelpersAreAskedOfPython(unittest.TestCase):
         self.assertEqual(want, rows)
 
     def test_doctor_runs_no_bash_for_them(self):
-        from wk import doctor
         with mock.patch.object(subprocess, "run", no_subprocess):
-            self.assertEqual(3, len(doctor.Host.priv_helpers(str(REPO))))
-
-
-class TestStatusIsReadFromTheLibrary(unittest.TestCase):
-    def test_start_shows_status_without_a_wk_subprocess(self):
-        start = load_cmd("start")
-        ctr = mock.Mock()
-        ctr.machine.run.return_value = Result(0, "", "")
-        ctr.podman.return_value = ["podman"]
-        reg = mock.Mock()
-        reg.load.return_value = ctr
-        walk = mock.Mock()
-        walk.records.return_value = ["rec"]
-        with mock.patch.object(start.Store, "macos_host", False), mock.patch.object(start.secrets, "Secrets"), \
-                mock.patch.object(subprocess, "run", no_subprocess), mock.patch.object(subprocess, "call", no_subprocess), \
-                mock.patch.object(start.status, "Walk", return_value=walk) as W, \
-                mock.patch.object(start.statusview, "render_text_stream") as render, \
-                mock.patch("sys.stderr", io.StringIO()):
-            self.assertEqual(0, start.start_everything(reg))
-        self.assertFalse(W.call_args.kwargs["fleet"])
-        render.assert_called_once()
+            self.assertEqual(3, len(priv.helpers()))
 
 
 if __name__ == "__main__":

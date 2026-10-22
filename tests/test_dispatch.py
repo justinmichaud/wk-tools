@@ -47,7 +47,6 @@ def dispatched(argv, macos=False, place="container", delegates=False, env=None, 
                mock.patch("os.execv", execv),
                mock.patch.object(dispatch, "forward_to_vm", forward),
                mock.patch.object(dispatch, "forward_status", forward),
-               mock.patch.object(dispatch, "bare_report", forward),
                mock.patch.object(dispatch, "delegate_run", delegate),
                mock.patch.object(dispatch, "delegate_driver", lambda t: object() if delegates else None),
                mock.patch.object(dispatch, "resolve_place", lambda *a: place),
@@ -139,7 +138,7 @@ class TestWhere(unittest.TestCase):
             return "forward" if macos else "here"
         if delegates and d.name_for(argv).split("@")[0] != "none" and not d.here_for(argv) and not d.lifecycle:
             return "delegate"
-        return "forward" if macos and d.forward_for(argv) else "here"
+        return "forward" if macos and d.forward_for(argv) and d.bare != "merged" else "here"
 
     def test_every_invocation_runs_where_it_says(self):
         checked = 0

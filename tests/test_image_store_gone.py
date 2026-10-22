@@ -2,7 +2,22 @@
 import unittest
 
 from tests.support import REPO, WkTest, rand_suffix, run, scratch_dir, stub_path
-from tests.test_fleet_walk import FAKE_BOARD_CONF
+
+FAKE_BOARD_CONF = '''ssh={ssh}
+kind=board
+driver=rpi5-usb
+device=/dev/sda
+root=/dev/nvme0n1p2
+image_preset=webkit-2.52-yocto-rpi5-64
+mac={mac}
+role=workstation
+os=any
+volume=""
+dtb=bcm2712-rpi-5-b.dtb
+bench_ssh=""
+net=wifi
+note="{note}"
+'''
 
 # Answers the card helper's read of wk-image.id off partition 1 of the board's medium; partition 3 is bare.
 _SSH_STUB = '''#!/bin/sh

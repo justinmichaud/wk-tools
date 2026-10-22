@@ -249,9 +249,6 @@ def build_env(preset, src, jobs, nice, arch, ccache_dir, env, extra_cmake="", ex
         out += ["WEBKIT_OUTPUTDIR=" + out_dir, "WK_DERIVED_DATA=%s/WebKitBuild/DerivedData" % src]
     if preset.pgo:
         out += ["WK_PGO=1", "WK_PGO_DIR=%s-profile" % out_dir, "WK_NO_COMPILE_COMMANDS=1", "WK_NO_COMPILATION_CACHE=1"]
-    for v in ("WK_MEM_BUDGET_MB", "WK_MEM_FLOOR_MB", "WK_MEM_INTERVAL"):
-        if env.get(v):
-            out.append("%s=%s" % (v, env[v]))
     for v in ("WK_NO_COMPILE_COMMANDS", "WK_NO_COMPILATION_CACHE"):
         if env.get(v):
             out.append(v + "=1")

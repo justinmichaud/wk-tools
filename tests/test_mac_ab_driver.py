@@ -133,7 +133,8 @@ class ManagerReg(places.Registry):
     def load(self, name):
         if name != "manager":
             return super().load(name)
-        return types.SimpleNamespace(kind="remote", probe=lambda: ("answering", ""), task_store=lambda: (Local(), self.far),
+        return types.SimpleNamespace(name="manager", kind="remote", probe=lambda: ("answering", ""), task_store=lambda: (Local(), self.far),
+                                     wk=lambda *args, env=None, quiet=True: (0, ""),
                                      results=lambda ws: (Local(), os.path.join(self.far, "ws", ws, "bench")))
 
 

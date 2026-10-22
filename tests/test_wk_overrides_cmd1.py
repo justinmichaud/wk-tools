@@ -1,7 +1,6 @@
-"""WK_* overrides read by `wk bench run` and `wk build`."""
+"""WK_* overrides read by `wk bench run`."""
 import unittest
 
-from tests.support import WkTest, fake_workspace
 from tests.test_bench_pipeline import BenchTest, World
 
 from wk.act import Refused  # noqa: E402
@@ -30,14 +29,6 @@ class TestBenchRunKnobs(BenchTest):
     def test_aslr_default_is_empty(self):
         self.run_()
         self.assertNotIn("setarch", self.w.watched[0][-1])
-
-
-class TestBuildDryRunKnobs(WkTest):
-    def test_the_memory_interval_is_read(self):
-        with fake_workspace() as ws:
-            cp = ws.run("build", "jsc-release", "--dry-run", env={"WK_MEM_INTERVAL": "7"})
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("watched every 7s", cp.stdout)
 
 
 if __name__ == "__main__":
