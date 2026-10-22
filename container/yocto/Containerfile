@@ -127,12 +127,12 @@ RUN userdel -r ubuntu 2>/dev/null || true
 # guard is right (running it on a host would be a mess) and this image is
 # genuinely not the SDK, so the answer is a second, honest discriminator rather
 # than a stub `podman-host`: that file is a working podman wrapper in the SDK
-# image and something would eventually call it. sdk-patches/apply.sh section 13
+# image and something would eventually call it. the wk branch of the SDK fork
 # teaches the guard about this one.
 # the profiler tool list (docs/PLAN.md, `live profile.modes[<mode>]`), for parity with the SDK
 # workspace (container/firstrun.sh installs the same set there, which is the
 # image 'wk run --profile' actually runs against -- this repo owns no Containerfile
-# for the SDK image itself, only sdk-patches/apply.sh, which patches its
+# for the SDK image itself, only the SDK fork's wk branch, which edits its
 # scripts, not its filesystem). heaptrack, valgrind and sysprof are Ubuntu
 # packages; samply ships no .deb, so it is a pinned, checksummed release
 # tarball from github.com/mstange/samply instead.
@@ -167,5 +167,5 @@ RUN set -eu; \
 
 RUN printf '%s\n' \
         'Built by wk (container/yocto/Containerfile) as a Yocto build host.' \
-        'Not a wkdev-sdk image. See sdk-patches/apply.sh section 13.' \
+        'Not a wkdev-sdk image. See the wk branch of the SDK fork.' \
         > /etc/wk-container

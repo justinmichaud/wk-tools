@@ -827,6 +827,10 @@ own records and mirror go under `~/.local/state/wk` and its keyring under
 **The container place** — `WK_SDK`, `WK_SDK_IMAGE`, `WK_CONTAINER_USER`,
 `WK_TOOLS_SRC`, `WK_MACHINE`, `WK_MIRROR` (the mirror's path
 inside a container).
+The SDK checkout is a clone of the fork `SDK_REPO` at the commit `SDK_PIN`
+(both in `lib/wk/project.json`; the fork's `wk` branch carries wk's edits to
+the SDK's scripts on top of upstream), and `./setup --stage sdk` and `wk new`
+check out the pin; moving it is a new `SDK_PIN`.
 
 **The macOS guest** — `WK_VM_IMAGE`, `WK_VM_BASE`, `WK_VM_USER`,
 `WK_VM_PASSWORD`, `WK_VM_CPUS`, `WK_VM_MEM_MB`, `WK_VM_BASE_CPUS`,
