@@ -1108,9 +1108,8 @@ exist.
 
    The rest of the tree's in-place shell stays outside step 5, and neither
    part fits the 1k budget alone:
-   - `container/`'s scripts are 947 lines, of which `firstrun.sh` 298 and
-     `sdk-patches/apply.sh` 480 are portable, since a container has
-     python3.
+   - `container/`'s scripts are 470 lines, of which `firstrun.sh` 298 is
+     portable, since a container has python3.
    - `build/build-in-workspace.sh` and `mem-watchdog.sh` are 225.
    - The three privileged helpers are 1,994, with `wk-card-priv` also on
      every rescue.
@@ -1181,8 +1180,9 @@ exist.
    7.7 ∥ **The bench `System`, `Run` and `AB`.** One of each; the Mac as a
      system. (`ab-summary` is gone.)
    7.8 ∥ **Boot.** One `Channel`, `arm_sequence` per driver.
-   7.9 ∥ **Images.** The `fetch` builder, `CFG_NEEDS` plumbing kept, the SDK
-     fork branch replaces `sdk-patches/`; one dry-run printer.
+   7.9 ∥ **Images.** `CFG_NEEDS` plumbing kept; one dry-run printer; one
+     staged lifecycle. (The `fetch` builder is gone, and the SDK's edits are
+     the fork's `wk` branch at `SDK_PIN`.)
    7.10 ∥ **Guests and daemons.** The one supervisor; `guest.py`'s findings
      into `doctor`. (The conveniences in `container/bin/` are gone.)
    7.11 **Tests by cluster.** After each package lands: the push service,
