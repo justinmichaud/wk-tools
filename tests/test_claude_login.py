@@ -289,7 +289,7 @@ class TestLiveTheInjectorHoldsTheLogin(unittest.TestCase):
         for row in ("the claude.ai login in here is the placeholder", "no claude.ai token is readable in here",
                     "the placeholder login is authenticated through the injector (HTTP 200)", "reports itself logged in (claude.ai)"):
             self.assertIn(row, doctor)
-        reply = _wk("enter", ws, "--", "bash", "-lc", "claude -p 'Reply with the single word OK.'")
+        reply = _wk("ai", "claude", ws, "-p", "Reply with the single word OK.", timeout=900)
         self.assertIn("OK", reply.stdout)
 
 
