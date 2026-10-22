@@ -203,8 +203,8 @@ class TestBuiltWorkspace(unittest.TestCase):
         jsc prints."""
         self.built()
         lldb = Pty("run", self.ws, "--lldb", "--", "-e", 'print("WK-LLDB-" + 1)')
-        self.assertTrue(lldb.expect(r"Process [0-9]+ stopped", 600), "jsc did not stop at entry under lldb:\n" + tail(lldb.out))
-        self.assertIn("(lldb) ", lldb.out)
+        self.assertTrue(lldb.expect(r"Process [0-9]+ launched: .*/jsc", 600), "lldb did not launch jsc:\n" + tail(lldb.out))
+        self.assertTrue(lldb.expect(r"(?m)^\(lldb\) $", 300), "no lldb prompt after the launch:\n" + tail(lldb.out))
         lldb.send("continue\n")
         self.assertTrue(lldb.expect(r"^WK-LLDB-1$", 600), "jsc did not print under lldb:\n" + tail(lldb.out))
         lldb.send("quit\n")
@@ -228,10 +228,13 @@ class TestBuiltWorkspace(unittest.TestCase):
         with self.subTest(mode="bytecode"):
             rc, out = on_a_pty("run", self.ws, "--profile=bytecode", "--", js, timeout=900)
             self.assertEqual(rc, 0, tail(out))
-            m = re.search(r"recorded in '%s': (\S+/JSCProfile\.json)" % self.ws, out)
-            self.assertTrue(m, tail(out))
-            left = inside(self.ws, "find \"$HOME/wk-profile\" -name 'JSCProfile*.json'; find %s -maxdepth 1 -name 'JSCProfile*.json'" % SRC)
-            self.assertEqual(left.split(), [m.group(1)])
+            m = re.search(r"recorded in '%s': ((\S+/wk-profile)/\S+/JSCProfile\.json)" % self.ws, out)
+            self.assertTrue(m, "no 'recorded in' line naming a JSCProfile.json under wk-profile:\n" + out)
+            found = inside(self.ws, "find %s -name 'JSCProfile*.json'" % shlex.quote(m.group(2))).split()
+            self.assertEqual(len(found), 1, "not one JSCProfile json under %s but %r; the run said:\n%s" % (m.group(2), found, out))
+            self.assertEqual(found[0], m.group(1), "the run named another file than it left:\n" + out)
+            stray = inside(self.ws, "find %s -maxdepth 1 -name 'JSCProfile*.json'" % SRC).split()
+            self.assertEqual(stray, [], "JSC's own JSCProfile-<pid>-<n>.json was left in the checkout; the run said:\n" + out)
         with self.subTest(mode="samply"):
             rc, out = on_a_pty("run", self.ws, "--profile=samply", "--", js, timeout=900)
             if rc == 0:
