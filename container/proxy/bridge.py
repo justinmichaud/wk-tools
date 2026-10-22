@@ -108,4 +108,4 @@ async def main(command, ws):
 if __name__ == "__main__":
     os.setpgid(0, 0)
     die_with(int(sys.argv[1]))
-    asyncio.run(main(int(sys.argv[1]), os.environ["WK_WORKSPACE"]))
+    asyncio.run(main(int(sys.argv[1]), sys.argv[2]))

@@ -672,7 +672,8 @@ asks the push service whether that process is a person's (the same rule), and
 sends any other to the reading socket, where a write is refused with 412 and a
 read is unchanged. A push service that does not answer is a no. A bridge dies
 with its command, so a process left behind reaches nothing, and it serves only
-that command's own process tree with no agent between; a command run under
+that command's own process tree -- a person's bridge none with an agent
+between, since the proxy would take its writes for that person's; a command run under
 sudo, whose sockets the bridge cannot read, is given its own:
 `sudo /opt/wk-tools/container/proxy/ensure-bridge.sh apt-get ...`.
 

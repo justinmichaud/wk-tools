@@ -599,8 +599,9 @@ class TestTheGate(unittest.TestCase):
                     got = e.kind
                 self.assertEqual(kind, got)
 
-    def test_a_bridge_serves_only_its_commands_tree_with_no_agent_between(self):
-        """The bridge's own check, on the client of a connection: walked up to the command, pid 500, the bridge's parent."""
+    def test_a_bridge_serves_only_its_commands_tree_and_a_persons_with_no_agent_between(self):
+        """The bridge's own check, on the client of a connection: walked up to the command, pid 500, the bridge's parent. A person's
+        bridge refuses a tool under claude; an agent session's (wk ai's exec, a run of wk's own under conmon) serves it."""
         under_command = [(500, 400, "bash", ["/bin/sh", PERSON, "/bin/bash", "--login"])] + person_chain(0)[2:]
         for rows, kind in (([(77, 500, "git", ["git", "fetch"])] + under_command, ""),
                            ([(77, 600, "gh", ["gh", "pr", "create"]), (600, 500, "claude", ["/home/u/.local/bin/claude"])] + under_command, "agent"),
@@ -616,6 +617,10 @@ class TestTheGate(unittest.TestCase):
                     got = e.kind
                 self.assertEqual(kind, got)
         pushgate.bridged(self.gate.proc, 500, 500, "demo")
+        shutil.rmtree(self.tmp, True)
+        self.proc.chain([(77, 600, "gh", ["gh", "pr", "create"]), (600, 500, "claude", ["/home/u/.local/bin/claude"]),
+                         (500, 400, "bash", ["bash", "-lc", "exec claude"])] + person_chain(0)[2:])
+        pushgate.bridged(self.gate.proc, 77, 500, "demo")
 
     def test_a_gone_pid_and_a_loop_are_nobody_s(self):
         with self.assertRaises(pushgate.Denied) as got:

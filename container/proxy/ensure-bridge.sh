@@ -25,13 +25,18 @@ wk_export() {   # <name>=<value>
     carry "${1%%=*}"
 }
 
-exec 3< <(exec python3 "$BRIDGE" "$$" </dev/null)
-if read -r -t 10 WK_BRIDGE_PORT <&3 && [[ "$WK_BRIDGE_PORT" =~ ^[0-9]+$ ]]; then
-    for _v in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; do export "$_v=http://127.0.0.1:$WK_BRIDGE_PORT"; done
+WK_STORES=(/var/lib/wk/ws/*)
+if [ "${#WK_STORES[@]}" -ne 1 ] || [ ! -d "${WK_STORES[0]}" ]; then
+    warn "no workspace store mounted at /var/lib/wk/ws, which 'wk new' mounts for every container, so this command has no network"
 else
-    warn "the egress bridge ($BRIDGE) did not start, so this command has no network"
+    exec 3< <(exec python3 "$BRIDGE" "$$" "${WK_STORES[0]##*/}" </dev/null)
+    if read -r -t 10 WK_BRIDGE_PORT <&3 && [[ "$WK_BRIDGE_PORT" =~ ^[0-9]+$ ]]; then
+        for _v in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; do export "$_v=http://127.0.0.1:$WK_BRIDGE_PORT"; done
+    else
+        warn "the egress bridge ($BRIDGE) did not start, so this command has no network"
+    fi
+    exec 3<&-
 fi
-exec 3<&-
 
 # api.github.com's and api.anthropic.com's TLS terminates at the injector, which swaps the placeholder Authorization header for the real token. The bundle is the system store plus that CA and never that CA alone, since these variables replace the trust store outright -- except NODE_EXTRA_CA_CERTS, which the Claude CLI adds to its own; `gh` is Go and reads only SSL_CERT_FILE/SSL_CERT_DIR, webkitcorepy only GITHUB_COM_* and BUGS_WEBKIT_ORG_* -- and, for every other credential, the keyring git-webkit autoinstalls, whose libsecret backend raises KeyringLocked on every lookup here (no session bus) and exits git-webkit; the null backend answers "nothing stored" and it prompts instead.
 wk_export PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring
