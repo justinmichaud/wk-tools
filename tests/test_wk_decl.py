@@ -1,204 +1,124 @@
-"""lib/wk/decl.py and the argv arithmetic in lib/wk/dispatch.py."""
-import os
+"""lib/wk/decl.py: a command's table, the one argv parser built from it, and Args, the one reader of what it parsed."""
 import sys
-import tempfile
 import unittest
-from unittest import mock
-from pathlib import Path
 
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl as D  # noqa: E402
-from wk import dispatch  # noqa: E402
+from wk import decl  # noqa: E402
+from wk.decl import Command, Opt, Usage  # noqa: E402
+
+PR = Command(name="optional", default="checkout", subs={
+    "checkout": dict(takes=("<spec>",)), "rebase": {},
+    "open": dict(where="host", opts=(Opt("--draft", "d"),))})
+BUILD = Command(name="required", takes=("<preset>",), preset="arg", tail="--", opts=(
+    Opt("--list", "l", sets=dict(where="local", name="none", takes=())), Opt("--on", "o", value="<p>"),
+    Opt("--env", "e", value="N=V"), Opt("--profile", "p", value="<m>", optional=True)))
+QUIESCE = Command(where="host", default="status", subs={"on": {}, "status": dict(readonly=True), "session": dict(
+    default="status", subs={"on": dict(opts=(Opt("--bmc", "b"),)), "status": dict(readonly=True)})})
 
 
-def declare(tmp, name, *lines):
-    p = Path(tmp) / name
-    p.write_text("#!/usr/bin/env bash\n# wk %s <x> -- a probe\n%s\n" % (name, "\n".join(lines)))
-    p.chmod(0o755)
-    return D.Decl(p)
+def parse(table, *words, inside=False):
+    return decl.parse("probe", table, list(words), inside)
 
 
-class TestDeclarations(unittest.TestCase):
-    def setUp(self):
-        t = tempfile.TemporaryDirectory(prefix="wk-test-decl-")
-        self.addCleanup(t.cleanup)
-        self.tmp = t.name
-
-    def test_defaults_are_a_workspace_command_taking_no_name(self):
-        d = declare(self.tmp, "probe", "# wk: group=other")
-        self.assertEqual((d.where, d.name_decl, d.takes, d.group), ("workspace", "none", "0", "other"))
-        self.assertFalse(d.is_readonly())
-        self.assertFalse(d.is_destructive([]))
-
-    def test_every_key_is_read(self):
-        d = declare(self.tmp, "probe",
-                    "# wk: where=host name=required@2 takes=1 ready=yes group=hosts lifecycle "
-                    "readonly ls destructive rm,--purge dryrun opts --a,--b= passthrough=tail "
-                    "broker * outside forward=no bare=merged post=zed values=--list needs gh,ssh")
-        self.assertEqual(d.where, "host")
-        self.assertEqual(d.name_decl, "required@2")
-        self.assertTrue(d.ready and d.lifecycle and d.outside and not d.forward)
-        self.assertTrue(d.is_readonly(["ls"]) and not d.is_readonly(["rm"]))
-        self.assertTrue(d.is_destructive(["rm"]) and d.is_destructive(["--purge=x"]))
-        self.assertFalse(d.is_destructive(["ls"]))
-        self.assertTrue(d.honours_dryrun(["anything"]))
-        self.assertFalse(d.nodryrun)
-        self.assertTrue(declare(self.tmp, "probe", "# wk: where=host nodryrun").nodryrun)
-        self.assertEqual(d.passthrough, "tail")
-        self.assertEqual(d.broker, "*")
-        self.assertEqual((d.bare, d.post, d.values, d.needs), ("merged", "zed", "--list", "gh,ssh"))
-
-    def test_repos_names_the_repos_a_command_serves_and_no_other(self):
-        self.assertTrue(declare(self.tmp, "probe", "# wk: group=other").serves("anything"))
-        d = declare(self.tmp, "probe", "# wk: repos=webkit")
-        self.assertTrue(d.serves("webkit"))
-        self.assertFalse(d.serves("wk-tools"))
-        self.assertIn("names no repo", self._refused("# wk: repos=webkit,nonesuch"))
-
-    def _refused(self, *lines):
-        with self.assertRaises(D.DeclError) as cm:
-            declare(self.tmp, "probe", *lines)
-        return str(cm.exception)
-
-    def test_options_and_flags_of_a_command_with_verbs_belong_on_a_declared_verb(self):
-        declare(self.tmp, "probe", "# wk: verbs=a,b", "# wk: sub a opts=--x")
-        for lines, words in ((["# wk: verbs=a,b opts --x"], "opts belong on the verbs"),
-                             (["# wk: verbs=a,b", "# wk: flag --list takes=0"], "no verb's"),
-                             (["# wk: verbs=a,b", "# wk: sub c opts=--x"], "names no verb"),
-                             (["# wk: opts --x", "# wk: sub a opts=--x"], "declares no verbs")):
-            with self.subTest(lines=lines):
-                self.assertIn(words, self._refused(*lines))
-
-    def test_an_unknown_word_or_value_is_refused_by_name(self):
-        self.assertIn("frobnicate", self._refused("# wk: where=host frobnicate"))
-        self.assertIn("elsewhere", self._refused("# wk: where=elsewhere"))
-        self.assertIn("maybe", self._refused("# wk: name=maybe"))
-
-    def test_a_flag_override_beats_a_subverb_override_beats_the_default(self):
-        d = declare(self.tmp, "probe",
-                    "# wk: where=workspace name=required takes=1 opts --list",
-                    "# wk: flag --list where=local name=none takes=0 opts=--list")
-        self.assertEqual(d.where_for(["build"]), "workspace")
-        self.assertEqual(d.where_for(["--list"]), "local")
-        self.assertEqual(d.name_for(["--list=x"]), "none")
-        d = declare(self.tmp, "probe", "# wk: where=workspace name=required takes=1 verbs=ls,run",
-                    "# wk: sub ls where=store name=none takes=0")
-        self.assertEqual(d.where_for(["run"]), "workspace")
-        self.assertEqual(d.where_for(["ls"]), "store")
-        self.assertEqual(d.takes_for(["ls"]), "0")
-
-    def test_a_second_word_override_beats_its_verbs(self):
-        d = declare(self.tmp, "probe", "# wk: where=host needs helper verbs=push,check readonly check",
-                    "# wk: sub push needs=", "# wk: sub push on,off needs=helper", "# wk: sub push status readonly=yes")
-        self.assertTrue(d.is_readonly(["push", "--all", "status"]) and d.is_readonly(["check"]))
-        self.assertFalse(d.is_readonly(["push", "on"]) or d.is_readonly(["push"]))
-        self.assertEqual([d.needs_for(a) for a in (["push", "on"], ["push", "status"], ["push"], ["check"])],
-                         ["helper", "", "", "helper"])
-        self.assertIn(("push on,off", {"needs": "helper"}), d.overrides())
-
-    def test_a_subverb_overrides_destructive_and_dryrun(self):
-        d = declare(self.tmp, "probe",
-                    "# wk: where=host verbs=setup,inner destructive setup,--purge dryrun setup",
-                    "# wk: sub inner destructive= dryrun=--list")
-        self.assertTrue(d.is_destructive(["setup"]))
-        self.assertFalse(d.is_destructive(["inner", "setup"]))
-        self.assertTrue(d.honours_dryrun(["inner", "--list"]))
-        self.assertFalse(d.honours_dryrun(["inner", "setup"]))
-
-    def test_the_whole_leading_comment_block_declares(self):
-        d = declare(self.tmp, "probe", *(["#"] * 30 + ["# wk: where=host"]))
-        self.assertEqual(d.where, "host")
-
-    def test_a_wk_line_past_the_leading_comment_block_does_not_declare(self):
-        d = declare(self.tmp, "probe", "import os", "# wk: where=host")
-        self.assertEqual(d.where, "workspace")
-
-    def test_the_synopsis_is_the_wk_line(self):
-        d = declare(self.tmp, "probe", "# wk: group=other")
-        self.assertEqual(d.synopsis_line(), "probe <x>")
-        self.assertEqual(d.summary(), "a probe")
+def refusal(table, *words, inside=False):
+    with unittest.TestCase().assertRaises(Usage) as cm:
+        parse(table, *words, inside=inside)
+    return str(cm.exception)
 
 
-class TestArgvArithmetic(unittest.TestCase):
-    def test_name_slot(self):
-        self.assertEqual(D.name_slot("none"), 0)
-        self.assertEqual(D.name_slot("derived"), 0)
-        self.assertEqual(D.name_slot("required"), 1)
-        self.assertEqual(D.name_slot("optional@2"), 2)
+class TestVerbs(unittest.TestCase):
+    def verbs(self, table, *words):
+        t, args, _ = parse(table, *words)
+        return args.verbs, args.positionals[len(args.verbs):], args.name
 
-    def test_positionals_ignore_options_and_their_joined_values(self):
-        args = ["--on=vm", "ws", "--count=3", "cfg"]
-        self.assertEqual(dispatch.positionals(args), ["ws", "cfg"])
-        self.assertEqual(dispatch.positional(2, args), "cfg")
-        self.assertIsNone(dispatch.positional(3, args))
-        self.assertEqual(dispatch.without_positional(1, args), ["--on=vm", "--count=3", "cfg"])
+    def test_a_declared_verb_is_first_and_a_word_that_is_none_is_the_default_verbs(self):
+        self.assertEqual(self.verbs(PR, "rebase", "ws"), (["rebase"], [], "ws"))
+        self.assertEqual(self.verbs(PR, "1234"), (["checkout"], ["1234"], None))
+        self.assertEqual(self.verbs(PR, "ws", "1234"), (["checkout"], ["1234"], "ws"))
+        self.assertEqual(self.verbs(QUIESCE), (["status"], [], None))
+        self.assertEqual(self.verbs(QUIESCE, "session", "on", "--bmc"), (["session", "on"], [], None))
+        self.assertEqual(self.verbs(QUIESCE, "session"), (["session", "status"], [], None))
 
-    def test_argv_name_needs_every_declared_positional(self):
-        self.assertIsNone(dispatch.argv_name(1, "1", ["ws"]))
-        self.assertEqual(dispatch.argv_name(1, "1", ["ws", "cfg"]), "ws")
-        self.assertEqual(dispatch.argv_name(1, "*", ["ws"]), "ws")
+    def test_a_missing_unknown_or_late_verb_is_refused(self):
+        self.assertIn("unknown verb: of (one of on, status, session)", refusal(QUIESCE, "of"))
+        self.assertIn("'wk probe' needs one of: on, status", refusal(Command(subs={"on": {}, "status": {}})))
+        self.assertIn("--draft comes before the verb", refusal(PR, "--draft", "open"))
+        self.assertEqual(self.verbs(PR, "--force", "open", "ws")[0], ["open"])
+        self.assertIn("unknown option: --draft", refusal(PR, "rebase", "--draft"))
 
-    def test_argv_split_hands_the_command_two_words_per_declared_option(self):
-        out = dispatch.argv_split("--count=,--list", ["--count=3", "--list", "--other=x", "--", "--count=9"])
-        self.assertEqual(out, ["--count", "3", "--list", "--other=x", "--", "--count=9"])
-
-    def test_args_before_name(self):
-        self.assertEqual(dispatch.args_before_name(2, ["claude", "ws", "-r"]), " claude")
-        self.assertEqual(dispatch.args_before_name(1, ["ws"]), "")
+    def test_a_verb_and_a_given_option_change_the_table(self):
+        self.assertEqual(parse(PR, "open")[0].where, "host")
+        self.assertEqual(parse(QUIESCE, "session", "status")[0].readonly, True)
+        t, args, _ = parse(BUILD, "--list")
+        self.assertEqual((t.where, t.name, t.takes, args.name, args.preset), ("local", "none", (), None, None))
 
 
-class TestArgvCheck(unittest.TestCase):
-    def setUp(self):
-        t = tempfile.TemporaryDirectory(prefix="wk-test-decl-")
-        self.addCleanup(t.cleanup)
-        self.tmp = t.name
-        env = mock.patch.dict(os.environ, {"WK_MARKER": os.path.join(self.tmp, "no-marker")})
-        env.start()
-        self.addCleanup(env.stop)
+class TestArguments(unittest.TestCase):
+    PATH = "some dir/a=b:c.txt"
 
-    def _check(self, decl_lines, args):
-        d = declare(self.tmp, "probe", *decl_lines)
-        inv = dispatch.Invocation("probe", d, args)
-        try:
-            return inv.argv_check(), None
-        except dispatch.Exit as e:
-            return None, e.status
+    def test_an_option_is_given_spaced_or_joined_and_every_value_is_kept_in_order(self):
+        _, a, _ = parse(BUILD, "ws", "--env", "A=1", "jsc-release", "--on=" + self.PATH, "--env", "--x=1")
+        self.assertEqual((a.name, a.preset, a.value("--on"), a.values("--env")), ("ws", "jsc-release", self.PATH, ["A=1", "--x=1"]))
+        self.assertEqual((a.order, a.flag("--on"), a.value("--list"), a.values("--nope")), (["--env", "--on", "--env"], False, None, []))
+        self.assertEqual(a.argv(), ["--env", "A=1", "--on", self.PATH, "--env", "--x=1"])
 
-    def test_a_declared_option_passes_joined_to_its_value(self):
-        out, rc = self._check(["# wk: name=required takes=1 opts --count=,--list"],
-                              ["ws", "cfg", "--count", "3", "--list"])
-        self.assertIsNone(rc)
-        self.assertEqual(out, ["ws", "cfg", "--count=3", "--list"])
+    def test_an_optional_value_is_only_ever_joined(self):
+        _, a, _ = parse(BUILD, "ws", "--profile", "x.js")
+        self.assertEqual((a.flag("--profile"), a.value("--profile"), a.preset), (True, None, "x.js"))
+        _, a, _ = parse(BUILD, "ws", "--profile=samply", "x.js")
+        self.assertEqual((a.flag("--profile"), a.value("--profile")), (False, "samply"))
 
-    def test_a_malformed_argv_is_refused_with_usage(self):
-        for decl, args in (("takes=1 opts --list", ["ws", "cfg", "--bogus"]), ("opts --list", ["ws", "--list=yes"]),
-                           ("opts --count=", ["ws", "--count"]), ("takes=1", ["ws", "cfg", "extra"])):
-            with self.subTest(args=args):
-                self.assertEqual(self._check(["# wk: name=required " + decl], args), (None, 2))
+    def test_what_the_table_does_not_declare_is_refused_naming_it(self):
+        for words, why in ((("ws", "p", "--bogus"), "unknown option: --bogus"), (("ws", "p", "extra"), "unexpected argument: extra"),
+                           (("ws", "p", "--on"), "--on needs a value"), (("ws", "p", "--list=yes"), "--list takes no value"),
+                           (("ws",), ""), (("--list", "ws"), "unexpected argument: ws")):
+            with self.subTest(words=words):
+                self.assertEqual(refusal(BUILD, *words), why)
+        self.assertEqual(refusal(PR, "ws", "1", "--", "x"), "'--' means nothing to this command")
 
-    def test_takes_star_takes_everything(self):
-        out, rc = self._check(["# wk: name=required takes=*"], ["ws", "a", "b", "c"])
-        self.assertEqual(out, ["ws", "a", "b", "c"])
+    def test_the_tail_is_the_other_programs(self):
+        self.assertEqual(parse(BUILD, "ws", "p", "--", "--on", "-n")[1].tail, ["--on", "-n"])
+        rest = Command(name="required", tail="rest", opts=(Opt("--own", "o"),))
+        for words, own, tail in ((("ws", "--own", "--", "git", "status"), True, ["git", "status"]),
+                                 (("ws", "git", "--own", "--force"), False, ["git", "--own", "--force"])):
+            _, a, _ = parse(rest, *words)
+            self.assertEqual((a.flag("--own"), a.tail, a.globals), (own, tail, []))
+        every = Command(subs={"pi": dict(name="required", tail="all")})
+        _, a, argv = parse(every, "--force", "pi", "ws", "--help", "--force")
+        self.assertEqual((a.globals, a.help, a.tail, argv), (["--force"], False, ["--help", "--force"], ["pi", "ws", "--help", "--force"]))
+        self.assertEqual(parse(every, "pi", "-r", inside=True)[1].tail, ["-r"])
 
-    def test_a_tail_passthrough_stops_checking_at_the_last_positional(self):
-        out, rc = self._check(["# wk: name=required takes=1 passthrough=tail"],
-                              ["ws", "script.js", "--not-declared", "x"])
-        self.assertEqual(out, ["ws", "script.js", "--not-declared", "x"])
+    def test_the_global_flags_are_read_once_and_a_far_wk_is_handed_the_rest_as_typed(self):
+        _, a, argv = parse(BUILD, "-n", "ws", "--yes", "p", "--on", "x", "--quiet", "-h")
+        self.assertEqual((a.globals, a.help, argv), (["-n", "--yes", "--quiet"], True, ["ws", "p", "--on", "x", "-h"]))
 
-    def test_double_dash_needs_a_passthrough_declaration(self):
-        out, rc = self._check(["# wk: name=required"], ["ws", "--", "x"])
-        self.assertEqual(rc, 2)
-        out, rc = self._check(["# wk: name=required passthrough"], ["ws", "--", "-e", "x"])
-        self.assertEqual(out, ["ws", "--", "-e", "x"])
+    def test_inside_a_workspace_there_is_no_name_slot(self):
+        self.assertEqual(parse(BUILD, "p", inside=True)[1].preset, "p")
+        self.assertEqual(refusal(BUILD, "ws", "p", inside=True), "unexpected argument: p")
+        self.assertEqual(parse(Command(name="required", takes=("[<n>...]",)), "a", "b", "c")[1].positionals, ["b", "c"])
 
-    def test_inside_a_workspace_the_name_slot_is_implicit(self):
-        Path(os.environ["WK_MARKER"]).write_text("name=here\n")
-        out, rc = self._check(["# wk: name=required takes=1"], ["cfg"])
-        self.assertEqual(out, ["cfg"])
-        out, rc = self._check(["# wk: name=required takes=1"], ["cfg", "extra"])
-        self.assertEqual(rc, 2)
+
+class TestHelp(unittest.TestCase):
+    def test_the_usage_line_and_every_variant_come_from_the_table(self):
+        self.assertEqual(decl.usage("build", BUILD), "wk build <workspace> <preset> [options] [-- <args>]")
+        self.assertEqual(decl.usage("pr", PR), "wk pr checkout|rebase|open ...")
+        self.assertEqual([label for label, _, _ in decl.variants("q", QUIESCE)],
+                         ["wk q on|status|session ...", "wk q on", "wk q status", "wk q session on|status ...",
+                          "wk q session on [options]", "wk q session status"])
+        self.assertEqual([t.where for _, t, _ in decl.variants("b", BUILD)], ["workspace", "local"])
+
+
+class TestTheTables(unittest.TestCase):
+    def test_every_command_is_a_module_with_a_table_a_function_and_a_summary(self):
+        names = [name for name, _ in decl.commands(REPO)]
+        self.assertEqual(names, sorted(p.name for p in (REPO / "cmd").iterdir() if p.is_file()))
+        for name, m in decl.commands(REPO):
+            with self.subTest(cmd=name):
+                self.assertIsInstance(m.COMMAND, Command)
+                self.assertEqual(m.main.__code__.co_varnames[:2], ("args", "inv"))
+                self.assertTrue(decl.summary(m) and not decl.summary(m).endswith("."), decl.summary(m))
 
 
 if __name__ == "__main__":

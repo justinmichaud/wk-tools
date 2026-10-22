@@ -171,7 +171,7 @@ def zed_after(here, root, name, opts):
     if opts.get("no_wait"):
         log("  open it:  wk enter %s --zed   (waits for it to be ready)" % name)
         return
-    r = here.act_run([os.path.join(str(root), "cmd", "zed"), name])
+    r = here.act_run([os.path.join(str(root), "wk"), "zed", name])
     show(r)
     if not r.ok:
         warn("'%s' is there; opening it in Zed is what failed (above) -- 'wk zed %s' retries" % (name, name))

@@ -1,71 +1,40 @@
-#!/usr/bin/env python3
-#
-# wk run <workspace> [options] [--profile[=<mode>]] [-- jsc-args] -- run jsc from a workspace build, or profile it
-# wk: where=workspace repos=webkit name=required ready=yes group=workspaces preset=--preset dryrun passthrough
-# wk: opts --preset=,--lldb,--until-crash,--max=,--rr,--replay,--profile,--profile=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=
-# wk: flag --profile takes=*
-#
-# Runs the jsc binary a build produced, from the workspace's own build tree on
-# its place. Everything after `--` goes to jsc verbatim.
-#
-#   --preset <preset>   the build preset to run (default: the last build's,
-#                       else the platform's; the list is below)
-#   --lldb              run jsc under lldb instead of directly; under
-#                       --until-crash each iteration runs under lldb, and a
-#                       crash leaves you at its prompt
-#   --until-crash       repeat the run until it exits non-zero, in one round
-#                       trip into the workspace; keeps the failing iteration's
-#                       output, prints its exit status, arguments and any core
-#                       file, and exits with that status
-#   --max <n>           cap the iterations under --until-crash (default: 200;
-#                       reaching it without a crash exits 0)
-#   --rr                record the run with rr into ~/wk-rr in the workspace
-#                       (Linux ports; perf_event_paranoid must be 1 or less)
-#   --replay            replay the latest recording under lldb (rr's own commands
-#                       are there as `rr ...`); everything after `--` goes to
-#                       `rr replay` instead of jsc: a trace directory, -p <pid>
-#   --profile[=<mode>]  where the time went: the run under a profiler (default
-#                       sampling), its artifacts in the workspace's ~/wk-profile.
-#                       It runs on its own, without the flags above
-#
-#     sampling    JSC's own sampling profiler: JS function names and the tier
-#                 breakdown (LLInt/Baseline/DFG/FTL/C++). No tools, no
-#                 privileges, every port and architecture -- including armhf,
-#                 where the native profilers need a patched build
-#     bytecode    JSC's Profiler::Database: per-CodeBlock, per-bytecode counts
-#                 by tier, plus the compile/OSR-exit/jettison log
-#     samply      native sampling with the Firefox Profiler UI: C++ frames,
-#                 every thread, the GC and the compiler; `--jit-dump` names JS
-#     sysprof     the whole system through sysprof-cli, JSC's JIT dump and text
-#                 markers always on (Linux ports only)
-#     instruments Apple's Time Profiler through xctrace, nothing to install
-#     native      instruments on the Apple ports, samply everywhere else
-#     heaptrack   allocations rather than time (Linux ports only)
-#     massif      the same question asked of the peak, through valgrind
-#
-#     --browser [url]   MiniBrowser on that page instead of the jsc shell
-#     --process <p>     which of MiniBrowser's processes: ui | web (default) |
-#                       network | gpu (GTK/WPE, samply only). 'ui' records from
-#                       the launch; the others attach after a fixed wait
-#     --attach <pid|name>   something already running in the workspace
-#     --jit-dump        JS/JIT frame names for the native profilers
-#     --markers         JSC's interval text markers, for splitting a trace by phase
-#     --top <n>         how many functions/bytecodes the sampling report prints
-#     --fetch [dir]     copy the artifacts to this machine when the run ends
-#     --env NAME=VALUE  one more variable for the run (repeatable)
+"""run jsc from a workspace build, or profile it
 
-import os
+Runs the jsc binary a build produced, from the workspace's own build tree on its place. Everything after `--` goes to
+jsc verbatim; under --replay, to `rr replay` instead (a trace directory, -p <pid>).
+
+--profile[=<mode>] modes:
+  sampling    JSC's own sampling profiler: JS function names and the tier breakdown (LLInt/Baseline/DFG/FTL/C++). No
+              tools, no privileges, every port and architecture -- including armhf, where the native profilers need a
+              patched build
+  bytecode    JSC's Profiler::Database: per-CodeBlock, per-bytecode counts by tier, plus the compile/OSR-exit/jettison log
+  samply      native sampling with the Firefox Profiler UI: C++ frames, every thread, the GC and the compiler;
+              `--jit-dump` names JS
+  sysprof     the whole system through sysprof-cli, JSC's JIT dump and text markers always on (Linux ports only)
+  instruments Apple's Time Profiler through xctrace, nothing to install
+  native      instruments on the Apple ports, samply everywhere else
+  heaptrack   allocations rather than time (Linux ports only)
+  massif      the same question asked of the peak, through valgrind
+"""
 import shlex
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+from wk import images, places, presets, profile, store
+from wk.act import die
+from wk.decl import Command, Opt
+from wk.ldpath import LLDB_PRELUDE, prelude, rr_ready, rr_trace_dir
 
 ROOT = images.root()
+COMMAND = Command(name="required", ready=True, preset="--preset", repos=("webkit",), tail="--", group="workspaces", opts=(
+    Opt("--preset", "the build preset to run (default: the last build's, else the platform's; the list is below)",
+        value="<preset>"),
+    Opt("--lldb", "run jsc under lldb; under --until-crash each iteration does, and a crash leaves you at its prompt"),
+    Opt("--until-crash", "repeat the run until it exits non-zero, in one round trip; keeps the failing iteration's "
+        "output and core, and exits with its status"),
+    Opt("--max", "cap the iterations under --until-crash (default 200; reaching it without a crash exits 0)", value="<n>"),
+    Opt("--rr", "record the run with rr into ~/wk-rr in the workspace (Linux ports; perf_event_paranoid <= 1)"),
+    Opt("--replay", "replay the latest recording under lldb (rr's own commands are there as `rr ...`)"),
+    *profile.OPTS))
 
-from wk import decl, places, presets, profile  # noqa: E402
-from wk.act import Refused, die  # noqa: E402
-from wk.ldpath import LLDB_PRELUDE, prelude, rr_ready, rr_trace_dir  # noqa: E402
 
 LLDB_UNTIL_CRASH = '''{lldb_prelude}
 {prelude}
@@ -128,9 +97,7 @@ RR_REPLAY = '{lldb_prelude}\n{trace_dir}; exec rr replay -d "$LLDB" {tail_q}'
 DIRECT_PLAIN = '{prelude}; export JSC_validateOptions=1; exec {jsc_q} --validateOptions=1 {tail_q}'
 
 
-def parse(argv):
-    """The options as the dispatcher hands them on, a declared `--x=` as `--x <value>`; the tail after `--` verbatim."""
-    args = decl.Args(decl.Decl(__file__), argv)
+def parse(args):
     max_raw = args.value("--max") or "200"
     if not max_raw.isdigit():
         die("--max needs a positive integer iteration count (got '%s')\n"
@@ -143,13 +110,12 @@ def parse(argv):
             "until_crash": args.flag("--until-crash"), "max": int(max_raw), "tail": args.tail}
 
 
-def main(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
+def main(args, inv):
     profile.refuse_mixed(args, ("--lldb", "--until-crash", "--max", "--rr", "--replay"))
     if profile.asked(args):
         return profile.main(args, "run")
     name = store.ws_name()
-    opts = parse(argv)
+    opts = parse(args)
 
     reg = places.Registry(ROOT)
     driver = reg.present(name)
@@ -187,11 +153,3 @@ def main(argv):
         cmd = DIRECT_PLAIN.format(prelude=pre, jsc_q=jsc_q, tail_q=tail_q)
     argv_, cwd = driver.exec_argv(name, ["bash", "-lc", cmd], tty=opts["lldb"] or opts["replay"])
     reg.machine.exec(argv_, cwd)
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

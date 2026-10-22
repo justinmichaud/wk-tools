@@ -1,58 +1,39 @@
-#!/usr/bin/env python3
-#
-# wk new <name> -- create a workspace named after the task it is for
-# wk: where=workspace name=required lifecycle post=zed group=workspaces dryrun
-# wk: opts --on=,--base=,--arch=,--repo=,--zed,--no-wait,--kill,--pr=,--_detached
-#
-# Creation is detached: a dropped connection does not take it with it, and
-# re-running `wk new` resumes it. --dry-run prints what it would change.
-#
-#   --on <place|machine> container, vm, or a machine named in
-#                        machines/<name>.conf (default: container); a build
-#                        box's or peer workstation's own `wk new` makes it there
-#   --base <id>          which snapshot to build from -- an id 'wk sync'
-#                        published, under $WK_STORE/base (default: current)
-#   --arch <arch>        native|armhf -- the architecture the workspace
-#                        itself runs (container only; default: native)
-#   --repo <repo>        the repository it holds (valid values below).
-#                        wk-tools is cloned from this machine's wk-tools
-#                        origin, pushes through its own deploy key, and
-#                        needs no mirror or snapshot; it is container only
-#   --zed                open the checkout in Zed once it is ready
-#   --no-wait            return once creation has started, without waiting for it;
-#                        incompatible with --pr
-#   --kill               stop the creation running for <name>; what it leaves is
-#                        half-made, and 'wk rm <name>' clears it
-#   --pr <spec>          check it out onto a PR head once ready -- the same
-#                        spec `wk pr` takes: <user>:<branch>, <n>, or wpe:<n>
-#
-#   WK_NEW_TIMEOUT=<s>   how long this end waits for the detached run before
-#                        giving up (default 3600); the run itself is unaffected
-#   WK_READY_WAIT=<s>    how long the detached run waits for the workspace to finish
-#                        initialising (default 1800)
-#   WK_KILL_WAIT=<s>     how long --kill waits after TERM before KILL (default 15)
-#
-# Creation refreshes this machine's mirror first (`wk sync --mirror`; a refresh
-# that fails refuses the creation), then fetches from it and fast-forwards the checkout.
+"""create a workspace named after the task it is for
 
-import os
-import sys
+Creation is detached: a dropped connection does not take it with it, and re-running `wk new` resumes it. Creation
+refreshes this machine's mirror first (`wk sync --mirror`; a refresh that fails refuses the creation), then fetches
+from it and fast-forwards the checkout. A container workspace on a macOS host is made in the podman VM, and --zed
+opens it here once that has finished.
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+  WK_NEW_TIMEOUT=<s>   how long this end waits for the detached run before giving up (default 3600); the run itself
+                       is unaffected
+  WK_READY_WAIT=<s>    how long the detached run waits for the workspace to finish initialising (default 1800)
+  WK_KILL_WAIT=<s>     how long --kill waits after TERM before KILL (default 15)
+"""
+from wk import images, places, pr, project, record, repos, store, workspace
+from wk.act import Refused, die
+from wk.decl import Command, Opt
+from wk.lock import Lock
 
 ROOT = images.root()
+COMMAND = Command(name="required", lifecycle=True, forward=False, group="workspaces", opts=(
+    Opt("--on", "container, vm, or a machine in machines/ (default: container); a build box's or peer's own wk makes it",
+        value="<place|machine>"),
+    Opt("--base", "the snapshot to build from, an id 'wk sync' published (default: current)", value="<id>"),
+    Opt("--arch", "native|armhf: the architecture the workspace itself runs (container only; default: native)",
+        value="<arch>"),
+    Opt("--repo", "the repository it holds (valid values below); wk-tools is container only", value="<repo>"),
+    Opt("--zed", "open the checkout in Zed once it is ready"),
+    Opt("--no-wait", "return once creation has started, without waiting for it; incompatible with --pr"),
+    Opt("--kill", "stop the creation running for <name>; what it leaves is half-made, and 'wk rm <name>' clears it"),
+    Opt("--pr", "check it out onto a PR head once ready: <user>:<branch>, <n>, or wpe:<n>", value="<spec>"),
+    Opt("--_detached", "the detached half the front starts")))
 
-from wk import decl, places, pr, project, record, repos, workspace  # noqa: E402
-from wk.act import Refused, die  # noqa: E402
-from wk.lock import Lock  # noqa: E402
 
-
-def parse(argv):
-    a = decl.Args(decl.Decl(__file__), argv)
-    return {"place": a.value("--on"), "base": a.value("--base"), "arch": a.value("--arch"), "repo": a.value("--repo"),
-            "pr": a.value("--pr"), "zed": a.flag("--zed"), "no_wait": a.flag("--no-wait"),
-            "kill": a.flag("--kill"), "detached": a.flag("--_detached")}
+def parse(args):
+    return {"place": args.value("--on"), "base": args.value("--base"), "arch": args.value("--arch"),
+            "repo": args.value("--repo"), "pr": args.value("--pr"), "zed": args.flag("--zed"),
+            "no_wait": args.flag("--no-wait"), "kill": args.flag("--kill"), "detached": args.flag("--_detached")}
 
 
 def detached(reg, records, name, opts):
@@ -64,23 +45,22 @@ def detached(reg, records, name, opts):
         die(str(e))
     recs = record.of_driver(driver, records.clock, reg.machine)
     return workspace.new_detached_run(driver, recs, Lock(driver.store, reg.machine, recs.clock), recs.clock,
-                                name, opts.get("base") or "", opts.get("arch") or "native", repo)
+                                      name, opts.get("base") or "", opts.get("arch") or "native", repo)
 
 
-def main(argv):
-    opts = parse(argv)
-    name = store.ws_name()
+def main(args, inv):
+    opts, name = parse(args), store.ws_name()
     reg = places.Registry(ROOT)
+    if inv.vm_side():
+        rc = inv.forward([w for w in inv.argv if w != "--zed"])
+        if rc and opts["zed"]:
+            die("'wk new %s' failed, so nothing was opened.\n"
+                "    What it managed to say is above; a re-run destroys the rubble and retries." % name)
+        if rc:
+            raise Refused(rc)
+        workspace.zed_after(reg.machine, ROOT, name, opts)
+        return 0
     records = record.Records(machine=reg.machine)
-    if opts.get("detached"):
+    if opts["detached"]:
         return detached(reg, records, name, opts)
     return workspace.new_front(reg, records, name, opts, pr)
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

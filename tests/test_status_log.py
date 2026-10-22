@@ -1,10 +1,10 @@
 """`wk status <ws> --log` (cmd/status, driven directly with WK_NAME/WK_PLACE/WK_STORE, as the machine that holds the store): build.log, else the image stage
 log its builder wrote under home/, and the errors it names."""
+import shlex
 import unittest
 
-from tests.support import REPO, WkTest, bash
+from tests.support import WkTest, bash, command_argv
 
-CMD_STATUS = REPO / "cmd" / "status"
 FAILED = "Building place foo\nfoo.cpp:10:5: error: use of undeclared identifier 'x'\nninja: build stopped: subcommand failed.\n"
 CLEAN = "Building place foo\n-- no error: handling here, everything is fine\nninja: no work to do.\n"
 
@@ -18,7 +18,7 @@ class TestLogsPicksTheRightFile(WkTest):
             (wsdir / rel).parent.mkdir(parents=True, exist_ok=True)
             (wsdir / rel).write_text(text)
         env = {"WK_NAME": name, "WK_PLACE": "container", "WK_IN_VM": "1", "WK_STORE": str(self.tmp)}
-        cp = bash(f'exec "{CMD_STATUS}" --log', env=env)
+        cp = bash("exec " + shlex.join(command_argv("status", "--log")), env=env)
         return cp.stdout + cp.stderr, cp.returncode == 0
 
     def test_which_log_is_shown_and_what_it_says(self):

@@ -14,10 +14,9 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places  # noqa: E402
+from wk import places, tools  # noqa: E402
 from wk.machine import Local  # noqa: E402
 
-CMD_DOCTOR = REPO / "cmd" / "doctor"
 
 
 def git(cwd, *args, check=True):
@@ -39,10 +38,8 @@ def kv(text):
 
 
 def version(root):
-    """`doctor --probe-tools`, pointed at an arbitrary checkout via WK_ROOT."""
-    cp = subprocess.run([str(CMD_DOCTOR), "--probe-tools"], env={**os.environ, "WK_ROOT": str(root)},
-                        capture_output=True, text=True, timeout=15)
-    return kv(cp.stdout)
+    """What `wk doctor --probe-tools` prints, of an arbitrary checkout."""
+    return kv(tools.identity_text(tools.identity(str(root), Local())))
 
 
 class TwoClonesCase(unittest.TestCase):

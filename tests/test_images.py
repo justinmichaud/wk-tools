@@ -58,8 +58,6 @@ class TestTheNames(unittest.TestCase):
                          [WS, BWS, WS, "", ""])
         self.assertEqual([images.ws_preset(w, STORE) for w in (WS, WS + "-base", WS + "-oc", "jsc-release", "yocto-nosuch")],
                          [PRESET, PRESET, PRESET + "-oc", None, None])
-        self.assertEqual([images.ws_arg(a, STORE) for a in ([PRESET, "--workspace", WS + "-b"], [PRESET, "--slot", "x", "--workspace=" + WS + "-c"],
-                                                             [PRESET, "--slot", "base"], ["--slot", "base"], [])], [WS + "-b", WS + "-c", WS, "", ""])
 
     def test_every_path_is_keyed_on_the_workspace(self):
         """One image preset may have a workspace per arm, and a slot or a collection in one is not the other's."""

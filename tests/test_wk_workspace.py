@@ -27,7 +27,6 @@ from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 WK = str(REPO / "wk")
-ZED = str(REPO / "cmd" / "zed")
 CHECKOUT = "branch=main\nhead=abc1234\ntracks=origin/main\nbehind=0\n"
 
 
@@ -125,7 +124,7 @@ class World(Scratch, Fake):
         self.dirs.add(self.env["WK_LOCK_DIR"])
         self.answer(["hostname"], out="here\n")
         self.answer([WK, "sync"], out="fetched\n")
-        self.answer([ZED])
+        self.answer([WK, "zed"])
         self.react(["podman", "container", "exists"], lambda a, f: Result(0 if a[-1] in f.containers else 1))
         self.react(["podman", "inspect"], lambda a, f: Result(0, "running\n") if a[2] in f.containers else Result(125, "", "no such container"))
         self.react(["podman", "rm", "-f"], self._podman_rm)
@@ -582,9 +581,9 @@ class TestNewFrontTail(WorkspaceTest):
 
     def test_zed_opens_the_checkout_and_its_failure_only_warns(self):
         self.stderr(lambda: self.front(zed=True))
-        self.assertEqual(self.runs(head=ZED), [(ZED, "ws")])
+        self.assertEqual([r for r in self.runs() if r[:2] == (WK, "zed")], [(WK, "zed", "ws")])
         w = self.make_world()
-        w.answer([ZED], rc=1)
+        w.answer([WK, "zed"], rc=1)
         rc, err = self.stderr(lambda: self.front(w, zed=True))
         self.assertEqual(rc, 0)
         self.assertIn("'ws' is there; opening it in Zed is what failed (above) -- 'wk zed ws' retries", err)

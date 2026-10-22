@@ -7,12 +7,24 @@ import time
 
 from wk import images, places, presets, store
 from wk.act import Refused, die, dry_run, info, log, warn
+from wk.decl import Opt
 from wk.ldpath import perf_events, prelude, require_tool
 from wk.store import Store
 from wk.workspace import require_name
 
 MODES = ("sampling", "bytecode", "samply", "sysprof", "instruments", "heaptrack", "massif")
-ONLY_WITH_PROFILE = ("--browser", "--process", "--attach", "--jit-dump", "--markers", "--top", "--fetch", "--env")
+OPTS = (Opt("--profile", "where the time went: the run under a profiler (default sampling), its artifacts in the "
+            "workspace's ~/wk-profile; on its own", value="<mode>", optional=True, sets=dict(takes=("[<url|dir>...]",))),
+        Opt("--browser", "MiniBrowser on the page named after it, instead of the jsc shell"),
+        Opt("--process", "which of MiniBrowser's processes: ui | web (default) | network | gpu (GTK/WPE, samply only)",
+            value="<p>"),
+        Opt("--attach", "something already running in the workspace", value="<pid|name>"),
+        Opt("--jit-dump", "JS/JIT frame names for the native profilers"),
+        Opt("--markers", "JSC's interval text markers, for splitting a trace by phase"),
+        Opt("--top", "how many functions/bytecodes the sampling report prints", value="<n>"),
+        Opt("--fetch", "copy the artifacts to this machine, into the directory named after it, when the run ends"),
+        Opt("--env", "one more variable for the run (repeatable)", value="NAME=VALUE"))
+ONLY_WITH_PROFILE = tuple(o.flag for o in OPTS[1:])
 
 
 def asked(args):

@@ -51,7 +51,7 @@ class TestTest(unittest.TestCase):
         w = w or self.w
         os.environ["WK_NAME"] = "ws"
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = CMD.main(as_dispatched("test", argv, os.environ), w.reg, w.clock)
+            rc = CMD.main(as_dispatched("test", argv, os.environ), None, w.reg, w.clock)
         return rc, err.getvalue()
 
     def refused(self, w=None, *argv, status=None):
@@ -59,7 +59,7 @@ class TestTest(unittest.TestCase):
         os.environ["WK_NAME"] = "ws"
         with self.assertRaises(Refused) as cm:
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                CMD.main(as_dispatched("test", argv, os.environ), w.reg, w.clock)
+                CMD.main(as_dispatched("test", argv, os.environ), None, w.reg, w.clock)
         if status is not None:
             self.assertEqual(cm.exception.status, status, err.getvalue())
         return err.getvalue()
@@ -225,7 +225,7 @@ class TestKillPoints(TestTest):
         def run_once(w):
             with contextlib.redirect_stderr(io.StringIO()):
                 os.environ["WK_NAME"] = "ws"
-                CMD.main([], w.reg, w.clock)
+                CMD.main(as_dispatched("test", []), None, w.reg, w.clock)
         converges(self, lambda: World(self.tmp), run_once, World.state)
 
 

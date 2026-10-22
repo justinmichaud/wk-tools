@@ -116,7 +116,7 @@ else
     changed "seeded /var/lib/wk/skills"
 fi
 
-"$WK_ROOT/cmd/key" ensure 2>&1 | sed 's/^/  /' \
+wk_py wk.key.cli ensure 2>&1 | sed 's/^/  /' \
     || die "wk key ensure failed (above), so workspaces on '$WK_MACHINE' have no key to push with"
 if [ -f "$keyring_dir/build_key_fork.pub" ]; then
     unchanged "build key present"

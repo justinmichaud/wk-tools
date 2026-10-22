@@ -1,55 +1,42 @@
-#!/usr/bin/env python3
-#
-# wk boot <machine> [options] -- put a machine into bench mode for one boot, then back
-#
-# wk: where=host name=none values=--list group=hosts broker * takes=1 dryrun destructive --boot-order
-# wk: opts --status,--diag,--keep,--back,--disarm,--system=,--boot-order=,--list
-# wk: readonly --status,--diag
-#
-#   wk boot <machine> [--system <id>]              arm the one-shot and reboot
-#   wk boot <machine> --status                     what mode it is in, and why
-#   wk boot <machine> --keep                       cancel the self-return watchdog
-#   wk boot <machine> --back                       reboot back to host mode
-#   wk boot <machine> --disarm                     cancel an arming not yet spent
-#   wk boot <machine> --diag                       the bench system's own account of its last boot
-#   wk boot <board> --boot-order <order>           write a Pi's EEPROM boot order: usb-first,
-#                                                  sd-first, or local (the local disks, no network)
-#   wk boot --list                                 the machines that have drivers
+"""put a machine into bench mode for one boot, then back
 
+  wk boot <machine> [--system <id>]      arm the one-shot and reboot
+  wk boot <machine> --status             what mode it is in, and why
+  wk boot <board> --boot-order <order>   write a Pi's EEPROM boot order: usb-first, sd-first, or local (the local
+                                         disks, no network)
+
+Inside a workspace it is asked of the host through the request broker.
+"""
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images  # noqa: E402
+from wk import act, images, record
+from wk.act import Refused, die
+from wk.boot import cli, eeprom, pi
+from wk.decl import Command, Opt
+from wk.places import Registry
 
 ROOT = images.root()
-
-from wk import act, decl, record  # noqa: E402
-from wk.act import Refused, die  # noqa: E402
-from wk.boot import cli, eeprom, pi  # noqa: E402
-from wk.places import Registry  # noqa: E402
-
-USAGE = "usage: wk boot <machine> [options]; see wk boot -h"
-
-
-def parse(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
-    asked = (("status", args.flag("--status")), ("diag", args.flag("--diag")), ("keep", args.flag("--keep")),
-             ("back", args.flag("--back")), ("disarm", args.flag("--disarm")),
-             ("boot-order", args.value("--boot-order") is not None))
-    chosen = [a for a, on in asked if on]
-    if len(chosen) > 1 or len(args.positionals) > 1:
-        die(USAGE)
-    return args, (chosen[0] if chosen else "arm")
+ACTIONS = ("--status", "--diag", "--keep", "--back", "--disarm", "--boot-order")
+COMMAND = Command(where="host", takes=("<machine>",), broker=True, values="--list", group="hosts", opts=(
+    Opt("--status", "what mode it is in, and why", sets=dict(readonly=True)),
+    Opt("--diag", "the bench system's own account of its last boot", sets=dict(readonly=True)),
+    Opt("--keep", "cancel the self-return watchdog"),
+    Opt("--back", "reboot back to host mode"),
+    Opt("--disarm", "cancel an arming not yet spent"),
+    Opt("--system", "the bench system to arm (default: the board's own)", value="<id>"),
+    Opt("--boot-order", "write a Pi's EEPROM boot order: usb-first, sd-first or local", value="<order>",
+        sets=dict(destructive=True)),
+    Opt("--list", "the machines that have drivers", sets=dict(takes=(), readonly=True))))
 
 
-def main(argv):
-    args, action = parse(argv)
+def main(args, inv):
     if args.flag("--list"):
         print(cli.listing(ROOT, os.environ))
         return 0
-    if not args.positionals:
-        die(USAGE)
+    chosen = [a for a in ACTIONS if args.flag(a) or args.value(a) is not None]
+    if len(chosen) > 1:
+        inv.usage_die("one of %s at a time" % ", ".join(chosen))
+    action = chosen[0][2:] if chosen else "arm"
     name = args.positionals[0]
     if Registry(ROOT).in_workspace():
         return cli.broker(ROOT, name, action, args.value("--system") or "", os.environ)
@@ -79,12 +66,3 @@ def main(argv):
         if held is not None:
             held.end(rc)
     return rc
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

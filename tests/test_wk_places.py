@@ -568,9 +568,8 @@ class TestTheContract(unittest.TestCase):
     def test_a_command_asks_a_driver_nothing_outside_the_contract(self):
         asked = set()
         for path in (p for p in (REPO / "cmd").iterdir() if p.is_file()):
-            text = path.read_text(errors="replace")
-            if text.startswith("#!/usr/bin/env python3"):
-                asked |= {a or b for a, b in re.findall(r"\bdriver\.([a-z_]+)|reg\.present\([^)]*\)\.([a-z_]+)", text)}
+            asked |= {a or b for a, b in re.findall(r"\bdriver\.([a-z_]+)|reg\.present\([^)]*\)\.([a-z_]+)",
+                                                    path.read_text(errors="replace"))}
         self.assertEqual(sorted(asked - set(places.Driver.CONTRACT) - set(places.Driver.FIELDS)), [])
 
 

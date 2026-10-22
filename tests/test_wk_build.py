@@ -53,8 +53,8 @@ class BuildTest(FlowTest):
 
     def make(self, w=None, *argv):
         w = w or self.w
-        argv = as_dispatched("build", list(argv) or ["jsc-release"], os.environ)
-        return build.Build(w.reg, "ws", CMD.parse(argv), argv, w.clock)
+        args = as_dispatched("build", list(argv) or ["jsc-release"], os.environ)
+        return build.Build(w.reg, "ws", CMD.parse(args), args.argv(), w.clock)
 
     def run_(self, w=None, *argv):
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -208,20 +208,6 @@ class TestRefusals(BuildTest):
         self.assertIn("'ws' is not running (wk start ws)", err)
         self.assertEqual(w.state(), [])
         self.assertFalse(os.path.exists(w.log))
-
-    def test_no_config_prints_the_usage_and_the_list(self):
-        err = self.refused(None, "--no-defaults", status=2)
-        self.assertIn("usage: wk build <workspace> <preset>", err)
-        self.assertIn("  jsc-release ", err)
-        self.w.in_ws = True
-        self.assertIn("usage: wk build <preset>", self.refused(None, "--no-defaults", status=2))
-
-    def test_an_unknown_config_names_the_list(self):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), self.assertRaises(dispatch.Exit) as cm:
-            self.make(None, "nope")
-        self.assertEqual(cm.exception.status, 2)
-        self.assertIn("unknown preset: nope -- 'wk build --list' names every one", err.getvalue())
 
     def test_cmakeargs_is_refused_naming_what_it_would_drop(self):
         err = self.refused(None, "jsc-release", "--cmakeargs", "-DX=1")
@@ -467,7 +453,7 @@ class TestBabysitStates(BuildTest):
             t.end(word)
             return Result(rc, "built\n")
         w.react(["env"], inner)
-        w.react(["env", "WK_NAME=ws"], lambda a, f: fixes.pop(0) if fixes else Result(0, "changed a.cpp\n"))
+        w.react([str(REPO / "wk"), "ai", "claude", "ws"], lambda a, f: fixes.pop(0) if fixes else Result(0, "changed a.cpp\n"))
         return w
 
     def babysit(self, w, *more):

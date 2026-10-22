@@ -38,8 +38,7 @@ FORCED = {
 
 def python_files(*tops):
     files = [p for t in tops for p in (REPO / t).rglob("*.py")]
-    return files + [p for p in (REPO / "cmd").iterdir()
-                    if p.is_file() and p.read_text(errors="replace").startswith("#!/usr/bin/env python3")]
+    return files + [p for p in (REPO / "cmd").iterdir() if p.is_file()]
 
 
 def files_matching(pattern, files):

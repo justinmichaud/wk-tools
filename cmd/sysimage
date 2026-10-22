@@ -1,128 +1,101 @@
-#!/usr/bin/env python3
-#
-# wk sysimage <sub> [args] -- build and manage bootable systems
-#
-# wk: where=host name=none values=presets group=hosts takes=1 verbs=presets,build,webkit,disks,write,ls,list,holds,path dryrun build,webkit,write outside readonly ls,list,disks,holds,path,presets
-# wk: destructive write,--install,--all,--rebuild,--rm
-# wk: sub ls,list where=dynamic opts=--continued
-# wk: sub build,webkit,holds,path where=dynamic name=derived
-# wk: sub build,webkit,disks,holds,path takes=2
-# wk: sub holds opts=--slot=,--commit=,--preset=,--workspace=,--toolchain
-# wk: sub path opts=--workspace=
-# wk: sub build opts=--workspace=,--detach,--stop,--stage=,--commit=,--slot=,--preset=,--pgo-profile=,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
-# wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--preset=,--pgo-profile=
-# wk: sub write opts=--from=,--disk=,--image-preset=,--machine=,--rescue,--grow,--no-grow
-#
-# An image is a whole machine built from an image preset in this repo
-# (image/presets/<image-preset>.conf). Its bytes stay where its builder put
-# them (there is no image store); `write --from` streams them onto a card, and
-# every per-card edit is made on the card afterwards. --preset names a build
-# preset, never an image preset.
-#
-#   A yocto or buildroot image preset is built in its image workspace,
-#   <builder>-<image-preset>, and build, webkit, holds and path run on the
-#   machine holding it. <image-preset>@<machine> names that machine;
-#   --workspace <name> names another image workspace there (e.g.
-#   <builder>-<image-preset>-<arm>).
-#
-#   presets                      every image preset, and what it builds
-#   build <image-preset> [options]
-#                                build from the spec. Per builder:
-#       yocto       --workspace, --detach, --stop,
-#                   --stage layers|fetch|image|toolchain|webkit|pgo-mix
-#                   (default image; pgo-mix takes --slot)
-#       buildroot   --workspace, --detach, --stop
-#       mac-volume  on the Mac, one of --create, --fetch [--version <v>],
-#                   --install (erases the volume, reboots), --provision (in
-#                   bench mode), --repair, --build-pkg, --all [--version <v>];
-#                   none reports the volume's state
-#       guest       the golden macOS base vm workspaces clone: built if
-#                   missing; --refresh re-provisions it, --rebuild deletes and
-#                   rebuilds it, --rm erases it
-#   webkit <image-preset> --commit <sha> --slot <name> [--detach]
-#                                build one WebKit commit into a named slot beside
-#                                the image. A yocto image preset at 2.52+ runs the PGO
-#                                cycle: instrumented slot, collection on the
-#                                board, measured build. --stop with --slot stops
-#                                that slot's build or cycle
-#       --preset <name>          one build of the cycle: wpe-cross (no profile),
-#                                wpe-cross-pgo-collect or wpe-cross-pgo-use
-#   holds <image-preset> [--toolchain | --slot <name> --commit <sha> [--preset <p>]]
-#                                `yes` or `no`: whether that workspace holds the
-#                                image, the cross SDK, or the slot at that commit
-#   path <image-preset>          the path of that workspace's image (exit 1: none)
-#   ls | list                    every image a workspace in the fleet has built,
-#                                its slots, and the machine holding it (WHERE)
-#   disks <machine>              removable disks attached to that machine
-#   write --from <image-preset|path|vm:path> --disk <machine>:<device>[@second|@third]
-#                                write that image to that disk and make it a fleet
-#                                system. @second/@third write it beside the system
-#                                on partitions 1-2. A machine's own system disk is
-#                                never touched
-#       --image-preset <name>    which image preset the image is, when the path
-#                                does not say
-#       --machine <name>         the machine the card is for, when --image-preset does
-#                                not say
-#       --rescue                 write it as the board's rescue system
-#       --grow | --no-grow       fill the disk with the root partition, or not
-#                                (default: grow only @second/@third)
-#   WK_BUILDROOT_BASE=<image> builds a buildroot workspace on another host image
-#   than ubuntu:22.04.
+"""build and manage bootable systems
 
-import os
+An image is a whole machine built from an image preset in this repo (image/presets/<image-preset>.conf). Its bytes
+stay where its builder put them (there is no image store); `write --from` streams them onto a card, and every per-card
+edit is made on the card afterwards. --preset names a build preset, never an image preset.
+
+A yocto or buildroot image preset is built in its image workspace, <builder>-<image-preset>, and build, webkit, holds
+and path run on the machine holding it. <image-preset>@<machine> names that machine; --workspace <name> names another
+image workspace there (e.g. <builder>-<image-preset>-<arm>).
+
+  build <image-preset> [options]   build from the spec. Per builder:
+      yocto       --workspace, --detach, --stop, --stage layers|fetch|image|toolchain|webkit|pgo-mix (default image;
+                  pgo-mix takes --slot)
+      buildroot   --workspace, --detach, --stop
+      mac-volume  on the Mac, one of --create, --fetch [--version <v>], --install (erases the volume, reboots),
+                  --provision (in bench mode), --repair, --build-pkg, --all [--version <v>]; none reports its state
+      guest       the golden macOS base vm workspaces clone: built if missing; --refresh re-provisions it, --rebuild
+                  deletes and rebuilds it, --rm erases it
+  webkit <image-preset> --commit <sha> --slot <name> [--detach]
+                  build one WebKit commit into a named slot beside the image. A yocto image preset at 2.52+ runs the
+                  PGO cycle: instrumented slot, collection on the board, measured build. --stop with --slot stops that
+                  slot's build or cycle; --preset is one build of the cycle: wpe-cross (no profile),
+                  wpe-cross-pgo-collect or wpe-cross-pgo-use
+  holds <image-preset> [--toolchain | --slot <name> --commit <sha> [--preset <p>]]
+                  `yes` or `no`: whether that workspace holds the image, the cross SDK, or the slot at that commit
+  path <image-preset>   the path of that workspace's image (exit 1: none)
+  ls | list       every image a workspace in the fleet has built, its slots, and the machine holding it (WHERE)
+  disks <machine>       removable disks attached to that machine
+  write --from <image-preset|path|vm:path> --disk <machine>:<device>[@second|@third]
+                  write that image to that disk and make it a fleet system. @second/@third write it beside the system
+                  on partitions 1-2. A machine's own system disk is never touched
+
+  WK_BUILDROOT_BASE=<image> builds a buildroot workspace on another host image than ubuntu:22.04.
+"""
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import act, decl, images, places  # noqa: E402
-from wk.act import Refused  # noqa: E402
-from wk.clock import Clock  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from wk.sysimage import cli  # noqa: E402
+from wk import images, places
+from wk.clock import Clock
+from wk.decl import Command, Opt
+from wk.machine import Local
+from wk.sysimage import cli
+
+SPEC = ("<image-preset>",)
+WS = Opt("--workspace", "another image workspace on that machine", value="<name>")
+DETACH, STOP = Opt("--detach", "hand it to a process that outlives this one"), Opt("--stop", "stop the build running there")
+COMMIT, SLOT = Opt("--commit", "the WebKit commit", value="<sha>"), Opt("--slot", "the slot beside the image", value="<name>")
+PRESET = Opt("--preset", "the build preset", value="<preset>")
+WRITES = dict(destructive=True)
+IMAGE = dict(where=cli.where, name=cli.derived, takes=SPEC)
+LIST = dict(where=lambda args, reg: "store" if args.flag("--continued") else "local", readonly=True,
+            opts=(Opt("--continued", "answer another machine's walk from this machine's store"),))
+COMMAND = Command(where="host", outside=True, values="presets", group="hosts", subs={
+    "presets": dict(readonly=True),
+    "build": dict(IMAGE, opts=(WS, DETACH, STOP, Opt("--stage", "yocto: the stage to build to", value="<stage>"), COMMIT,
+                               SLOT, PRESET, Opt("--pgo-profile", "the profile a measured build uses", value="<path>"),
+                               Opt("--create", "mac-volume: create the volume"), Opt("--fetch", "mac-volume: fetch the installer"),
+                               Opt("--install", "mac-volume: install onto the volume (erases it, reboots)", sets=WRITES),
+                               Opt("--provision", "mac-volume: provision it, in bench mode"),
+                               Opt("--repair", "mac-volume: repair it"), Opt("--build-pkg", "mac-volume: build the package"),
+                               Opt("--all", "mac-volume: every step", sets=WRITES),
+                               Opt("--version", "mac-volume: the macOS version", value="<v>"),
+                               Opt("--refresh", "guest: re-provision the base"),
+                               Opt("--rebuild", "guest: delete and rebuild the base", sets=WRITES),
+                               Opt("--rm", "guest: erase the base", sets=WRITES))),
+    "webkit": dict(IMAGE, opts=(WS, DETACH, STOP, COMMIT, SLOT, PRESET,
+                                Opt("--pgo-profile", "the profile a measured build uses", value="<path>"))),
+    "disks": dict(takes=("<machine>",), readonly=True),
+    "write": dict(WRITES, opts=(
+        Opt("--from", "the image: an image preset, a path, or vm:<path>", value="<image>"),
+        Opt("--disk", "the disk: <machine>:<device>[@second|@third]", value="<disk>"),
+        Opt("--image-preset", "which image preset the image is, when the path does not say", value="<name>"),
+        Opt("--machine", "the machine the card is for, when --image-preset does not say", value="<name>"),
+        Opt("--rescue", "write it as the board's rescue system"),
+        Opt("--grow", "fill the disk with the root partition (default only @second/@third)"),
+        Opt("--no-grow", "leave the root partition its size"))),
+    "ls": LIST, "list": LIST,
+    "holds": dict(IMAGE, readonly=True, opts=(SLOT, COMMIT, PRESET, WS, Opt("--toolchain", "whether it holds the cross SDK"))),
+    "path": dict(IMAGE, readonly=True, opts=(WS,))})
 
 
-HOOKS = {"--wsname": lambda rest, reg: cli.wsname(rest, reg.env),
-         "--wsplace": cli.wsplace,
-         "--where": lambda rest, reg: cli.where(rest, reg.env)}
-
-
-def main(argv):
+def main(args, inv):
     reg = places.Registry(images.root(), machine=Local())
-    hook, rest = argv[0], argv[1:]
-    if hook in HOOKS:
-        print(HOOKS[hook](rest, reg))
-        return 0
-    d = decl.Decl(__file__)
-    args = decl.Args(d, argv)
-    spec = args.positionals[1] if len(args.positionals) > 1 else ""
+    verb, spec = args.positionals[0], (args.positionals[1:] or [""])[0]
     s = cli.Sysimage(reg, Clock())
-    if hook == "presets":
+    if verb == "presets":
         sys.stdout.write(images.listing(reg.env))
         return 0
-    if hook in ("ls", "list"):
+    if verb in ("ls", "list"):
         return s.ls(args.flag("--continued"))
-    if hook == "holds":
+    if verb == "holds":
         return s.holds(spec, args.value("--workspace"), args.value("--slot"), args.value("--commit"),
                        args.value("--preset"), args.flag("--toolchain"))
-    if hook == "path":
+    if verb == "path":
         return s.path(spec, args.value("--workspace"))
-    if hook in ("build", "webkit"):
-        rest, valued = argv[1:], d.valued_opts()
-        if spec:
-            del rest[next(i for i, a in enumerate(rest) if a == spec and (i == 0 or rest[i - 1] not in valued))]
-        return getattr(s, hook)(spec, rest)
-    if hook == "write":
+    if verb in ("build", "webkit"):
+        return getattr(s, verb)(spec, args.options())
+    if verb == "write":
         return s.write(args.value("--from") or "", args.value("--disk") or "", args.value("--image-preset") or "",
                        args.value("--machine"), args.flag("--rescue"),
                        cli.grow(args.flag("--grow"), args.flag("--no-grow"), args.order))
-    if hook == "disks":
-        return s.disks(spec)
-    act.die("usage: wk sysimage <sub> [args]; see wk sysimage -h")
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)
+    return s.disks(spec)

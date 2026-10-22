@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from tests.fakes import FakeDriver, FakeRegistry
-from tests.support import REPO, WkTest, clean_env, load_cmd, run
+from tests.support import REPO, WkTest, as_dispatched, clean_env, load_cmd, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import fleet, status, statusview  # noqa: E402
@@ -81,8 +81,8 @@ class TestWait(unittest.TestCase):
                 return iter(())
         with mock.patch.object(cmd, "Walk", FlakyWalk), mock.patch.object(cmd, "wait", return_value=0), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(0, cmd.main(["--wait", "--records"]))
-            self.assertEqual(4, cmd.main(["--records"]))
+            self.assertEqual(0, cmd.main(as_dispatched("status", ["--wait", "--records"]), None))
+            self.assertEqual(4, cmd.main(as_dispatched("status", ["--records"]), None))
 
 
 class TaskTest(WkTest):

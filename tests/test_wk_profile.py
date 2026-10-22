@@ -14,12 +14,11 @@ from tests.fakes import FakeRegistry, WsDriver
 from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, ldpath, profile  # noqa: E402
+from wk import ldpath, profile  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
-RUN = decl.Decl(REPO / "cmd" / "run")
 
 
 class World(Fake):
@@ -47,13 +46,13 @@ class ProfileTest(unittest.TestCase):
 
     def run_(self, *argv):
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = profile.main(decl.Args(RUN, as_dispatched("run", argv, os.environ)), "run", self.w.reg)
+            rc = profile.main(as_dispatched("run", argv, os.environ), "run", self.w.reg)
         return rc, err.getvalue()
 
     def refused(self, *argv):
         with self.assertRaises(Refused) as cm:
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                profile.main(decl.Args(RUN, as_dispatched("run", argv, os.environ)), "run", self.w.reg)
+                profile.main(as_dispatched("run", argv, os.environ), "run", self.w.reg)
         return cm.exception, err.getvalue()
 
     def ready(self, level=1):
@@ -236,7 +235,7 @@ class TestRunAndTestHandItOver(ProfileTest):
     def test_both_commands_reach_the_one_profiler(self):
         for cmd in ("run", "test"):
             with self.subTest(cmd=cmd), mock.patch.object(profile, "main", return_value=0) as main:
-                load_cmd(cmd).main(as_dispatched(cmd, ["--profile=samply", "--", "x.js"], os.environ))
+                load_cmd(cmd).main(as_dispatched(cmd, ["--profile=samply", "--", "x.js"], os.environ), None)
                 args, which = main.call_args[0][:2]
                 self.assertEqual((which, args.value("--profile"), args.tail), (cmd, "samply", ["x.js"]))
 
@@ -246,7 +245,7 @@ class TestRunAndTestHandItOver(ProfileTest):
                                 ("test", ["--profile=bytecode", "--layout"], "--profile runs on its own; drop --layout")):
             with self.subTest(cmd=cmd, argv=argv), self.assertRaises(Refused), \
                     contextlib.redirect_stderr(io.StringIO()) as err:
-                load_cmd(cmd).main(as_dispatched(cmd, argv, os.environ))
+                load_cmd(cmd).main(as_dispatched(cmd, argv, os.environ), None)
             self.assertIn(said, err.getvalue())
 
 

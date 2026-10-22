@@ -1,4 +1,4 @@
-"""Every closed-set value a command declares appears in its `-h`."""
+"""Every closed-set value a command's table names (`values`) appears in its `-h`."""
 import subprocess
 import sys
 from pathlib import Path
@@ -7,35 +7,28 @@ import unittest
 from tests.support import REPO, run_here, scratch_dir, temp_store
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk import decl  # noqa: E402
 from wk.completion import values_cmd  # noqa: E402
-from wk.decl import all_commands, leading_block  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 TIER = "lint"
 
-DECLARED_VALUES = {d.name: d for d in all_commands(REPO) if values_cmd(d)}
+DECLARED_VALUES = {name: m.COMMAND for name, m in decl.commands(REPO) if values_cmd(m.COMMAND)}
 
 
 class TestDeclaredValuesReachTheHelp(unittest.TestCase):
-    def test_the_help_prints_what_the_flag_prints(self):
+    def test_the_help_prints_what_the_verb_or_flag_prints_and_it_changes_nothing(self):
         self.assertTrue(DECLARED_VALUES)
-        for cmd, d in DECLARED_VALUES.items():
-            listed = subprocess.run([str(REPO / "wk"), cmd, d.values], cwd=str(REPO), capture_output=True, text=True, timeout=60)
-            self.assertEqual(listed.returncode, 0, f"wk {cmd} {d.values} failed: {listed.stdout}{listed.stderr}")
+        for cmd, t in DECLARED_VALUES.items():
+            listed = subprocess.run([str(REPO / "wk"), cmd, t.values], cwd=str(REPO), capture_output=True, text=True, timeout=60)
+            self.assertEqual(listed.returncode, 0, f"wk {cmd} {t.values} failed: {listed.stdout}{listed.stderr}")
             values = [l.split()[0] for l in (listed.stdout + listed.stderr).splitlines() if l[:1].isalnum()]
-            self.assertTrue(values, f"wk {cmd} {d.values} listed nothing")
+            self.assertTrue(values, f"wk {cmd} {t.values} listed nothing")
             cp = subprocess.run([str(REPO / "wk"), cmd, "-h"], cwd=str(REPO), capture_output=True, text=True, timeout=30)
             with self.subTest(cmd=cmd):
                 self.assertIn("valid values", cp.stdout + cp.stderr)
-                for v in values:
-                    self.assertIn(v, cp.stdout + cp.stderr, f"wk {cmd} -h omits '{v}'")
-
-    def test_a_value_flag_is_read_only(self):
-        for cmd, d in DECLARED_VALUES.items():
-            with self.subTest(cmd=cmd):
-                head = "".join(leading_block(d.path))
-                self.assertTrue("readonly" in head or f"{d.values} where=local" in head,
-                                f"cmd/{cmd}'s {d.values} is neither readonly nor local, and `wk {cmd} -h` runs it")
+                self.assertEqual([v for v in values if v not in cp.stdout + cp.stderr], [])
+                self.assertTrue(decl.parse(cmd, t, [t.values])[0].readonly)
 
 
 class TestBenchListPlans(unittest.TestCase):

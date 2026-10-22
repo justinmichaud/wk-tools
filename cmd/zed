@@ -1,29 +1,21 @@
-#!/usr/bin/env python3
-#
-# wk zed <workspace> -- open a workspace's checkout in Zed
-# wk: where=workspace name=optional here outside group=workspaces dryrun opts --url,--route
-#
-# Refused inside a workspace: Zed runs where the person is.
-#
-#   --url                             print the ssh:// URL and the `zed` command
-#                                     line for it instead of opening Zed
-#   --route                           prepare this workspace's sshd for the
-#                                     machine that asked and print the three
-#                                     fields it needs to build a route of its
-#                                     own (user, src, proxy)
+"""open a workspace's checkout in Zed
 
+Refused inside a workspace: Zed runs where the person is.
+"""
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+from wk import dispatch, guest, images, places, store
+from wk.act import die, log
+from wk.decl import Command, Opt
+from wk.machine import Local
+from wk.workspace import require_name
 
 ROOT = images.root()
-
-from wk import decl, dispatch, guest, places  # noqa: E402
-from wk.act import Refused, die, log  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from wk.workspace import require_name  # noqa: E402
+COMMAND = Command(name="optional", here=True, outside=True, group="workspaces", opts=(
+    Opt("--url", "print the ssh:// URL and the `zed` command line for it instead of opening Zed"),
+    Opt("--route", "prepare this workspace's sshd for the machine that asked, and print the user, src and proxy a "
+        "route of its own needs")))
 
 
 def exec_clean(argv):
@@ -40,13 +32,8 @@ def emit(url_only, zed, url):
     exec_clean([zed, url])
 
 
-def main(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
-    url_only = args.flag("--url")
-    route = args.flag("--route")
-    name = store.ws_name()
-    if args.positionals:
-        name = args.positionals[-1]
+def main(args, inv):
+    url_only, route, name = args.flag("--url"), args.flag("--route"), store.ws_name()
 
     zed = None
     if not url_only and not route:
@@ -90,11 +77,3 @@ def main(argv):
     emit(url_only, zed, "ssh://%s%s" % (host, driver.src(name)))
     return 0
 
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

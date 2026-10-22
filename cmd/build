@@ -1,73 +1,47 @@
-#!/usr/bin/env python3
-#
-# wk build <workspace> <preset> -- build WebKit or JSC
-# wk: where=workspace repos=webkit name=required takes=1 preset=arg ready=yes group=workspaces dryrun passthrough
-# wk: opts --list,--no-defaults,--detach,--kill,--babysit,--_babysit,--branch=,--mem-budget=,--mem-floor=,--cmake=,--env=,--cmakeargs=
-# wk: flag --list where=local name=none takes=0
-# wk: flag --kill takes=0 opts=--kill
-#
-# The job count is derived from the memory available now. --dry-run prints the
-# command line it would run, prefixed `running:`, and builds nothing. Every
-# argument that is not one of these flags passes through to the build.
-#
-#   --list                 print the available presets (wk build --list) and exit
-#   --no-defaults          skip the build machine's build_args conf default
-#   --detach                hand the build to the machine that runs it, and return
-#                           once it has started; a foreground build is cancelled if
-#                           its terminal or its ssh goes away (the detached run takes the HUP)
-#   --kill                  stop the build running in this workspace, wherever it
-#                           runs, and record it as cancelled; takes no preset
-#   --babysit               run under a Claude fix loop until it builds or gives up
-#   --branch <name>         check out this branch first
-#   --mem-budget <MB>       memory ceiling for the watchdog
-#   --mem-floor <MB>        memory floor for the watchdog
-#   --cmake <flags>         extra CMake flags, added to the preset's own (repeatable)
-#   --env NAME=VALUE        extra environment for the build, overriding the preset's (repeatable)
-#   --                      everything after this goes to build-webkit verbatim
-#
-#   WK_BABYSIT_MODEL=<model>    the model `--babysit` uses (default haiku)
-#   WK_BABYSIT_ATTEMPTS=<n>     fixes the babysitter tries before giving up
-#                               (default 5)
-#   WK_NO_COMPILE_COMMANDS=1    write no compile_commands.json (it costs the Apple
-#                               ports their precompiled prefix headers)
-#   WK_NO_COMPILATION_CACHE=1   build without Xcode's compilation cache
-#   WK_JOBS, WK_NICE            the job count and nice level the place half runs at
+"""build WebKit or JSC
 
-import os
-import sys
+The job count is derived from the memory available now. --dry-run prints the command line it would run, prefixed
+`running:`, and builds nothing. Everything after `--` goes to build-webkit verbatim.
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+  WK_BABYSIT_MODEL=<model>    the model `--babysit` uses (default haiku)
+  WK_BABYSIT_ATTEMPTS=<n>     fixes the babysitter tries before giving up (default 5)
+  WK_NO_COMPILE_COMMANDS=1    write no compile_commands.json (it costs the Apple ports their precompiled prefix headers)
+  WK_NO_COMPILATION_CACHE=1   build without Xcode's compilation cache
+  WK_JOBS, WK_NICE            the job count and nice level the place half runs at
+"""
+from wk import build, images, places, store
+from wk.decl import Command, Opt
 
 ROOT = images.root()
+COMMAND = Command(name="required", takes=("<preset>",), preset="arg", ready=True, repos=("webkit",), tail="--",
+                  group="workspaces", opts=(
+    Opt("--list", "print the available presets and exit", sets=dict(where="local", name="none", takes=())),
+    Opt("--no-defaults", "skip the build machine's build_args conf default"),
+    Opt("--detach", "hand the build to the machine that runs it, and return once it has started"),
+    Opt("--kill", "stop the build running in this workspace, wherever it runs, and record it as cancelled",
+        sets=dict(takes=(), opts=(Opt("--kill", "stop the build"),))),
+    Opt("--babysit", "run under a Claude fix loop until it builds or gives up"),
+    Opt("--_babysit", "the babysitter's own detached run"),
+    Opt("--branch", "check out this branch first", value="<name>"),
+    Opt("--mem-budget", "memory ceiling for the watchdog", value="<MB>"),
+    Opt("--mem-floor", "memory floor for the watchdog", value="<MB>"),
+    Opt("--cmake", "extra CMake flags, added to the preset's own (repeatable)", value="<flags>"),
+    Opt("--env", "extra environment for the build, overriding the preset's (repeatable)", value="NAME=VALUE"),
+    Opt("--cmakeargs", "replace the preset's CMake flags (a barrier: --force crosses it)", value="<args>")))
 
-from wk import build, decl, places  # noqa: E402
-from wk.act import Refused  # noqa: E402
+
+def parse(args):
+    return {"list": args.flag("--list"), "kill": args.flag("--kill"), "detach": args.flag("--detach"),
+            "no_defaults": args.flag("--no-defaults"), "babysit": args.flag("--babysit"),
+            "babysit_driver": args.flag("--_babysit"), "branch": args.value("--branch"),
+            "mem_budget": args.value("--mem-budget"), "mem_floor": args.value("--mem-floor"),
+            "cmakeargs": args.value("--cmakeargs"), "cmake": args.values("--cmake"), "env": args.values("--env"),
+            "pass": args.tail, "preset": store.build_preset()}
 
 
-def parse(argv):
-    a = decl.Args(decl.Decl(__file__), argv)
-    o = {"list": a.flag("--list"), "kill": a.flag("--kill"), "detach": a.flag("--detach"),
-         "no_defaults": a.flag("--no-defaults"), "babysit": a.flag("--babysit"),
-         "babysit_driver": a.flag("--_babysit"), "branch": a.value("--branch"),
-         "mem_budget": a.value("--mem-budget"), "mem_floor": a.value("--mem-floor"),
-         "cmakeargs": a.value("--cmakeargs"),
-         "cmake": a.values("--cmake"), "env": a.values("--env"), "pass": a.tail, "preset": store.build_preset()}
-    return o
-
-
-def main(argv, reg=None, clock=None):
-    opts = parse(argv)
-    if opts.get("list"):
+def main(args, inv, reg=None, clock=None):
+    opts = parse(args)
+    if opts["list"]:
         return build.list_presets()
     reg = reg or places.Registry(ROOT)
-    return build.Build(reg, store.ws_name(reg.env), opts, argv, clock).front()
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)
+    return build.Build(reg, store.ws_name(reg.env), opts, args.argv(), clock).front()

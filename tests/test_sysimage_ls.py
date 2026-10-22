@@ -194,10 +194,17 @@ class TestTheRoutingAnswers(unittest.TestCase):
     """The dispatcher's questions, answered before anything else runs."""
 
     def test_ls_walks_from_here_and_a_spec_naming_a_machine_is_its_place(self):
-        self.assertEqual((cli.where(["ls"]), cli.where(["list", "--continued"])), ("local", "store"))
+        from tests.support import load_cmd
+        from wk import decl
+        table = load_cmd("sysimage").COMMAND
+
+        def answer(*words):
+            t, args, _ = decl.parse("sysimage", table, list(words))
+            return t.where(args, types.SimpleNamespace(env=os.environ)), args
+        self.assertEqual((answer("ls")[0], answer("list", "--continued")[0]), ("local", "store"))
         with scratch_dir() as d:
             reg = registry(d)
-            self.assertEqual([cli.wsplace(["holds", spec], reg) for spec in (YOCTO + "@moose", YOCTO + "@" + record.machine_name(reg.env),
+            self.assertEqual([cli.derived(answer("holds", spec)[1], reg)[1] for spec in (YOCTO + "@moose", YOCTO + "@" + record.machine_name(reg.env),
                                                                              YOCTO, "macos-guest-base@moose")], ["moose", "container", "", ""])
 
 

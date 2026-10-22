@@ -175,7 +175,7 @@ class TestAMacReadsItsZipsBeforeTheRemovalIsForwarded(WkTest):
             raise Refused("wk bench export task")
 
         env = {"WK_YES": "1", "WK_DESTRUCTIVE": "1", "WK_CONFIRMED": "1"}
-        how, status, _ = dispatched(["rm", "ws1"], macos=True, env=env, refuse=refuse)
+        how, status, _ = dispatched(["rm", "ws1"], macos=True, env=env, refuse=refuse, run=True)
         self.assertEqual(how, "exit")
         self.assertNotEqual(status, 0)
-        self.assertEqual(dispatched(["rm", "ws1"], macos=True, env=env)[0], "forward")
+        self.assertEqual(dispatched(["rm", "ws1"], macos=True, env=env, run=True)[0], "forward")

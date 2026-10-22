@@ -1,35 +1,31 @@
-#!/usr/bin/env python3
-#
-# wk test <workspace> [flags] [paths...] -- run the JSC or layout test suites, or profile a run
-# wk: where=workspace repos=webkit name=required ready=yes group=workspaces takes=* passthrough dryrun preset=--preset
-# wk: opts --preset=,--layout,--gpu,--lldb,--kill,--profile,--profile=,--browser,--process=,--attach=,--jit-dump,--markers,--top=,--fetch,--env=
-#
-# Like `wk build`: a watchdog for a silent run, a record `wk status` reads, and a
-# summary instead of raw output. Layout tests use software rendering unless --gpu.
-#
-#   --preset <preset>   the build preset to test (default: the last build's,
-#                        else the platform's; the list is below)
-#   --layout             run the layout-test suite instead of the JSC suite
-#   --gpu                use the real GPU for layout tests (Linux only)
-#   --lldb [web|ui]      debug one layout test: "web" (default) attaches to the
-#                        web process, "ui" to WebKitTestRunner
-#   --kill               stop the test run in this workspace, wherever it runs
-#   --profile[=<mode>]   a run under a profiler instead of the suite, with every
-#                        mode and flag `wk run --profile` takes (wk run -h)
+"""run the JSC or layout test suites, or profile a run
 
+Like `wk build`: a watchdog for a silent run, a record `wk status` reads, and a summary instead of raw output. Layout
+tests use software rendering unless --gpu. --profile takes every mode and flag `wk run --profile` takes (wk run -h).
+"""
 import os
 import re
 import shlex
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import decl, images, job, places, presets, profile, record, session, store  # noqa: E402
-from wk.ldpath import LLDB_PIN_OPTS, lldb_waiting  # noqa: E402
-from wk.act import Refused, die, dry_run, info, log, warn  # noqa: E402
-from wk.build import size_for  # noqa: E402
-from wk.clock import Clock  # noqa: E402
+from wk import images, job, places, presets, profile, record, session, store
+from wk.act import Refused, die, dry_run, info, log, warn
+from wk.build import size_for
+from wk.clock import Clock
+from wk.decl import Command, Opt
+from wk.ldpath import LLDB_PIN_OPTS, lldb_waiting
 
 ROOT = images.root()
+COMMAND = Command(name="required", takes=("[<path>...]",), ready=True, preset="--preset", repos=("webkit",), tail="--",
+                  group="workspaces", opts=(
+    Opt("--preset", "the build preset to test (default: the last build's, else the platform's; the list is below)",
+        value="<preset>"),
+    Opt("--layout", "run the layout-test suite instead of the JSC suite"),
+    Opt("--gpu", "use the real GPU for layout tests (Linux only)"),
+    Opt("--lldb", "debug one layout test: a first path of web (the default) attaches to the web process, ui to "
+        "WebKitTestRunner"),
+    Opt("--kill", "stop the test run in this workspace, wherever it runs"),
+    *profile.OPTS))
 
 # The suite runner, in the announcing shell's own -lc text.
 PID_MATCH = "*Tools/Scripts/run-*"
@@ -70,8 +66,7 @@ def build_cmd(suite, src, out_env, render_env, wrap, lower, port, jobs, debug_fl
     return ("cd %s && %s --%s %s --no-build %s %s" % (src, head, lower, port, flags, shlex.join(pass_args))).rstrip()
 
 
-def main(argv, reg=None, clock=None):
-    args = decl.Args(decl.Decl(__file__), argv)
+def main(args, inv, reg=None, clock=None):
     profile.refuse_mixed(args, ("--layout", "--gpu", "--lldb", "--kill"))
     if profile.asked(args):
         return profile.main(args, "test", reg)
@@ -211,11 +206,3 @@ def main(argv, reg=None, clock=None):
     log("  full log: %s" % log_path)
     raise Refused(rc)
 
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

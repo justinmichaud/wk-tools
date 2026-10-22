@@ -1,54 +1,44 @@
-#!/usr/bin/env python3
-#
-# wk rm <name>... | --all -- destroy workspaces and everything they created
-# wk: where=workspace name=required lifecycle post=ssh-alias-remove group=workspaces takes=* destructive dryrun opts --all
-# wk: flag --all where=host name=none
-#
-# The container, the overlay, the home directory and the ssh alias all go;
-# shared caches (ccache, yocto, buildroot) survive. A workspace holding a
-# bench task that no export holds as it is now (the zip the task records, or
-# ~/Downloads/<task>.zip) is refused, naming `wk bench export <task>`;
-# --force destroys it anyway.
-#
-#   wk rm a b c   three removals: one confirmation for all, each destroyed
-#                 independently
-#   wk rm --all   every workspace `wk ls` finds: every place on this machine,
-#                 and every machine that keeps workspaces of its own
-#
-# The question names each one as <name>@<place>. A workspace another workstation
-# keeps the record of is destroyed by that machine's own `wk`, asked from here.
+"""destroy workspaces and everything they created
 
+The container, the overlay, the home directory and the ssh alias all go; shared caches (ccache, yocto, buildroot)
+survive. A workspace holding a bench task that no export holds as it is now (the zip the task records, or
+~/Downloads/<task>.zip) is refused, naming `wk bench export <task>`; --force destroys it anyway.
+
+  wk rm a b c   three removals: one confirmation for all, each destroyed independently
+  wk rm --all   every workspace `wk ls` finds: every place on this machine, and every machine that keeps
+                workspaces of its own
+
+The question names each one as <name>@<place>. A workspace another workstation keeps the record of is destroyed by
+that machine's own `wk`, asked from here.
+"""
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+from wk import images, places, record, sshalias, store, workspace
+from wk.act import Refused, die
+from wk.decl import Command, Opt
+from wk.machine import Local
 
 ROOT = images.root()
+COMMAND = Command(name="required", takes=("[<name>...]",), lifecycle=True, forward=False, destructive=True,
+                  group="workspaces", opts=(
+                      Opt("--all", "every workspace on every place and machine", sets=dict(where="host", name="none", takes=())),))
 
-from wk import decl, places, record, workspace  # noqa: E402
-from wk.act import Refused, die  # noqa: E402
 
-
-def main(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
-    names = args.positionals
+def main(args, inv):
     reg = places.Registry(ROOT)
     records = record.Records(machine=reg.machine)
     try:
         if args.flag("--all"):
-            if names:
-                die("'--all' is every workspace there is, and '%s' is one of them:\n    one or the other." % names[0])
             return workspace.rm_all(reg, records)
-        return workspace.rm_names(reg, records, [store.ws_name()] + names)
+        names = [store.ws_name()] + args.positionals
+        if not inv.vm_side():
+            return workspace.rm_names(reg, records, names)
+        workspace.refuse_unsaved_before_forward(reg, names)
+        rc = inv.forward(inv.argv)
+        if rc:
+            raise Refused(rc)
+        for name in names:   # the podman VM removes the container; the ssh alias is this host's
+            sshalias.alias_remove(Local(), os.environ, name)
+        return 0
     except LookupError as e:
         die(str(e))
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

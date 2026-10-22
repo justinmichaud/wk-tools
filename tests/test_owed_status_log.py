@@ -1,10 +1,10 @@
 """What `wk status <ws> --log --gates` says about the readings a build left beside its products."""
 import json
+import shlex
 import unittest
 
-from tests.support import REPO, WkTest, bash, fake_workspace
+from tests.support import WkTest, bash, command_argv, fake_workspace
 
-CMD_STATUS = REPO / "cmd" / "status"
 
 GOOD_BROWSER = {
     "accelerator": "IOAccelerator", "dpr": 2, "focused": True, "raf_hz": 59.7,
@@ -34,7 +34,7 @@ class TestTheReadingsTravelWithTheBuild(WkTest):
                 (products / "wk-profile-check.json").write_text(json.dumps(profile))
             if pins is not None:
                 (products / "wk-payload-pins").write_text(pins)
-            cp = bash(f'exec "{CMD_STATUS}" --log --gates',
+            cp = bash("exec " + shlex.join(command_argv("status", "--log", "--gates")),
                       env=ws.env({"WK_NAME": "selftest-ws", "WK_PLACE": "local"}))
             return cp, cp.stdout + cp.stderr
 

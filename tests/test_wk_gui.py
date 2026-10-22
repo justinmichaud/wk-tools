@@ -7,7 +7,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, load_cmd
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import presets  # noqa: E402
@@ -49,7 +49,7 @@ class TestRefusesARemotePlace(unittest.TestCase):
         driver = _driver(kind="remote")
         with mock.patch.object(GUI.places, "Registry", return_value=_registry(driver)), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
-            err = _refused(self, lambda: GUI.main([]))
+            err = _refused(self, lambda: GUI.main(as_dispatched("gui", []), None))
         self.assertIn("remote place", err)
         self.assertIn("ws", err)
         driver.exec_argv.assert_not_called()
@@ -66,7 +66,7 @@ class TestRefusesARemotePlace(unittest.TestCase):
                 mock.patch.object(GUI, "session_env", return_value=""), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release", "WK_DRY_RUN": "1"}), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
-            GUI.main([])
+            GUI.main(as_dispatched("gui", []), None)
         self.assertEqual(cm.exception.code, 0)
         self.assertIn("would run: wkdev-enter --exec -- run-minibrowser", err.getvalue())
 
@@ -76,7 +76,7 @@ class TestJscOnlyAndMissingBrowserRefusals(unittest.TestCase):
         driver = _driver()
         with mock.patch.object(GUI.places, "Registry", return_value=_registry(driver)), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "jsc-release"}):
-            _refused(self, lambda: GUI.main([]))
+            _refused(self, lambda: GUI.main(as_dispatched("gui", []), None))
 
     def test_no_minibrowser_built_is_refused_naming_the_build_command(self):
         driver = _driver()
@@ -84,7 +84,7 @@ class TestJscOnlyAndMissingBrowserRefusals(unittest.TestCase):
         with mock.patch.object(GUI.places, "Registry", return_value=_registry(driver)), \
                 mock.patch.object(GUI, "is_macos", return_value=False), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release"}):
-            err = _refused(self, lambda: GUI.main([]))
+            err = _refused(self, lambda: GUI.main(as_dispatched("gui", []), None))
         self.assertIn("wk build ws gtk-release", err)
 
 
@@ -94,7 +94,7 @@ class TestMacosContainerHasNoDisplay(unittest.TestCase):
         with mock.patch.object(GUI.places, "Registry", return_value=_registry(driver)), \
                 mock.patch.object(GUI, "is_macos", return_value=True), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release"}):
-            _refused(self, lambda: GUI.main([]))
+            _refused(self, lambda: GUI.main(as_dispatched("gui", []), None))
         driver.exec_argv.assert_not_called()
 
 

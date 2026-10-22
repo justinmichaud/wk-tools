@@ -284,15 +284,14 @@ class TestTheCommand(SessionTest):
     def test_the_words_it_takes(self):
         m = load_cmd("quiesce")
         with mock.patch.object(m, "is_linux", return_value=True), mock.patch.object(m.session, "Session") as s:
-            m.main(as_dispatched("quiesce", ["session"], {}))
-            m.main(["session", "on", "--bmc"])
-            m.main(["session", "gdm", "--bmc"])
+            for words in (["session"], ["session", "on", "--bmc"], ["session", "gdm", "--bmc"]):
+                m.main(as_dispatched("quiesce", words), None)
         self.assertEqual([c[0] for c in s.return_value.method_calls], ["status", "on", "gdm"])
         self.assertEqual([c[1] for c in s.return_value.method_calls], [(), (True,), (True,)])
-        self.assertIn("on, gdm, off or status", self.refused(m.main, ["session", "up"]))
-        self.assertIn("--bmc moves the session", self.refused(m.main, ["session", "off", "--bmc"]))
+        self.assertIn("unknown verb: up (one of on, gdm, off, status)", self.refused(as_dispatched, "quiesce", ["session", "up"]))
+        self.assertIn("unknown option: --bmc", self.refused(as_dispatched, "quiesce", ["session", "off", "--bmc"]))
         with mock.patch.object(m, "is_linux", return_value=False):
-            self.assertIn("Linux-only", self.refused(m.main, ["session", "status"]))
+            self.assertIn("Linux-only", self.refused(m.main, as_dispatched("quiesce", ["session", "status"]), None))
 
 
 class TestOnMoose(WkTest):

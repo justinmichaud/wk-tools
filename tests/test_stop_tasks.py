@@ -10,7 +10,7 @@ import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, load_cmd
+from tests.support import REPO, WkTest, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import record  # noqa: E402
@@ -161,5 +161,5 @@ class TestStopWorkspace(unittest.TestCase):
             with self.subTest(kind=kind):
                 t = self.Driver(kind)
                 with mock.patch.object(stop.places, "Registry", lambda root: self.Reg(t)), mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
-                    self.assertEqual(0, stop.main([]))
+                    self.assertEqual(0, stop.main(as_dispatched("stop", []), None))
                 self.assertEqual([("stop", "ws")], t.calls)

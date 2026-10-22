@@ -528,7 +528,7 @@ class Doctor:
             yield check("gh authenticated", "gh auth login   (then: wk key deploy)", gh_authenticated(self.machine))
 
     def root_access(self):
-        r = self.machine.run(["env", "WK_QUIET=1", os.path.join(self.root, "cmd", "key"), "sudo", "status"])
+        r = self.machine.run([os.path.join(self.root, "wk"), "key", "sudo", "status", "--quiet"])
         out = (r.out + r.err).strip()
         yield ok("sudo: " + out) if r.ok else miss("sudo: " + out, "wk key sudo setup")
 
@@ -603,7 +603,7 @@ class Doctor:
             return
         else:
             yield ok("podman machine '%s' running" % name)
-            out = self.in_vm("WK_STORE=/var/lib/wk python3 /opt/wk-tools/cmd/doctor --probe-store")
+            out = self.in_vm("WK_STORE=/var/lib/wk python3 /opt/wk-tools/wk doctor --probe-store")
             if not out:
                 yield unk("store inside the VM", "/opt/wk-tools missing in the VM? run ./setup --stage sdk")
                 return

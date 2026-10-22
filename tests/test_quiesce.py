@@ -366,8 +366,8 @@ class TestTheCommand(QuiesceTest):
     def test_bare_is_status_and_anything_else_is_refused(self):
         m = load_cmd("quiesce")
         with mock.patch.object(m.quiet, "Quiesce") as q, mock.patch.object(m.act, "terminate_as_interrupt"):
-            m.main(as_dispatched("quiesce", [], {}))
-            m.main(["on"])
+            m.main(as_dispatched("quiesce", []), None)
+            m.main(as_dispatched("quiesce", ["on"]), None)
         self.assertEqual(["status", "on"], [c[0] for c in q.return_value.method_calls])
         for bad in (["up"], ["on", "off"]):
             with self.subTest(argv=bad):
@@ -376,12 +376,11 @@ class TestTheCommand(QuiesceTest):
                 self.assertIn("usage: wk quiesce", cp.stdout)
 
     def test_a_session_change_needs_the_helper_and_its_status_only_reads(self):
-        d = decl.Decl(REPO / "cmd" / "quiesce")
+        def table(verb):
+            return decl.parse("quiesce", load_cmd("quiesce").COMMAND, ["session", verb])[0]
         for verb in ("on", "gdm", "off"):
-            self.assertEqual("quiesce-helper", d.needs_for(["session", verb]), verb)
-            self.assertFalse(d.is_readonly(["session", verb]), verb)
-        self.assertEqual("", d.needs_for(["session", "status"]))
-        self.assertTrue(d.is_readonly(["session", "status"]))
+            self.assertEqual((("quiesce-helper",), False), (table(verb).needs, table(verb).readonly), verb)
+        self.assertEqual(((), True), (table("status").needs, table("status").readonly))
 
 
 PRIV_SCRIPT = REPO / "admin" / "wk-quiesce-priv"

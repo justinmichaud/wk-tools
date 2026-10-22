@@ -1,66 +1,45 @@
-#!/usr/bin/env python3
-#
-# wk machine setup|rm|ls|probe [<name>] -- the machines in machines/: set one up, remove it, list them, find one
-# wk: where=host name=none group=hosts takes=2 verbs=setup,rm,ls,probe destructive setup,rm dryrun setup,rm
-# wk: readonly ls,probe
-# wk: sub setup needs=ssh,git opts=--kind=
-# wk: sub rm needs=ssh
-# wk: sub ls takes=1 opts=--json
-# wk: sub probe opts=--json,--segment=,--no-ssh,--timeout=
-#
-#   setup <name> [--kind build|peer]
-#            a build machine: probe it (remote/deps.sh), push wk-tools, provision it (remote/provision.sh), place the
-#            agent credentials and run WebKit's install-dependencies; nothing changes until the probe passes. A peer:
-#            check its own wk answers. A name with no machines/<name>.conf needs --kind, which writes the conf.
-#   rm <name>
-#            a build machine, once no workspace is left on it: the wk-tools lines in its shell rc files, its
-#            ~/.wk-remote and its root; an unreachable one only loses its conf here. A peer: its conf. Asks once.
-#   ls [--json]      every machine in machines/, its kind and its tailnet names.
-#   probe <name>     its tailnet names, what `ssh` would dial, and whether it answers; a board that does not answer
-#                    is swept for by its hardware address.
-#   probe            every device on every segment a sweep can see (this machine's subnets).
-#
-#   --segment <cidr>   sweep this instead of the derived segments
-#   --no-ssh           do not ask what answers; addresses and MACs only
-#   --timeout <s>      per-sweep ceiling (default 60)
-#   --json             one JSON document instead of the report
+"""the machines in machines/: set one up, remove it, list them, find one
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images  # noqa: E402
+  setup <name> [--kind build|peer]
+           a build machine: probe it (remote/deps.sh), push wk-tools, provision it (remote/provision.sh), place the
+           agent credentials and run WebKit's install-dependencies; nothing changes until the probe passes. A peer:
+           check its own wk answers. A name with no machines/<name>.conf needs --kind, which writes the conf.
+  rm <name>
+           a build machine, once no workspace is left on it: the wk-tools lines in its shell rc files, its
+           ~/.wk-remote and its root; an unreachable one only loses its conf here. A peer: its conf. Asks once.
+  ls       every machine in machines/, its kind and its tailnet names.
+  probe <name>
+           its tailnet names, what `ssh` would dial, and whether it answers; a board that does not answer is swept
+           for by its hardware address. With no name: every device on every segment a sweep can see.
+"""
+from wk import images, machine_cmd, reach
+from wk.act import die
+from wk.decl import Command, Opt
 
 ROOT = images.root()
+JSON = Opt("--json", "one JSON document instead of the report")
+COMMAND = Command(where="host", group="hosts", subs={
+    "setup": dict(takes=("<name>",), needs=("ssh", "git"), destructive=True,
+                  opts=(Opt("--kind", "build or peer, for a name with no conf (which it writes)", value="<kind>"),)),
+    "rm": dict(takes=("<name>",), needs=("ssh",), destructive=True),
+    "ls": dict(readonly=True, opts=(JSON,)),
+    "probe": dict(takes=("[<name>]",), readonly=True, opts=(
+        JSON, Opt("--segment", "sweep this instead of the derived segments", value="<cidr>"),
+        Opt("--no-ssh", "do not ask what answers; addresses and MACs only"),
+        Opt("--timeout", "per-sweep ceiling (default 60)", value="<s>")))})
 
-from wk import decl, machine_cmd, reach  # noqa: E402
-from wk.act import Refused, die  # noqa: E402
 
-USAGE = "usage: wk machine setup|rm <name> | probe [<name>] | ls; see wk machine -h"
-
-
-def main(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
+def main(args, inv):
     verb, rest = args.positionals[0], args.positionals[1:]
     m = machine_cmd.Machines(ROOT)
-    as_json = args.flag("--json")
-    if verb == "setup" and len(rest) == 1:
+    if verb == "setup":
         return m.setup(rest[0], args.value("--kind"))
-    if verb == "rm" and len(rest) == 1:
+    if verb == "rm":
         return m.rm(rest[0])
-    if verb == "ls" and not rest:
-        return m.ls(as_json)
-    if verb == "probe":
-        timeout = args.value("--timeout") or "60"
-        if not timeout.isdigit():
-            die("--timeout takes seconds")
-        survey = reach.Survey(m.reach, args.value("--segment"), not args.flag("--no-ssh"), int(timeout))
-        return m.probe_one(rest[0], survey, as_json) if rest else m.sweep(survey, as_json)
-    die(USAGE)
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
+    if verb == "ls":
+        return m.ls(args.flag("--json"))
+    timeout = args.value("--timeout") or "60"
+    if not timeout.isdigit():
+        die("--timeout takes seconds")
+    survey = reach.Survey(m.reach, args.value("--segment"), not args.flag("--no-ssh"), int(timeout))
+    return m.probe_one(rest[0], survey, args.flag("--json")) if rest else m.sweep(survey, args.flag("--json"))

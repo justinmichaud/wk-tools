@@ -12,22 +12,21 @@ UNKNOWN = "unknown image preset '%s'.\n    'wk sysimage presets' lists every one
 BUILDERS = ("yocto", "buildroot", "mac-volume", "guest")
 
 
-def wsname(argv, env=None):
-    return images.ws_arg(list(argv[1:]), env) if argv else ""
+def wsname(args, env=None):
+    """The image workspace a verb's <image-preset> names, or the --workspace given beside it."""
+    spec = args.positionals[1] if len(args.positionals) > 1 else ""
+    return (args.value("--workspace") or images.image_ws(spec, env)) if spec else ""
 
 
-def where(argv, env=None):
-    """`ls` walks from here and answers another's walk from the store; a verb naming an image workspace runs there."""
-    if argv[:1] in (["ls"], ["list"]):
-        return "store" if "--continued" in argv[1:] else "local"
-    return "workspace" if wsname(argv, env) else "host"
+def where(args, reg):
+    """A verb naming an image workspace runs on the machine holding it; any other, here."""
+    return "workspace" if wsname(args, reg.env) else "host"
 
 
-def wsplace(argv, reg):
-    m = images.spec_machine(argv[1]) if len(argv) > 1 else ""
-    if not m or not wsname(argv, reg.env):
-        return ""
-    return images.spec_place(m, record.machine_name(reg.env), reg.default())
+def derived(args, reg):
+    """(the image workspace, the place <image-preset>@<machine> names, else none)."""
+    ws, m = wsname(args, reg.env), images.spec_machine(args.positionals[1] if len(args.positionals) > 1 else "")
+    return ws, images.spec_place(m, record.machine_name(reg.env), reg.default()) if m and ws else ""
 
 
 def grow(grows, keeps, order):

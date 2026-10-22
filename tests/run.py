@@ -187,6 +187,13 @@ def main(argv):
     for root in (a.tests.resolve().parent, REPO):
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
+    if "live" in a.tiers:
+        from tests.support import refuse_live_beside
+        from wk.act import Refused
+        try:
+            refuse_live_beside()
+        except Refused as e:
+            return e.status
     suite = select(a.tests.resolve(), a.tiers, a.patterns)
     if not suite.countTestCases():
         sys.stderr.write("nothing selected: tests/run.py %s\n" % " ".join(argv))

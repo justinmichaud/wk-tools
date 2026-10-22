@@ -60,15 +60,6 @@ def reads(sources):
     return out
 
 
-def help_block(text):
-    lines = []
-    for line in text.splitlines()[1:]:
-        if not line.startswith("#"):
-            break
-        lines.append(line)
-    return "\n".join(lines)
-
-
 def read_sites():
     files = list(python_sources()) + [REPO / "wk"]
     return reads((str(p.relative_to(REPO)), p.read_text(errors="replace")) for p in files)
@@ -80,7 +71,7 @@ def user_overrides():
 
 def documentation():
     texts = [(REPO / "README.md").read_text(errors="replace")]
-    texts += [help_block(p.read_text(errors="replace")) for p in sorted((REPO / "cmd").iterdir()) if p.is_file()]
+    texts += [ast.get_docstring(ast.parse(p.read_text(errors="replace"))) or "" for p in sorted((REPO / "cmd").iterdir()) if p.is_file()]
     return "\n".join(texts)
 
 
@@ -112,11 +103,6 @@ class TestReadDetection(unittest.TestCase):
     def test_a_variable_read_from_two_functions_has_two_sites(self):
         src = 'def a(e):\n    return e.get("WK_A")\ndef b(e):\n    return e.get("WK_A")\n'
         self.assertEqual(len(reads([("m.py", src)])["WK_A"]), 2)
-
-    def test_a_help_block_is_the_leading_comment_lines(self):
-        self.assertEqual(help_block("#!/usr/bin/env python3\n# wk x\n# WK_A does y\nimport os  # WK_B\n"),
-                         "# wk x\n# WK_A does y")
-
 
 class TestEveryOverrideIsReadOnceDocumentedAndTested(unittest.TestCase):
     def test_each_override_is_read_in_one_function(self):

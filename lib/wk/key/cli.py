@@ -3,6 +3,7 @@
 import os
 import sys
 
+from wk import images
 from wk.act import die, warn
 from wk.key.check import Check
 from wk.key.common import GitHub, prompt_secret
@@ -141,3 +142,10 @@ def main(root, verb, arg="", rotate=False, replace=False, paste=False, env=None,
         return rc
     if verb == "adopt":
         return k.adopt_verb(arg, stdin)
+
+
+if __name__ == "__main__":
+    if sys.argv[1:] != ["ensure"]:   # a setup stage's one call: through `wk key`, the dispatcher would converge setup again
+        sys.stderr.write("usage: python3 -m wk.key.cli ensure\n")
+        sys.exit(2)
+    sys.exit(main(images.root(), "ensure"))

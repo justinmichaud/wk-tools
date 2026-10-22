@@ -51,9 +51,11 @@ bench system `<board>-bench` (`bench_ssh`)
 
 ## Every command, the same way
 
-A command is a file in `cmd/`, and the `# wk:` lines at its top declare its
-shape to the dispatcher (`wk`), which enforces the same rules for all of them
-before the command runs. `wk <cmd> -h` prints what those declarations say.
+A command is a module in `cmd/`: its `COMMAND` table (`Command` in
+`lib/wk/decl.py`) declares its shape to the dispatcher (`wk`), which enforces
+the same rules for all of them before it calls the module's one function,
+`main(args, inv)`, in its own process. `wk <cmd> -h` prints what the table and
+the module's docstring say.
 
 - **What it changes.** `readonly` commands start nothing and write nothing;
   the rest change things; a `destructive` command, subverb or flag removes,
@@ -62,27 +64,26 @@ before the command runs. `wk <cmd> -h` prints what those declarations say.
   answers it. Nothing that is not destructive ever asks.
 - **`--dry-run` (`-n`), for every command.** Every state change a command
   makes goes through one library function, `act`, which under `--dry-run`
-  prints the command it would run and runs nothing. A command whose changes
-  are not all on that path yet is refused the flag with the reason, rather
-  than let through to change something; `docs/HANDOFF-cli.md` lists those.
-- **Arguments are checked against the declaration.** `opts` names the options
-  a command takes (`--x=` for one with a value), `takes` how many positionals
-  follow the name, `passthrough` where the rest belongs to another program
-  (after `--`, or `=tail` after the last positional). Anything else is refused
-  with the usage line, once, in the dispatcher.
-- **Verbs and build presets are the dispatcher's too.** `verbs=` names a
-  command's subverbs: an unknown one is refused, and the command gets a
-  declared one as its first argument wherever it was typed; `default=` is
+  prints the command it would run and runs nothing. A table declaring
+  `dryrun=False` (`wk selftest`, whose effects are its tests') is refused the
+  flag, naming why.
+- **Arguments are checked against the table.** `opts` names the options a
+  command takes (an `Opt` with a `value` takes one), `takes` the positionals
+  that follow the name, `tail` where the rest belongs to another program (`--`
+  after `--`, `rest` from the first word past the positionals). Anything else
+  is refused with the usage line, once, in the dispatcher.
+- **Verbs and build presets are the dispatcher's too.** `subs` names a
+  command's subverbs, each a table of its own: an unknown one is refused, and
+  the command gets a declared one as its first argument; `default` is
   the verb a bare invocation stands for (`wk quiesce` is `wk quiesce
   status`), and a first word that is no verb is its argument when it takes
   one (`wk pr 1234`). A removed flag or verb is refused like any unknown
-  word. `preset=--preset` (or `preset=arg`, `wk build`'s positional) says the
+  word. `preset="--preset"` (or `"arg"`, `wk build`'s positional) says the
   command takes a build preset: `-h` lists every name in lib/wk/presets.py,
   one it does not hold is refused, and the preset reaches the command as
   `WK_PRESET`, never in argv; an exported `WK_PRESET` the arguments do not
-  name is refused. `passthrough=all` is
-  `=tail` with nothing in the tail read by wk, not even `-h` or `--force`
-  (`wk ai pi <ws> --help` is pi's).
+  name is refused. `tail="all"` is `rest` with nothing past the positionals
+  read by wk, not even `-h` or `--force` (`wk ai pi <ws> --help` is pi's).
 - **`--force`, `--quiet`** are the dispatcher's too: `--force` crosses a
   refusal that exists because of a rule and says so again at the end;
   `--quiet` drops narration and keeps results, warnings and errors.

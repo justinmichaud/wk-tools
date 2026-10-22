@@ -592,14 +592,15 @@ class TestTheCommand(WkTest):
 
     def test_two_actions_are_a_usage_error(self):
         cp = self.run_wk("boot", "rpi4", "--status", "--back", timeout=15)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
+        self.assertEqual(cp.returncode, 2, cp.stdout)
         self.assertIn("usage: wk boot", cp.stdout)
 
     def test_the_boot_order_is_the_one_destructive_action(self):
         from wk import decl
-        d = decl.Decl(REPO / "cmd" / "boot")
-        self.assertTrue(d.is_destructive(["rpi4", "--boot-order", "sd-first"]))
-        self.assertFalse(d.is_destructive(["rpi4", "--back"]))
+        from tests.support import load_cmd
+        table = load_cmd("boot").COMMAND
+        self.assertTrue(decl.parse("boot", table, ["rpi4", "--boot-order", "sd-first"])[0].destructive)
+        self.assertFalse(decl.parse("boot", table, ["rpi4", "--back"])[0].destructive)
 
 
 class TestOnTheBoards(unittest.TestCase):

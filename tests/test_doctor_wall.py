@@ -14,12 +14,12 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes import FakeRegistry
-from tests.support import REPO, WkTest, bash, clean_env, load_cmd
+from tests.support import REPO, WkTest, as_dispatched, bash, clean_env, load_cmd
 from tests.test_push_service import Proc
 
 sys.path.insert(0, str(REPO / "lib"))
 import credcheck  # noqa: E402
-from wk import claudelogin, doctor, places, pushgate, repos, wall  # noqa: E402
+from wk import claudelogin, decl, doctor, places, pushgate, repos, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
@@ -85,7 +85,7 @@ class _Wall(unittest.TestCase):
     """The workspace's process table is a fake /proc: conmon, a person's entry under it, and this process -- `me`, the wk
     command a check inside a workspace runs in -- under that. Each exec's bridge is added to it as ensure-bridge.sh starts one."""
     kind = "container"
-    me = ["python3", "/opt/wk-tools/cmd/ai", "claude"]
+    me = ["python3", "/opt/wk-tools/wk", "ai", "claude"]
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-wall-"))
@@ -706,7 +706,7 @@ class TestFromInside(_Wall):
         """CASES in order: each starts from the healthy answers, and the wk-tools workspace comes last."""
         self.answers = dict(HEALTHY)
         self.set("git config --global --get core.sshCommand", self.CLIENT)
-        me = ["python3", "/opt/wk-tools/cmd/doctor"] if who == "person" else self.me
+        me = ["python3", "/opt/wk-tools/wk", "doctor"] if who == "person" else self.me
         self.proc.chain([(os.getpid(), ENTRY, "python3", me)])
         if who == "tools":
             (self.tmp / "marker").write_text("name=demo\nsrc=/src/wk-tools\nrepo=wk-tools\n")
@@ -780,9 +780,8 @@ class TestTheDriversAnswer(_Wall):
 
 
 class TestTheCommand(WkTest):
-    def run_doctor(self, *args, env=None):
-        return subprocess.run([sys.executable, str(REPO / "cmd" / "doctor"), *args], capture_output=True, text=True,
-                              env=clean_env(dict({"WK_MARKER": str(self.tmp / "no-marker")}, **(env or {}))))
+    def env(self, **env):
+        return clean_env(dict({"WK_MARKER": str(self.tmp / "no-marker")}, **env))
 
     def machines(self, **env):
         (self.tmp / "machines").mkdir(exist_ok=True)
@@ -790,22 +789,21 @@ class TestTheCommand(WkTest):
         return dict(env, WK_MACHINES_DIR=str(self.tmp / "machines"))
 
     def test_it_answers_where_it_runs(self):
-        self.assertEqual("workspace", self.run_doctor("--where", "demo", "--gpu").stdout.strip())
-        self.assertEqual("local", self.run_doctor("--where", "--all").stdout.strip())
-        self.assertEqual("local", self.run_doctor("--where", "pi", env=self.machines()).stdout.strip())
+        for words, env, want in ((["demo", "--gpu"], {}, "workspace"), (["--all"], {}, "local"), (["pi"], self.machines(), "local")):
+            args = decl.parse("doctor", DOCTOR_CMD.COMMAND, words)[1]
+            self.assertEqual(want, DOCTOR_CMD.where(args, mock.Mock(env=self.env(**env))))
 
     def test_each_question_is_refused_where_it_does_not_belong(self):
         marker = self.tmp / "marker"
         marker.write_text("name=demo\nsrc=/src\n")
-        for args, env, said in ((("pi", "--all"), self.machines(), "is not asked of a machine"),
-                                (("pi",), self.machines(WK_MARKER=str(marker)), "asks a machine from the host"),
-                                (("--gpu",), {}, "wk doctor <workspace> --gpu"),
-                                (("--all",), {"WK_NAME": "demo", "WK_PLACE": "container"}, "drop the workspace name"),
-                                (("--all",), {"WK_MARKER": str(marker)}, "'wk doctor' here checks this one")):
-            with self.subTest(args=args):
-                cp = self.run_doctor(*args, env=env)
-                self.assertEqual(1, cp.returncode, cp.stderr)
-                self.assertIn(said, cp.stderr)
+        for words, env, said in ((["pi", "--all"], self.machines(), "is not asked of a machine"),
+                                 (["--gpu"], {}, "wk doctor <workspace> --gpu"),
+                                 (["--all"], {"WK_NAME": "demo", "WK_PLACE": "container"}, "drop the workspace name"),
+                                 (["--all"], {"WK_MARKER": str(marker)}, "'wk doctor' here checks this one")):
+            with self.subTest(words=words), contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused) as cm:
+                DOCTOR_CMD.main(decl.parse("doctor", DOCTOR_CMD.COMMAND, words)[1], None, env=self.env(**env))
+            self.assertEqual(1, cm.exception.status)
+            self.assertIn(said, err.getvalue())
 
 
 def sim_registry(in_ws):
@@ -834,7 +832,7 @@ class TestExitCodes(unittest.TestCase):
             return publishing
         with mock.patch.object(DOCTOR_CMD.wall, "from_host", side_effect=fake_from_host), \
                 contextlib.redirect_stderr(io.StringIO()):
-            return DOCTOR_CMD.workspace(sim_registry(False), "demo", [])
+            return DOCTOR_CMD.workspace(sim_registry(False), "demo", as_dispatched("doctor", []))
 
     def test_inside_and_from_the_host(self):
         self.assertEqual([0, 1, 3], [self._inside(0, False), self._inside(2, False), self._inside(2, True)])

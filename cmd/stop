@@ -1,42 +1,35 @@
-#!/usr/bin/env python3
-#
-# wk stop [<workspace>|--keep-vm|--tasks [--all]] -- shut down one workspace, or everything
-# wk: where=workspace name=optional forward=no group=hosts needs podman opts --keep-vm,--tasks,--all destructive --tasks dryrun
-# wk: flag --keep-vm name=none
-# wk: flag --tasks name=none
-# wk: flag --all name=none
-#
-# A named workspace: stops only its container or macOS guest; nothing on disk
-# is touched.
-#
-# Runs on the host holding the environment, never forwarded into the podman VM.
-#
-#   wk stop                  macOS VMs, containers, then the machine
-#   wk stop --keep-vm        macOS VMs and containers, leave the machine running
-#   wk stop <workspace>      only that workspace's environment
-#   wk stop --tasks          every task still running here -- a build, a
-#                            creation, an agent session -- through the kill
-#                            command each one recorded. Workspaces stay up
-#   wk stop --tasks --all    every machine's too, each through its own wk
-#
-#   0  nothing was left running
-#   1  a task was still there after its kill command ran
-#   3  a machine did not answer, so what runs there is unknown
+"""shut down one workspace, or everything
 
+A named workspace: stops only its container or macOS guest; nothing on disk is touched. Runs on the host holding the
+environment, never forwarded into the podman VM.
+
+  wk stop                  macOS VMs, containers, then the machine
+  wk stop --keep-vm        macOS VMs and containers, leave the machine running
+  wk stop <workspace>      only that workspace's environment
+  wk stop --tasks          every task still running here -- a build, a creation, an agent session -- through the kill
+                           command each one recorded. Workspaces stay up
+  wk stop --tasks --all    every machine's too, each through its own wk
+
+  0  nothing was left running
+  1  a task was still there after its kill command ran
+  3  a machine did not answer, so what runs there is unknown
+"""
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+from wk import act, fleet, images, places, record, store
+from wk.act import Refused, confirm, die, info, log, warn
+from wk.decl import Command, Opt
+from wk.machine import Local
+from wk.store import Store
 
 ROOT = images.root()
-
-from wk import act, decl, fleet, places, record  # noqa: E402
-from wk.act import Refused, confirm, die, info, log, warn  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from wk.store import Store  # noqa: E402
-
 MACHINE = Store().podman_machine()
+COMMAND = Command(name="optional", forward=False, needs=("podman",), group="hosts", opts=(
+    Opt("--keep-vm", "stop the macOS VMs and containers, and leave the podman machine running", sets=dict(name="none")),
+    Opt("--tasks", "stop every task still running here through its own kill command",
+        sets=dict(name="none", destructive=True)),
+    Opt("--all", "with --tasks: every machine's tasks too, each through its own wk", sets=dict(name="none"))))
 
 
 def running_tasks(records):
@@ -121,8 +114,7 @@ def stop_everything(reg, keep_vm):
     return 0
 
 
-def main(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
+def main(args, inv):
     keep_vm = args.flag("--keep-vm")
     tasks = args.flag("--tasks")
     everywhere = args.flag("--all")
@@ -142,11 +134,3 @@ def main(argv):
     except LookupError as e:
         die(str(e))
 
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

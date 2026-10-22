@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, load_cmd
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import presets  # noqa: E402
@@ -38,7 +38,7 @@ def run_on(driver, argv, preset="gtk-release"):
     reg.present.return_value = driver
     with mock.patch.object(RUN.places, "Registry", return_value=reg), \
             mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": preset}):
-        RUN.main(argv)
+        RUN.main(as_dispatched("run", argv), None)
     return driver.exec_argv.call_args
 
 
@@ -81,7 +81,7 @@ class TestLldbGetsAPty(unittest.TestCase):
                 mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release", "WK_DRY_RUN": "1"}), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
-            RUN.main(["--", "x.js"])
+            RUN.main(as_dispatched("run", ["--", "x.js"]), None)
         self.assertEqual(cm.exception.code, 0)
         self.assertIn("would run: ssh box", err.getvalue())
 
@@ -96,7 +96,7 @@ class TestMaxValidation(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
             with self.assertRaises(Refused):
                 with contextlib.redirect_stderr(io.StringIO()) as err:
-                    RUN.parse(["--until-crash", "--max", "abc", "--", "x.js"])
+                    RUN.parse(as_dispatched("run", ["--until-crash", "--max", "abc", "--", "x.js"]))
         self.assertIn("--max", err.getvalue())
 
 

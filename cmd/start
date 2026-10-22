@@ -1,28 +1,21 @@
-#!/usr/bin/env python3
-#
-# wk start [<workspace>] -- bring one workspace back up, or everything
-# wk: where=workspace name=optional forward=no group=hosts needs podman dryrun
-#
-# Runs on the host holding the environment, never forwarded into the podman VM.
-# macOS guests are listed rather than started.
-#
-#   wk start                 the podman machine, then every container
-#   wk start <workspace>     only that workspace's environment: a macOS guest
-#                            is booted, converged and given its ssh alias
+"""bring one workspace back up, or everything
 
-import os
+Runs on the host holding the environment, never forwarded into the podman VM. macOS guests are listed rather than
+started.
+
+  wk start                 the podman machine, then every container
+  wk start <workspace>     only that workspace's environment: a macOS guest is booted, converged and given its ssh alias
+"""
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+from wk import act, dispatch, images, places, secrets, store
+from wk.act import die, info, log
+from wk.decl import Command
+from wk.store import Store
 
 ROOT = images.root()
-
-from wk import act, dispatch, places, secrets  # noqa: E402
-from wk.act import Refused, die, info, log  # noqa: E402
-from wk.store import Store  # noqa: E402
-
 MACHINE = Store().podman_machine()
+COMMAND = Command(name="optional", forward=False, needs=("podman",), group="hosts")
 
 
 def start_everything(reg):
@@ -57,7 +50,7 @@ def start_everything(reg):
     return 0
 
 
-def main(argv):
+def main(args, inv):
     reg = places.Registry(ROOT)
     name = store.ws_name()
     try:
@@ -65,9 +58,3 @@ def main(argv):
     except LookupError as e:
         die(str(e))
 
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)

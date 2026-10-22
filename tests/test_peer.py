@@ -168,7 +168,7 @@ class TestPeerDelegation(PeerFixture):
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertEqual(self.peer_calls(), [], "a dry run hands nothing over")
         self.assertRegex(cp.stdout, r"would run: .* new newws'")
-        self.assertRegex(cp.stdout, r"would run: \S*/cmd/zed newws")
+        self.assertRegex(cp.stdout, r"would run: \S*/wk zed newws")
 
     def test_a_refused_creation_is_the_peers_refusal(self):
         cp = self._wk("new", "refusedws", "--on", "peerbox")

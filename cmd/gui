@@ -1,40 +1,29 @@
-#!/usr/bin/env python3
-#
-# wk gui <workspace> [<url>] [flags] -- run MiniBrowser in the benchmark seat
-# wk: where=workspace repos=webkit name=required ready=yes forward=no group=workspaces takes=1 passthrough preset=--preset dryrun
-# wk: opts --preset=,--no-fullscreen,--lldb=,--rr
-#
-# The same launch a perf run performs (Tools/Scripts/run-minibrowser), without
-# the benchmark around it. Refuses when there is no session to draw into.
-#
-#   [<url>]                page to load (default: about:blank)
-#   --preset <preset>      build preset to run (default: the last build's inside a
-#                          workspace, else mac-release on macOS and wpe-release elsewhere)
-#   --no-fullscreen        skip the port's fullscreen flag (WPE: --fullscreen,
-#                          GTK: --full-screen; the Apple port has neither)
-#   --lldb <ui|web>        run under lldb: "ui" stops before start; "web"
-#                          attaches to the web process once it starts
-#   --rr                   record the browser and every process it starts with rr
-#                          into ~/wk-rr (GTK/WPE); `wk run --replay` replays it
-#   -- <args>              extra arguments passed straight to the browser
+"""run MiniBrowser in the benchmark seat
 
+The same launch a perf run performs (Tools/Scripts/run-minibrowser), without the benchmark around it, on the page named
+(default: about:blank). Refuses when there is no session to draw into. Everything after `--` goes to the browser.
+"""
 import os
 import shlex
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+from wk import images, places, presets, session, store
+from wk.act import die, info, log, warn
+from wk.decl import Command, Opt
+from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE, lldb_waiting, rr_ready, rr_trace_dir
+from wk.machine import is_macos
 
 ROOT = images.root()
+COMMAND = Command(name="required", takes=("[<url>]",), ready=True, forward=False, preset="--preset", repos=("webkit",),
+                  tail="--", group="workspaces", opts=(
+    Opt("--preset", "the build preset to run (default: the last build's inside a workspace, else mac-release on macOS "
+        "and wpe-release elsewhere)", value="<preset>"),
+    Opt("--no-fullscreen", "skip the port's fullscreen flag (WPE: --fullscreen, GTK: --full-screen)"),
+    Opt("--lldb", "run under lldb: ui stops before start; web attaches to the web process once it starts", value="<ui|web>"),
+    Opt("--rr", "record the browser and every process it starts with rr into ~/wk-rr (GTK/WPE); `wk run --replay` "
+        "replays it")))
 
-from wk import decl, places, presets, session  # noqa: E402
-from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE, lldb_waiting, rr_ready, rr_trace_dir  # noqa: E402
-from wk.act import Refused, die, info, log, warn  # noqa: E402
-from wk.machine import is_macos  # noqa: E402
 
-
-def parse(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
+def parse(args):
     debug = args.value("--lldb") or ""
     if debug and debug not in ("ui", "web"):
         die("--lldb takes ui or web, not '%s'" % debug)
@@ -79,9 +68,9 @@ def session_env(root):
     return run_env
 
 
-def main(argv):
+def main(args, inv):
     name = store.ws_name()
-    opts = parse(argv)
+    opts = parse(args)
 
     reg = places.Registry(ROOT)
     driver = reg.present(name)
@@ -164,11 +153,3 @@ def web_debug(driver, preset, preset_name, name, url, src, launch_env, launch_cm
                         "command alias follow-page wk-follow-page %s" % web_proc,
                         "command alias reattach process attach --name %s --waitfor" % web_proc)
 
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

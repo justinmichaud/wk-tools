@@ -10,9 +10,7 @@ READER = ("lib/wk/record.py", "host_name")
 
 def python_sources():
     yield from sorted((REPO / "lib" / "wk").rglob("*.py"))
-    for p in sorted((REPO / "cmd").iterdir()):
-        if p.is_file() and p.read_text(errors="replace").startswith("#!/usr/bin/env python3"):
-            yield p
+    yield from sorted(p for p in (REPO / "cmd").iterdir() if p.is_file())
 
 
 class _Runs(ast.NodeVisitor):

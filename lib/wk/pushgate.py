@@ -68,7 +68,8 @@ def agent_word(words, exe):
     first = os.path.basename(words[0]) if words else ""
     if first == "claude" or "/claude/versions/" in exe or exe.endswith("/claude"):
         return "claude"
-    if words and (words[0].endswith("/cmd/ai") or (first.startswith("python") and len(words) > 1 and words[1].endswith("/cmd/ai"))):
+    program = words[1:] if first.startswith("python") else words
+    if program[:2] and os.path.basename(program[0]) == "wk" and program[1:2] == ["ai"]:
         return "wk ai"
     if first == "node" and any(w.endswith("/bin/pi") or "/pi-coding-agent/" in w for w in words[1:]):
         return "pi"

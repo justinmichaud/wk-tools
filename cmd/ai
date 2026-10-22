@@ -1,49 +1,40 @@
-#!/usr/bin/env python3
-#
-# wk ai claude|pi <workspace> [agent options] -- run a coding agent inside a workspace
-# wk: where=workspace name=required@2 ready=yes group=workspaces passthrough=all verbs=claude,pi dryrun
-#
-# The workspace name comes first; everything after it is the agent's, verbatim.
-#
-#   wk ai claude bb4 -r          resume, in bb4
-#   wk ai claude bb4 --continue  and so on
-#   wk ai pi bb4 --help          pi's own help, not this one
-#   wk ai claude                 in a workspace: this one, no name
-#   wk ai claude --dry-run bb4   the session it would run
-#
-# The agent runs with relaxed permissions, after `wk doctor`'s checks of the
-# workspace's boundary pass; git commits are walled off for the session, a push
-# is refused by the push service and a GitHub or Bugzilla write by the injector
-# to anything the session starts. The one exception is a wk-tools workspace,
-# whose repository an agent commits and pushes itself. Inside a workspace
-# (`claude` there calls this) a key reaching it, or a write not refused, stops
-# the session and no --force crosses it.
-#
-# A Claude session on a terminal starts with Remote Control on, named after the
-# workspace, using the claude.ai login the credential injector holds (`wk key
-# set claude-login`); on a build box, whose `claude setup-token` credential
-# Remote Control refuses, it starts without it and says so.
-#
-# The agents are installed by `wk new` (a macOS guest: at its first start); a
-# workspace made without one is refused, naming the remedy.
+"""run a coding agent inside a workspace
 
+The workspace name comes first; everything after it is the agent's, verbatim.
+
+  wk ai claude bb4 -r          resume, in bb4
+  wk ai pi bb4 --help          pi's own help, not this one
+  wk ai claude                 in a workspace: this one, no name
+  wk ai claude --dry-run bb4   the session it would run
+
+The agent runs with relaxed permissions, after `wk doctor`'s checks of the workspace's boundary pass; git commits are
+walled off for the session, a push is refused by the push service and a GitHub or Bugzilla write by the injector to
+anything the session starts. The one exception is a wk-tools workspace, whose repository an agent commits and pushes
+itself. Inside a workspace (`claude` there calls this) a key reaching it, or a write not refused, stops the session and
+no --force crosses it.
+
+A Claude session on a terminal starts with Remote Control on, named after the workspace, using the claude.ai login the
+credential injector holds (`wk key set claude-login`); on a build box, whose `claude setup-token` credential Remote
+Control refuses, it starts without it and says so.
+
+The agents are installed by `wk new` (a macOS guest: at its first start); a workspace made without one is refused,
+naming the remedy.
+"""
 import os
 import shlex
 import signal
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+from wk import agents, images, job, pushgate, secrets, store, wall
+from wk.act import barrier, die, info, warn
+from wk.clock import Clock
+from wk.decl import Command
+from wk.machine import HAVE, Local
+from wk.places import Registry
+from wk.workspace import require_name
 
 ROOT = images.root()
-
-from wk import agents, job, pushgate, secrets, wall  # noqa: E402
-from wk.clock import Clock  # noqa: E402
-from wk.act import Refused, barrier, die, info, warn  # noqa: E402
-from wk.machine import HAVE, Local  # noqa: E402
-from wk.places import Registry  # noqa: E402
-from wk.workspace import require_name  # noqa: E402
-
+COMMAND = Command(name="required", ready=True, tail="all", group="workspaces", subs={"claude": {}, "pi": {}})
 GH_LOGIN = 'test -e "$HOME/.config/gh/hosts.yml" || { command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; }'
 
 
@@ -170,9 +161,9 @@ class Ai:
         return self.session(agent_bin, mode, args)
 
 
-def main(argv, env=None, reg=None):
+def main(args, inv, env=None, reg=None):
     env = os.environ if env is None else env
-    agent = argv[0]
+    agent = args.positionals[0]
     name = store.ws_name(env)
     require_name(name)
     reg = reg or Registry(ROOT, env, Local())
@@ -180,13 +171,5 @@ def main(argv, env=None, reg=None):
         driver = reg.load(reg.ws_place(name))
     except LookupError as e:
         die(str(e))
-    return Ai(ROOT, env, reg, driver, agent, name).run(argv[1:])
+    return Ai(ROOT, env, reg, driver, agent, name).run(args.tail)
 
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

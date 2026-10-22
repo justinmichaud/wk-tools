@@ -157,17 +157,6 @@ def ws_preset(ws, env=None):
     return max(hits, key=len) if hits else None
 
 
-def ws_arg(args, env=None):
-    if not args or not args[0] or args[0].startswith("-"):
-        return ""
-    for prev, a in zip([""] + args[1:], args[1:]):
-        if prev == "--workspace":
-            return a
-        if a.startswith("--workspace=") and len(a) > len("--workspace="):
-            return a.split("=", 1)[1]
-    return image_ws(args[0], env)
-
-
 def slot_dir(ws, slot, env=None):
     """A slot is one build of the project beside the image in the workspace that built it, placed where its builder puts output."""
     preset = ws_preset(ws, env)

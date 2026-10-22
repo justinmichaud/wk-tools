@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, load_cmd
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import ldpath  # noqa: E402
@@ -56,9 +56,9 @@ class RrTest(unittest.TestCase):
                 mock.patch.dict(os.environ, dict({"WK_NAME": "ws", "WK_PRESET": preset, "WK_QUIET": "1"}, **env)):
             if mod is GUI:
                 with mock.patch.object(GUI, "is_macos", return_value=False), mock.patch.object(GUI, "session_env", return_value=""):
-                    mod.main(argv)
+                    mod.main(as_dispatched("gui", argv), None)
             else:
-                mod.main(argv)
+                mod.main(as_dispatched("run", argv), None)
         args, kw = driver.exec_argv.call_args
         return args[1][2], kw["tty"]
 
@@ -98,7 +98,7 @@ class TestRecordAndReplay(RrTest):
                 mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release", "WK_DRY_RUN": "1"}), \
                 contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
-            RUN.main(["--rr", "--", "x.js"])
+            RUN.main(as_dispatched("run", ["--rr", "--", "x.js"]), None)
         self.assertIn("would run: ssh box 'rr record'", err.getvalue())
         driver.exec.assert_not_called()
 
@@ -134,11 +134,11 @@ class TestRefusals(RrTest):
         for argv in (["--rr", "--lldb"], ["--replay", "--until-crash"], ["--rr", "--replay"]):
             with self.subTest(argv=argv), mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
                     contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
-                RUN.parse(argv)
+                RUN.parse(as_dispatched("run", argv))
             self.assertIn("runs on its own", err.getvalue())
         with mock.patch.dict(os.environ, {"WK_NAME": "ws"}), contextlib.redirect_stderr(io.StringIO()) as err, \
                 self.assertRaises(Refused):
-            GUI.parse(["--rr", "--lldb", "ui"])
+            GUI.parse(as_dispatched("gui", ["--rr", "--lldb", "ui"]))
         self.assertIn("pick one", err.getvalue())
 
 

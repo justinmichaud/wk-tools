@@ -25,7 +25,6 @@ from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 OK, MISS, UNK = doctor.OK, doctor.MISS, doctor.UNK
-CMD_DOCTOR = REPO / "cmd" / "doctor"
 GITCONFIG = REPO / "dotfiles" / "gitconfig"
 
 WANT = {v: subprocess.run(["git", "config", "--file", str(GITCONFIG), "--get", "user." + v],
@@ -304,7 +303,7 @@ class TestProbeStoreMirror(unittest.TestCase):
     def test_the_probe_subverb_runs_where_the_store_is(self):
         d = tempfile.mkdtemp(prefix="wk-test-doctor-nomirror-")
         self.addCleanup(shutil.rmtree, d, ignore_errors=True)
-        cp = subprocess.run([str(CMD_DOCTOR), "--probe-store"], capture_output=True, text=True, timeout=60,
+        cp = subprocess.run([str(REPO / "wk"), "doctor", "--probe-store"], capture_output=True, text=True, timeout=60,
                             env=clean_env({"WK_STORE": d, "WK_IN_VM": "1", "WK_MIRROR_BRANCHES": "main"}))
         self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
         self.assertIn("mirror=no", cp.stdout.splitlines())
@@ -506,8 +505,7 @@ class TestAMachineThatDoesNotAnswer(unittest.TestCase):
 class TestRootAccess(unittest.TestCase):
     def test_sudo_is_asked_quietly_through_the_environment(self):
         fake = Fake()
-        key = str(REPO / "cmd" / "key")
-        fake.answer(["env", "WK_QUIET=1", key, "sudo", "status"], 1, "a password is required, but sudo keeps a timestamp\n")
+        fake.answer([str(REPO / "wk"), "key", "sudo", "status", "--quiet"], 1, "a password is required, but sudo keeps a timestamp\n")
         rows = list(fake_doctor(True, machine=fake).root_access())
         self.assertEqual([(MISS, "sudo: a password is required, but sudo keeps a timestamp", "wk key sudo setup")], rows)
 

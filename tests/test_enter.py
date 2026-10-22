@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, fake_workspace, load_cmd, run
+from tests.support import REPO, WkTest, as_dispatched, fake_workspace, load_cmd, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.act import Refused  # noqa: E402
@@ -31,7 +31,7 @@ class TestRunsCommand(WkTest):
             self.assertIn("touch %s" % marker, cp.stdout)
             self.assertFalse(marker.exists(), "a dry run ran the command")
 
-    def test_zed_delegates_to_cmd_zed_by_name_rather_than_running_a_command(self):
+    def test_zed_is_wk_zed_by_name_rather_than_a_command(self):
         stub = tempfile.mkdtemp(prefix="wk-test-zed-")
         self.addCleanup(shutil.rmtree, stub, True)
         zed = os.path.join(stub, "zed")
@@ -41,7 +41,7 @@ class TestRunsCommand(WkTest):
         with fake_workspace() as ws:
             cp = ws.run("enter", "--zed", "should-never-run", env={"PATH": stub + os.pathsep + os.environ["PATH"]})
         self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("no ssh route to itself", cp.stdout)   # cmd/zed's own refusal answered, not cmd/enter's
+        self.assertIn("'wk zed' acts on a host", cp.stdout)   # wk zed's own refusal answered, not wk enter's
         self.assertNotIn("should-never-run", cp.stdout)
 
 
@@ -56,7 +56,7 @@ class TestNoTerminalAsksForNone(unittest.TestCase):
         with mock.patch.object(enter.places, "Registry", return_value=reg), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
                 mock.patch("sys.stdin", io.StringIO("")):
-            enter.main(["git", "status"])
+            enter.main(as_dispatched("enter", ["git", "status"]), None)
         driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=True)
         reg.machine.exec.assert_called_once_with(["true"], None)
 
@@ -70,10 +70,10 @@ class TestNoTerminalAsksForNone(unittest.TestCase):
         with mock.patch.object(enter.places, "Registry", return_value=reg), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
                 mock.patch("sys.stdin", io.StringIO("")):
-            enter.main(["--own", "--", "git", "status"])
+            enter.main(as_dispatched("enter", ["--own", "--", "git", "status"]), None)
             driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=False)
             with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-                enter.main(["--own"])
+                enter.main(as_dispatched("enter", ["--own"]), None)
         self.assertIn("--own takes a command", err.getvalue())
 
 

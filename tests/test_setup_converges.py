@@ -11,6 +11,7 @@ from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import dispatch, setupstate  # noqa: E402
+from wk.decl import Command  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -93,14 +94,6 @@ class TestAMacAfterABoot(SetupTest):
         self.assertEqual("", self.behind())
 
 
-class Decl:
-    def __init__(self, readonly=False):
-        self.readonly = readonly
-
-    def is_readonly(self, args):
-        return self.readonly
-
-
 class TestTheDispatcherRunsIt(SetupTest):
     def converge(self, why=("behind", "behind"), readonly=False, inside=False):
         self.m.answer([str(dispatch.ROOT / "setup")], out="setup ran\n")
@@ -111,7 +104,7 @@ class TestTheDispatcherRunsIt(SetupTest):
                 mock.patch.object(dispatch, "in_workspace", return_value=inside), \
                 mock.patch.object(dispatch, "in_vm", return_value=False), \
                 mock.patch.dict(os.environ, self.env), contextlib.redirect_stderr(err):
-            dispatch.converge_setup("new", Decl(readonly), [], self.m)
+            dispatch.converge_setup("new", Command(readonly=readonly), self.m)
         return [e[1] for e in self.m.effects if e[0] == "run"], err.getvalue()
 
     def test_behind_it_runs_setup_first_and_says_why(self):

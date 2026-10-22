@@ -10,8 +10,6 @@ one. Every test that touches real state cleans up after itself.
 import atexit
 import contextlib
 import functools
-import importlib.machinery
-import importlib.util
 import os
 import random
 import re
@@ -95,15 +93,6 @@ for _leaked in DISPATCH_VARS:
 # Debian's bash (SSH_SOURCE_BASHRC) sources ~/.bashrc when stdin is a socket; /dev/null is not one.
 with open(os.devnull, "rb") as _devnull:
     os.dup2(_devnull.fileno(), 0)
-
-
-def where_values():
-    """The `where=` vocabulary, read from the module that enforces it
-    (`WHERE_VALUES` in lib/wk/decl.py) rather than copied into a test."""
-    import re
-    m = re.search(r'WHERE_VALUES = \(([^)]+)\)', (REPO / "lib" / "wk" / "decl.py").read_text())
-    assert m, "lib/wk/decl.py no longer defines WHERE_VALUES"
-    return tuple(w.strip().strip('"') for w in m.group(1).split(",") if w.strip())
 
 
 def _clean_env(extra=None, wk_root=False):
@@ -198,23 +187,27 @@ def run(*args, env=None, check=False, timeout=120, input=None):
     return cp
 
 
-def as_dispatched(cmd, argv, env):
-    """argv as the dispatcher hands it to cmd/<cmd> (lib/wk/dispatch.py): the verb first, and a
-    declared build preset -- `--preset <p>`, or build's positional -- lifted into env's WK_PRESET."""
-    sys.path.insert(0, str(REPO / "lib"))
-    from wk import decl, dispatch
-    env.pop("WK_PRESET", None)
-    d = decl.Decl(REPO / "cmd" / cmd)
-    inv = dispatch.Invocation(cmd, d, list(argv))
-    args, joined, valued = inv.verb_first(), [], d.valued_opts()
-    while args:
-        a = args.pop(0)
-        if a == "--":
-            joined += [a] + args
-            break
-        joined.append(a + "=" + args.pop(0) if a in valued and args else a)
-    rest = inv.take_preset(joined, env)
-    return dispatch.argv_split(d.opts_for(rest), rest)
+def as_dispatched(cmd, argv, env=None):
+    """cmd/<cmd>'s Args for `argv` as the dispatcher parses it inside a workspace (no name), its build preset lifted into
+    env's WK_PRESET as the dispatcher lifts it."""
+    from wk import act, decl
+    try:
+        args = decl.parse(cmd, load_cmd(cmd).COMMAND, list(argv), inside=True)[1]
+    except decl.Usage as e:
+        act.die(str(e) or "usage: wk %s" % cmd, 2)
+    if env is not None:
+        env.pop("WK_PRESET", None)
+        if args.preset:
+            env["WK_PRESET"] = args.preset
+    return args
+
+
+def command_argv(name, *words):
+    """argv that runs cmd/<name>'s function on `words` with its workspace already resolved (WK_NAME), as the dispatcher calls it."""
+    code = ("import sys; sys.path.insert(0, sys.argv[1]); from wk import act, decl; m = decl.load(sys.argv[2], sys.argv[3])\n"
+            "try:\n    sys.exit(m.main(decl.parse(sys.argv[3], m.COMMAND, sys.argv[4:], True)[1], None) or 0)\n"
+            "except act.Refused as e:\n    sys.exit(e.status)\n")
+    return [sys.executable, "-c", code, str(REPO / "lib"), str(REPO), name, *words]
 
 
 def run_here(*args, env=None, **kw):
@@ -289,13 +282,9 @@ def repo_files():
 
 
 def load_cmd(name):
-    """cmd/<name> as a module: a file with no extension needs its loader spelled out."""
-    path = str(REPO / "cmd" / name)
-    loader = importlib.machinery.SourceFileLoader("wk_cmd_" + name.replace("-", "_"), path)
-    m = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader, origin=path))
-    m.__file__ = path
-    loader.exec_module(m)
-    return m
+    """cmd/<name> as a module, loaded as the dispatcher loads it."""
+    from wk import decl
+    return decl.load(REPO, name)
 
 
 def shell_files():
@@ -598,11 +587,33 @@ def _build_in_the_way():
     return None
 
 
+def refuse_live_beside():
+    """One live run at a time, and none beside a build on this machine's books: they starve each other, and two take
+    one podman machine. The lock is this runner's, and dies with it."""
+    from wk import act
+    from wk.clock import Clock
+    from wk.lock import Lock
+    from wk.machine import here
+    from wk.store import Store
+    busy = builds_on_the_books()
+    if busy:
+        act.barrier("a build is on this machine's books:\n%s\n    A live run makes workspaces and builds in them, and a live "
+                    "run and a\n    build starve each other. Wait for it ('wk status' follows it), or run\n    the tiers that "
+                    "need no machine:\n        wk selftest" % "".join("      %s\n" % b for b in busy).rstrip("\n"))
+    lock = Lock(Store(), here(), Clock())
+    pid = lock.holder_pid("selftest")
+    if pid is not None and lock.machine.alive(pid):
+        act.die("a live 'wk selftest' is already running here (pid %d).\n    Two of them take the same podman machine, and "
+                "the loaded one fails\n    wall-clock assertions that pass alone. Wait for it, or run the tiers\n    that "
+                "need no machine:\n        wk selftest" % pid)
+    lock.hold("selftest", 0)
+
+
 def builds_on_the_books():
     """What holds the build budget where a container workspace is really built -- inside the podman VM on macOS, on
     this machine on Linux -- as `wk status --holds` reads it there."""
     tools = "/opt/wk-tools" if sys.platform == "darwin" else str(REPO)
-    out = container_side('python3 %s/cmd/status --holds "build:$(hostname -s | tr A-Z a-z)"' % tools).stdout
+    out = container_side('python3 %s/wk status --holds "build:$(hostname -s | tr A-Z a-z)"' % tools).stdout
     return [line.split("\t")[2] for line in out.splitlines() if line.count("\t") == 3]
 
 

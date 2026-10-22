@@ -1,4 +1,4 @@
-"""`wk --declarations` and `wk completion`, the machine-readable command surface."""
+"""`wk completion`, generated from the command tables."""
 import os
 import shutil
 import subprocess
@@ -11,20 +11,13 @@ from tests.support import REPO, WK, WkTest, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import completion as C          # noqa: E402
-from wk import decl as D                 # noqa: E402
+from wk import decl                      # noqa: E402
 from wk.machine import Local             # noqa: E402
-
-
-class TestDeclarations(WkTest):
-    def test_declarations_omits_the_completion_builtin(self):
-        cp = run("--declarations")
-        names = [l.split("\t")[0] for l in cp.stdout.splitlines() if l.strip()]
-        self.assertNotIn("completion", names)
 
 
 class TestCompletionGenerator(unittest.TestCase):
     def test_a_values_list_answered_by_a_store_is_not_asked_at_tab(self):
-        cmds = {d.name: d for d in D.all_commands(REPO)}
+        cmds = {name: m.COMMAND for name, m in decl.commands(REPO)}
         self.assertEqual(C.values_cmd(cmds["bench"]), "")
         self.assertEqual(C.values_cmd(cmds["boot"]), "--list")
 
@@ -126,10 +119,10 @@ printf '%s\\n' "${{COMPREPLY[@]}}"
 
     def test_every_verb_of_every_command_completes_its_declared_options(self):
         want, lines = {}, []
-        for d in D.all_commands(REPO):
-            for v in C.subverbs(d):
-                want[f"{d.name} {v}"] = " ".join(C.flags_for(d, v))
-                lines.append(f"t {d.name} {v}")
+        for name, m in decl.commands(REPO):
+            for v, fields in m.COMMAND.subs.items():
+                want[f"{name} {v}"] = " ".join(C.flags(decl.under(m.COMMAND, fields)))
+                lines.append(f"t {name} {v}")
         script = ('source <("%s" completion bash)\n'
                   't() { COMP_WORDS=(wk "$1" "$2" --); COMP_CWORD=3; _wk_completion; echo "$1 $2:${COMPREPLY[*]}"; }\n%s\n'
                   % (WK, "\n".join(lines)))

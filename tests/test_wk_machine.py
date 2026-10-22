@@ -612,8 +612,7 @@ COPIES_ELSEWHERE = {
 class TestOneCopyPath(unittest.TestCase):
     def test_nothing_outside_the_machine_copies(self):
         files = list((REPO / "lib" / "wk").rglob("*.py"))
-        files += [p for p in (REPO / "cmd").iterdir()
-                  if p.is_file() and p.read_text(errors="replace").startswith("#!/usr/bin/env python3")]
+        files += [p for p in (REPO / "cmd").iterdir() if p.is_file()]
         found = set()
         for p in files:
             rel = str(p.relative_to(REPO))

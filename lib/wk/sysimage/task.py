@@ -77,18 +77,14 @@ def in_workspace(tools, label, argv):
     return isolated_module(tools + "/lib", "wk.sysimage.task") + ["stage", label, "--"] + list(argv)
 
 
-class _Declared:
-    def __init__(self, flags, valued):
-        self.opts = ",".join(list(flags) + [v + "=" for v in valued])
-
-    def opts_for(self, argv):
-        return self.opts
-
-
 def options(rest, flags, valued, usage):
-    args = decl.Args(_Declared(flags, valued), list(rest))
-    if args.positionals:
-        die("%s; %s is not an option of this build" % (usage, args.positionals[0]))
+    table = decl.Command(opts=tuple(decl.Opt(f, f) for f in flags) + tuple(decl.Opt(v, v, value="<v>") for v in valued))
+    try:
+        args = decl.parse("sysimage", table, list(rest))[1]
+    except decl.Usage as e:
+        die("%s; %s is not an option of this build" % (usage, str(e).split(": ", 1)[-1]))
+    if args.globals:
+        die("%s; %s is not an option of this build" % (usage, args.globals[0]))
     got = {o: True for o in flags if args.flag(o)}
     got.update((o, args.value(o)) for o in valued if args.value(o) is not None)
     return got

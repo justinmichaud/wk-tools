@@ -85,10 +85,6 @@ class Build:
         if self.opts.get("kill"):
             return self.stop()
         name, o = self.name, self.opts
-        if not o.get("preset"):
-            log("usage: wk build <preset>" if self.in_ws else "usage: wk build <workspace> <preset>")
-            list_presets()
-            raise Refused(2)
         self.preset = presets.resolve_or_die(o["preset"], self.driver)
         for e in o.get("env", []):
             if not re.match(r"^[A-Za-z_][^=]*=", e):
@@ -219,7 +215,7 @@ class Build:
                                 "The log is %s; the attempts above say what was tried." % (most, r.rc, blog), "gave up after %d fix attempts" % most)
                     task.step(attempt + 1)
                     info("build failed (exit %d) -- fix attempt %d of %d" % (r.rc, attempt, most))
-                    fix = here.run(["env", "WK_NAME=%s" % name, os.path.join(self.root, "cmd", "ai"), "claude",
+                    fix = here.run([os.path.join(self.root, "wk"), "ai", "claude", name,
                                     "--model", model, "-p", self.fix_prompt(r.rc, attempt, most, blog)])
                     sys.stderr.write(fix.err)
                     note("fix attempt %d (exit %d)" % (attempt, fix.rc), fix.out)

@@ -17,12 +17,9 @@ FIX_AGAIN = "'wk sync <ws> --fix' re-asserts the wiring"
 
 
 def where(in_workspace, args):
-    for a in args:
-        if a.split("=")[0] in SCOPE_FLAGS:
-            return "host"
-        if not a.startswith("-"):
-            return "workspace"
-    return "workspace" if in_workspace else "host"
+    if any(args.flag(f) or args.value(f) is not None for f in SCOPE_FLAGS):
+        return "host"
+    return "workspace" if args.name or in_workspace else "host"
 
 
 def publish_branch(env):

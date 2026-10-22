@@ -324,7 +324,7 @@ class TestPrDryRunEqualsWetRun(unittest.TestCase):
         self.assertEqual(({"eng/y": "c" * 40}, {"eng/y": "d" * 40}), (wet.local, dry.local))
 
     def test_a_dry_open_pushes_nothing_and_prints_the_pull_request(self):
-        with mock.patch.object(CMD_PR_MODULE.os, "execvp") as execvp, \
+        with mock.patch("os.execvp") as execvp, \
                 mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(io.StringIO()) as err:
             w = GitWorld()
             with self.assertRaises(SystemExit):
@@ -335,9 +335,8 @@ class TestPrDryRunEqualsWetRun(unittest.TestCase):
         self.assertIn("would run: gh pr create --repo WebKit/WebKit --head alice:eng/x --fill", err.getvalue())
 
     def test_every_form_declares_its_dry_run(self):
-        d = decl.Decl(CMD_PR)
         for args in (["some-workspace", "42"], ["rebase", "some-workspace"], ["open", "some-workspace"]):
-            self.assertTrue(d.honours_dryrun(args), args)
+            self.assertTrue(decl.parse("pr", CMD_PR_MODULE.COMMAND, args)[0].dryrun, args)
 
 
 class TestPrParseSpec(unittest.TestCase):

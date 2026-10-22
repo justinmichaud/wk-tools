@@ -86,10 +86,10 @@ def person_chain(pid):
 
 
 def agent_chain(pid, agent=("claude", ["/home/u/.local/bin/claude", "--dangerously-skip-permissions"])):
-    """The same shell, with an agent session between: git <- bash <- claude <- bwrap <- cmd/ai <- bash --login <- entry."""
+    """The same shell, with an agent session between: git <- bash <- claude <- bwrap <- wk ai <- bash --login <- entry."""
     comm, argv = agent
     return [(pid, 600, "bash", ["bash", "-c", "git push"]), (600, 601, comm, argv),
-            (601, 602, "bwrap", ["bwrap", "--dev-bind", "/", "/"]), (602, 603, "python3", ["python3", "/opt/wk-tools/cmd/ai", "claude"]),
+            (601, 602, "bwrap", ["bwrap", "--dev-bind", "/", "/"]), (602, 603, "python3", ["python3", "/opt/wk-tools/wk", "ai", "claude"]),
             (603, 500, "bash", ["/bin/bash", "--login"])] + person_chain(0)[1:]
 
 
@@ -268,7 +268,7 @@ class TestAPush(_Service):
         self.assertEqual("", self.ssh_log())
 
     def test_wk_ai_and_pi_are_agent_sessions_too(self):
-        for comm, argv, word in (("python3", ["python3", "/opt/wk-tools/cmd/ai", "pi"], "wk ai"),
+        for comm, argv, word in (("python3", ["python3", "/opt/wk-tools/wk", "ai", "pi"], "wk ai"),
                                  ("node", ["node", "/home/u/.local/bin/pi", "--continue"], "pi"),
                                  ("node", ["node", "/home/u/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"], "pi"),
                                  ("claude", ["/opt/homebrew/bin/claude"], "claude")):
@@ -646,11 +646,11 @@ class TestTheGate(unittest.TestCase):
     def test_what_makes_a_process_an_agent(self):
         for words, exe, want in ((["/home/u/.local/bin/claude"], "", "claude"), (["claude", "-p", "hi"], "", "claude"),
                                  (["/tmp/x/notclaude"], "/home/u/.local/share/claude/versions/2.1.0", "claude"),
-                                 (["python3", "/opt/wk-tools/cmd/ai", "claude"], "", "wk ai"), (["/opt/wk-tools/cmd/ai", "pi"], "", "wk ai"),
+                                 (["python3", "/opt/wk-tools/wk", "ai", "claude"], "", "wk ai"), (["/opt/wk-tools/bin/wk", "ai", "pi"], "", "wk ai"),
                                  (["node", "/home/u/.local/bin/pi"], "", "pi"), (["node", "/x/pi-coding-agent/dist/cli.js"], "", "pi"),
                                  (["node", "/home/u/.local/bin/pixie"], "", ""), (["node", "/home/u/project/pi.js"], "", ""),
                                  (["bash", "-lc", "claude"], "", ""), (["/usr/bin/claudette"], "", ""), ([], "", ""),
-                                 (["sleep", "/opt/wk-tools/cmd/ai"], "", "")):
+                                 (["sleep", "/opt/wk-tools/wk", "ai"], "", ""), (["/opt/wk-tools/wk", "doctor"], "", "")):
             with self.subTest(words=words, exe=exe):
                 self.assertEqual(want, pushgate.agent_word(words, exe))
 

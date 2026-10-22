@@ -7,7 +7,7 @@ from unittest import mock
 
 from tests.fakes import FakeRegistry, FakeDriver
 from tests.killpoints import converges
-from tests.support import REPO, load_cmd
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sudo  # noqa: E402
@@ -21,7 +21,7 @@ cmd = load_cmd("key")
 
 def key_sudo(argv, env=None, reg=None):
     """`wk key sudo <argv>` as the dispatcher hands it on."""
-    return cmd.main(["sudo"] + argv, env={} if env is None else env, reg=reg or registry())
+    return cmd.main(as_dispatched("key", ["sudo"] + argv), None, env={} if env is None else env, reg=reg or registry())
 
 LISTING_UNSET = "User justinmichaud may run the following commands on tolken:\n    (ALL : ALL) ALL\n"
 
@@ -36,7 +36,7 @@ def _fake(free=False, listing=LISTING_UNSET, rc_l=0):
 
 
 class TestArgv(unittest.TestCase):
-    """What each spelling reaches: the verb, --on and --all read through wk.decl.Args."""
+    """What each spelling reaches: the verb, --on and --all read by the dispatcher off key's table."""
 
     def reached(self, argv):
         seen = []

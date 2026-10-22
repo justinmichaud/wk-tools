@@ -1,54 +1,30 @@
-#!/usr/bin/env python3
-#
-# wk gc [--purge-mirror] [--purge-builds] [--purge-rubble] [--purge-images] -- reclaim disk
-# wk: where=host name=none group=sources opts --purge-mirror,--purge-builds,--purge-rubble,--purge-images,--rows destructive dryrun readonly --rows
-#
-# Lists what wk left on this machine, in the podman VM's store and on the machines
-# it reaches, asks once, and removes what a plain run may: what loses no work --
-# unreferenced snapshots, abandoned payload seeds, ccache and tart's image cache
-# down to their budgets, dangling images, a killed selftest's workspaces. The
-# rest is named with the flag or command that takes it. 'wk doctor' shows the same rows.
-#
-#   --purge-mirror   the mirror and every snapshot ('wk sync' refetches);
-#                    refused while a workspace or guest exists
-#   --purge-builds   image build trees, and every finished stage on the Mac's
-#                    benchmark volume but the newest (hours to rebuild)
-#   --purge-rubble   half-made workspaces nothing is creating, instrumented
-#                    slots left on a board, and a store's bench/: tasks outside
-#                    any workspace, which no command reads
-#   --purge-images   container images no container uses ('wk new' pulls again)
-#   --rows           print the rows, tab-separated, and remove nothing
+"""reclaim disk
 
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images  # noqa: E402
+Lists what wk left on this machine, in the podman VM's store and on the machines it reaches, asks once, and removes
+what a plain run may: what loses no work -- unreferenced snapshots, abandoned payload seeds, ccache and tart's image
+cache down to their budgets, dangling images, a killed selftest's workspaces. The rest is named with the flag or
+command that takes it. 'wk doctor' shows the same rows.
+"""
+from wk import gc, images, places
+from wk.act import die
+from wk.decl import Command, Opt
 
 ROOT = images.root()
+PURGES = ("--purge-mirror", "--purge-builds", "--purge-rubble", "--purge-images")
+COMMAND = Command(where="host", destructive=True, group="sources", opts=(
+    Opt("--purge-mirror", "the mirror and every snapshot ('wk sync' refetches); refused while a workspace or guest exists"),
+    Opt("--purge-builds", "image build trees, and every finished stage on the Mac's bench volume but the newest"),
+    Opt("--purge-rubble", "half-made workspaces nothing is making, a board's leftover instrumented slots, a store's "
+        "bench/ tasks outside any workspace"),
+    Opt("--purge-images", "container images no container uses ('wk new' pulls again)"),
+    Opt("--rows", "print the rows, tab-separated, and remove nothing", sets=dict(readonly=True, destructive=False))))
 
-from wk import decl, gc, places  # noqa: E402
-from wk.act import Refused, die  # noqa: E402
 
-
-def main(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
-    purge = {"--purge-mirror": args.flag("--purge-mirror"),
-             "--purge-builds": args.flag("--purge-builds"), "--purge-rubble": args.flag("--purge-rubble"),
-             "--purge-images": args.flag("--purge-images")}
-    flags = tuple(f for f, on in purge.items() if on)
+def main(args, inv):
+    flags = tuple(f for f in PURGES if args.flag(f))
     g = gc.Gc(ROOT, places.Registry(ROOT))
     if args.flag("--rows"):
         if flags:
             die("--rows prints what 'wk gc' would take, and takes no --purge flag")
         return g.print_rows()
     return g.run(flags)
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

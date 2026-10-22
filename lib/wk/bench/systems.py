@@ -356,7 +356,7 @@ class Container(Workspace):
         return [project.get("BENCH_RUNNER"), "--browser", leg.browser]
 
     def doctor(self, gpu):
-        return self.here.run(["env", "WK_NAME=" + self.ws, os.path.join(self.root, "cmd", "doctor")] + (["--gpu"] if gpu else []))
+        return self.here.run([os.path.join(self.root, "wk"), "doctor", self.ws] + (["--gpu"] if gpu else []))
 
     def checks(self, leg):
         rows, notes = [self.build_present(leg)], []

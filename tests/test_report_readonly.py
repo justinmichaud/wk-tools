@@ -22,12 +22,8 @@ HELPERS = {"wk-boot-priv", "wk-card-priv", "wk-quiesce-priv"}   # the privileged
 
 
 def readonly_verbs():
-    out = set()
-    for p in (REPO / "cmd").iterdir():
-        m = re.search(r"^# wk:.*\breadonly\b(?!=)", p.read_text(errors="replace"), re.M) if p.is_file() else None
-        if m:
-            out.add(p.name)
-    return out
+    from wk import decl
+    return {name for name, m in decl.commands(REPO) if any(t.readonly for _, t, _ in decl.variants(name, m.COMMAND))}
 
 
 def acts_in(tokens, readonly):

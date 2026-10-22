@@ -1,5 +1,6 @@
 """Static rules over the tree's sources and confs."""
 TIER = "lint"
+import ast
 import collections
 import re
 import subprocess
@@ -100,11 +101,13 @@ def wk_overrides():
 
 
 def documented(var, files):
-    """Named in README.md, or in a comment line anywhere outside tests/."""
+    """Named in README.md or a command's -h (its module docstring), or in a comment line anywhere outside tests/."""
     word = re.compile(r"\b%s\b" % re.escape(var))
     for p in files:
         text = p.read_text(errors="replace")
-        if word.search(text) if p.name == "README.md" else any(word.search(l) for l in text.splitlines() if not code(l)):
+        if p.parent == REPO / "cmd":
+            text = ast.get_docstring(ast.parse(text)) or ""
+        if word.search(text) if p.name == "README.md" or p.parent == REPO / "cmd" else any(word.search(l) for l in text.splitlines() if not code(l)):
             return True
     return False
 

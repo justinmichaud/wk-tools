@@ -115,7 +115,7 @@ class World(Acting, Fake):
                             (["exec", "ws", "git"], SHA + "\n"), (["exec", "ws", "python3"], ""), (["exec", "ws", "mkdir"], ""),
                             (["exec", "ws", "sysctl", "-n", "hw.ncpu"], "4\n"), (["exec", "ws", "sysctl", "-n", "hw.model"], "VirtualMac2,1\n"),
                             (["exec", "ws", "sw_vers"], "15.5\n"), (["exec", "ws", "uname"], "arm64\n"),
-                            (["exec", "ws", "diskutil"], ""), (["env"], "renderer=NVIDIA GeForce | gl\n"),
+                            (["exec", "ws", "diskutil"], ""), (["env"], "renderer=NVIDIA GeForce | gl\n"), ([str(REPO / "wk"), "doctor"], ""),
                             (["nproc"], "16\n"), (["sysctl", "-n", "vm.loadavg"], "{ 0.50 0.40 0.30 }\n"), (["uname", "-r"], "6.8.0\n"), (["uname", "-m"], "x86_64\n"),
                             (["lscpu"], "Model name:   Test CPU\n"), (["nvidia-smi"], "550.1\n"), (["findmnt"], "/dev/nvme0n1p2\n"),
                             (["lsblk"], json.dumps({"blockdevices": [{"name": "nvme0n1p2", "type": "part"},
@@ -374,11 +374,10 @@ class TestWhereTheLegRecords(BenchTest):
 
 class TestRefusals(BenchTest):
     def dispatch_refuses(self, *argv):
-        err = io.StringIO()
-        with self.assertRaises(dispatch.Exit) as cm, contextlib.redirect_stderr(err):
-            as_dispatched("bench", argv, os.environ)
-        self.assertEqual(cm.exception.status, 2)
-        return err.getvalue()
+        from tests.test_dispatch import dispatched
+        how, status, out = dispatched(["bench", *argv])
+        self.assertEqual((how, status), ("exit", 2))
+        return out
 
     def test_the_bare_form_names_run(self):
         err = self.dispatch_refuses("ws", "jetstream3")
@@ -389,7 +388,7 @@ class TestRefusals(BenchTest):
         self.assertIn("gpu-class benchmark and jsc-release builds no browser", self.said("run", "speedometer3", "--preset", "jsc-release"))
 
     def test_an_unknown_config_is_named(self):
-        self.assertIn("unknown preset: nosuch", self.dispatch_refuses("run", "jetstream3", "--preset", "nosuch"))
+        self.assertIn("unknown preset: nosuch", self.dispatch_refuses("run", "ws1", "jetstream3", "--preset", "nosuch"))
 
     def test_a_board_or_remote_workspace_is_not_a_workspace_system(self):
         w = World(self.tmp, "remote")

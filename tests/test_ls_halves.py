@@ -8,8 +8,7 @@ import unittest
 from unittest import mock
 
 from tests.fakes import FakeDriver, FakeRegistry
-from tests.support import REPO, fake_workspace, load_cmd
-from tests.test_options import run_impl
+from tests.support import REPO, as_dispatched, fake_workspace, load_cmd, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.fakes import Fake  # noqa: E402
@@ -24,7 +23,7 @@ class TestOneTable(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.object(ls.places, "Registry", lambda root: reg), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            ls.main(list(argv))
+            ls.main(as_dispatched("ls", argv), None)
         return out.getvalue(), err.getvalue()
 
     def test_every_answering_place_s_rows_are_merged_and_a_silent_one_named(self):
@@ -48,8 +47,8 @@ class TestInsideAWorkspace(unittest.TestCase):
 
     def test_base_and_changes_are_not_applicable(self):
         with fake_workspace() as ws:
-            table = run_impl("ls", env=ws.env()).stdout.splitlines()
-            doc = json.loads(run_impl("ls", "--json", env=ws.env(), split=True).stdout)
+            table = run("ls", env=ws.env()).stdout.splitlines()
+            doc = json.loads(run("ls", "--json", env=ws.env()).stdout)
         self.assertEqual(table[1].split(), ["selftest-ws", "local", "running", "n/a", "-", "native", "n/a"])
         (row,) = doc["workspaces"]
         self.assertEqual((row["base"], row["changes"]), ("n/a", "n/a"))

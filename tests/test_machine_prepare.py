@@ -93,7 +93,7 @@ class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):
     def _boot(self, machine, *args, env=None):
         dry = "WK_DRY_RUN=1 " if "--dry-run" in args else ""
         args = [a for a in args if a != "--dry-run"]
-        return bash('%sexec "$WK_ROOT/cmd/boot" %s %s' % (dry, machine, " ".join(args)), env=env)
+        return bash('%sexec "$WK_ROOT/wk" boot %s %s' % (dry, machine, " ".join(args)), env=env)
 
     def test_a_driver_that_reaches_its_machine_answers_from_a_linux_host(self):
         for args in (("--status",), ("--dry-run",)):

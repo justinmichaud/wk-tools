@@ -18,33 +18,31 @@ REPORT_USAGE = ("usage: wk bench report <task> [--html] [--text]\n"
                 "       wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h")
 
 
-def options(decl, argv, args, **given):
+def options(args, **given):
     """Each option the verb declares under its name without dashes: a value as given, True for a flag given, None for either absent."""
-    names = {n.rstrip("=") for n in decl.opts_for(argv).split(",") if n}
-    return dict({n[2:].replace("-", "_"): args.flag(n) or args.value(n) for n in names}, **given)
+    return dict({o.flag[2:].replace("-", "_"): args.flag(o.flag) or args.value(o.flag) for o in args.table.opts}, **given)
 
 
-def where(root, reg, args):
+def where(args, reg):
     """seed runs where its workspace's store is; ls walks from where it was typed, and answers another machine's walk
     (--continued) from this machine's store; a run on a Mac's bench volume runs on that install, which holds no workspace."""
-    verb = args[0] if args else ""
+    verb = args.verbs[0]
     if verb == "seed":
         try:
-            t = reg.ws_place(args[1]) if len(args) > 1 and args[1] else ""
+            t = reg.ws_place(args.name) if args.name else ""
         except LookupError:
             t = ""
         return "workspace" if t == "container" else "host"
     if verb == "ls":
-        return "store" if "--continued" in args[1:] else "local"
-    if verb == "run":
-        name = next((a.split("=", 1)[1] if "=" in a else args[i + 2] for i, a in enumerate(args[1:])
-                     if a.split("=", 1)[0] == "--system" and ("=" in a or i + 2 < len(args))), "")
-        try:
-            kind = (fleet.Fleet(root, reg.env).load(name) or {}).get("kind") if name else ""
-        except fleet.ConfError:
-            kind = ""
-        return "host" if kind in ("mac", "guest") else "workspace"
-    return "host"
+        return "store" if args.flag("--continued") else "local"
+    if verb != "run":
+        return "host"
+    name = args.value("--system")
+    try:
+        kind = (fleet.Fleet(str(reg.root), reg.env).load(name) or {}).get("kind") if name else ""
+    except fleet.ConfError:
+        kind = ""
+    return "host" if kind in ("mac", "guest") else "workspace"
 
 
 class Bench:

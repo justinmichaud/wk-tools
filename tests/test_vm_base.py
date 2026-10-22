@@ -17,7 +17,7 @@ from tests.killpoints import converges
 from tests.support import REPO, live_selected, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, dispatch, guest, places, tools  # noqa: E402
+from wk import act, decl, dispatch, guest, places, tools  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from tests.fakes import FakeClock  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
@@ -283,7 +283,7 @@ class TestTheBuilderConforms(BaseTest):
         seen, s = [], cli.Sysimage(places.Registry(str(REPO), env=self.w.env, machine=self.w), self.clock)
         with mock.patch.object(guestbase.Base, "build", lambda b, rest: seen.append((b.name, rest)) or 0):
             self.assertEqual(0, s.build(guest.BASE_PRESET, ["--refresh"]))
-        self.assertEqual(([("wk-base", ["--refresh"])], cli.where(["build", guest.BASE_PRESET, "--rm"], self.w.env)), (seen, "host"))
+        self.assertEqual(([("wk-base", ["--refresh"])], cli.where(decl.parse("sysimage", load_cmd("sysimage").COMMAND, ["build", guest.BASE_PRESET, "--rm"])[1], mock.Mock(env=self.w.env))), (seen, "host"))
         self.assertEqual((self.out(s.path, guest.BASE_PRESET, None), self.out(s.holds, guest.BASE_PRESET, None, None, None, None, False)[1]),
                          ((1, ""), "no\n"))
         self.assertNotIn(guest.BASE_PRESET, self.out(lambda: s.ls(False))[1])

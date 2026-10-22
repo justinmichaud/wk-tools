@@ -1,55 +1,42 @@
-#!/usr/bin/env python3
-#
-# wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
-# wk: where=workspace repos=webkit name=optional@2 takes=1 ready=yes group=sources dryrun verbs=checkout,rebase,open default=checkout
-# wk: sub open where=host name=optional@2 takes=0 opts=--draft,--web needs=gh,gh-auth
-# wk: sub rebase name=optional@2 takes=0
-#
-#   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
-#   wk pr 1234                                 # WebKit/WebKit pull request #1234
-#   wk pr wpe:1234                             # WPEWebKit's pull request #1234
-#   wk pr rebase [<workspace>]                 # rebase the current branch onto origin/main
-#   wk pr open <workspace> [--draft] [--web]   # push the branch and open it as a PR
-#
-# <user>:<branch> is a fork's branch; both projects are tried, and a branch existing in both is
-# refused by name. A bare number is a WebKit/WebKit pull request, `wpe:<number>` a WPEWebKit one.
-# The one ref is fetched from GitHub straight into the workspace's checkout (not the mirror), and a
-# remote for an account that has none yet is added there. Uncommitted changes are named before
-# anything moves, and a local branch with commits the PR head lacks is kept, only named.
-#
-#   --force   take the PR head even when the local branch has commits it does not, discarding them
-#
-# 'rebase' fetches origin/main from the mirror into the workspace and rebases the current branch
-# onto it; either argument order works, and a bare 'wk pr rebase' runs inside a workspace.
-#
-# 'open' pushes the workspace's current branch to its fork and opens it as a pull request with
-# `gh pr create --fill`; host only. The project comes from the upstream the branch tracks; no
-# upstream, `main`, a detached HEAD, or a dirty tree is refused by name. The push goes through
-# the push service, as a person's own run. A build box's branch is
-# fetched over ssh into this machine's mirror and pushed from here: no key reaches a box.
-#
-#   --draft   open it as a draft
-#   --web     open the browser's new-PR form instead of creating it directly
+"""check out a PR head, from either project
 
-import os
+  wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
+  wk pr 1234                                 WebKit/WebKit pull request #1234
+  wk pr wpe:1234                             WPEWebKit's pull request #1234
+  wk pr rebase [<workspace>]                 rebase the current branch onto origin/main
+  wk pr open <workspace> [--draft] [--web]   push the branch and open it as a PR
+
+<user>:<branch> is a fork's branch; both projects are tried, and a branch existing in both is refused by name. The one
+ref is fetched from GitHub straight into the workspace's checkout (not the mirror), and a remote for an account that has
+none yet is added there. Uncommitted changes are named before anything moves, and a local branch with commits the PR
+head lacks is kept, only named; --force takes the PR head anyway, discarding them.
+
+'rebase' fetches origin/main from the mirror into the workspace and rebases the current branch onto it; a bare
+'wk pr rebase' runs inside a workspace.
+
+'open' pushes the workspace's current branch to its fork and opens it as a pull request with `gh pr create --fill`;
+host only. The project comes from the upstream the branch tracks; no upstream, `main`, a detached HEAD, or a dirty tree
+is refused by name. The push goes through the push service, as a person's own run. A build box's branch is fetched over
+ssh into this machine's mirror and pushed from here: no key reaches a box.
+"""
 import re
 import shlex
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+from wk import git, images, places, pr, pushgate, secrets, store, sync
+from wk.act import die, info, log, warn
+from wk.clock import Clock
+from wk.decl import Command, Opt
+from wk.lock import Lock
+from wk.machine import Local
+from wk.places import show
+from wk.store import Store
+from wk.workspace import require_name
 
 ROOT = images.root()
-
-from wk import decl, git, places, pr, pushgate, secrets, sync  # noqa: E402
-from wk.act import Refused, die, info, log, warn  # noqa: E402
-from wk.clock import Clock  # noqa: E402
-from wk.lock import Lock  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from wk.store import Store  # noqa: E402
-from wk.places import show  # noqa: E402
-from wk.workspace import require_name  # noqa: E402
-
+COMMAND = Command(name="optional", ready=True, repos=("webkit",), default="checkout", group="sources", subs={
+    "checkout": dict(takes=("<user>:<branch>|<n>|wpe:<n>",)), "rebase": {},
+    "open": dict(where="host", needs=("gh", "gh-auth"), opts=(Opt("--draft", "open it as a draft"),
+                                                              Opt("--web", "open the browser's new-PR form instead")))})
 
 
 def pr_open_target(src, run=lambda argv: Local().run(argv)):
@@ -152,35 +139,18 @@ def _load(reg, name, usage):
     return reg.present(name)
 
 
-def main(argv):
-    name = store.ws_name()
-    args = decl.Args(decl.Decl(__file__), argv)
-    verb, rest = args.positionals[0], args.positionals[1:]
+
+def main(args, inv):
+    name, verb = store.ws_name() or args.name or "", args.positionals[0]
     reg = places.Registry(ROOT)
     if verb == "rebase":
-        name = name or (rest[0] if rest else "")
         return pr_rebase(_load(reg, name, "wk pr rebase [<workspace>]; run inside a workspace, or name one"), name)
     if verb == "open":
-        name = name or (rest[-1] if rest else "")
-        driver = _load(reg, name, "wk pr open <workspace> [--draft] [--web]")
-        return pr_open(driver, name, args.flag("--draft"), args.flag("--web"))
-    spec = rest[0] if rest else ""
-    if not spec:
-        die("usage: wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n>, or 'wk pr rebase [<ws>]', or "
-            "'wk pr open <ws> [--draft] [--web]' (from the host); see wk pr -h")
-    # takes=1 means the ref is never read as a workspace name, so what is missing is the workspace.
+        return pr_open(_load(reg, name, "wk pr open <workspace> [--draft] [--web]"), name, args.flag("--draft"), args.flag("--web"))
+    spec = args.positionals[1]
     if not name:
         die("'wk pr %s' does not say which workspace to check it out into.\n"
             "    Name one:        wk pr <workspace> %s   ('wk ls' lists them)\n"
             "    or run it in one: wk pr %s" % (spec, spec, spec))
     pr.checkout(_load(reg, name, ""), reg.machine, name, spec)
     return 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

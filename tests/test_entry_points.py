@@ -1,5 +1,5 @@
 """Every entry point starts in a fresh interpreter with only lib/ on its path, importing nothing first: each `python3 -m`
-module the tree runs answers --help with its usage, and each cmd/* and each script that imports lib loads."""
+module the tree runs answers --help with its usage, each script that imports lib loads, and so does each cmd/* table."""
 import re
 import subprocess
 import sys
@@ -34,7 +34,7 @@ def modules():
 
 
 def scripts():
-    """Every python file outside lib/wk that imports lib: the dispatcher, cmd/*, lib's own scripts, the container's daemons."""
+    """Every python file outside lib/wk that imports lib: the dispatcher, lib's own scripts, the container's daemons."""
     out = []
     for p in files():
         rel = p.relative_to(REPO).as_posix()
@@ -55,7 +55,7 @@ class EntryPoints(unittest.TestCase):
 
     def test_the_tree_runs_modules_and_scripts(self):
         self.assertIn("wk.git", modules())
-        self.assertIn(REPO / "cmd" / "new", scripts())
+        self.assertIn(REPO / "wk", scripts())
 
     def test_every_module_the_tree_runs_answers_help(self):
         for m in modules():
@@ -63,6 +63,11 @@ class EntryPoints(unittest.TestCase):
                 cp = child([ISOLATED, LIB, m, "--help"])
                 self.assertNotIn("Traceback", cp.stderr)
                 self.assertIn("usage", (cp.stdout + cp.stderr).lower())
+
+    def test_every_command_loads_as_the_dispatcher_loads_it(self):
+        load = "import sys; sys.path.insert(0, sys.argv[1]); from wk import decl; print(len(decl.commands(sys.argv[2])))"
+        cp = child([load, LIB, str(REPO)])
+        self.assertEqual((cp.returncode, cp.stdout.strip()), (0, str(len([p for p in (REPO / "cmd").iterdir() if p.is_file()]))), cp.stderr)
 
     def test_every_script_loads_or_answers_help(self):
         """One with a __main__ guard, or a module lib/ imports by name, is loaded without running it; any other runs to its usage."""

@@ -22,13 +22,12 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import git, images, places, pr, sync  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from tests.fakes import FakeClock  # noqa: E402
-from wk.decl import Decl  # noqa: E402
+from wk import decl  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
-CMD_SYNC = REPO / "cmd" / "sync"
 MAIN_SHA = "a" * 40
 
 cmd = load_cmd("sync")
@@ -242,7 +241,7 @@ class SyncTest(FlowTest):
 
 class TestParse(SyncTest):
     def parse(self, *args, name=""):
-        return cmd.parse(list(args), name)
+        return cmd.parse(decl.parse("sync", cmd.COMMAND, list(args))[1], name)
 
     def test_each_scope_and_what_it_names(self):
         for args, want in ((( ), ("here", "", "", False)),
@@ -284,12 +283,11 @@ class TestWhere(unittest.TestCase):
                                    (("--all",), True, "host"), (("--on=moose",), False, "host"), (("--tools", "buildbox4"), False, "host"),
                                    (("--mirror",), False, "host"), (("--fix", "--all"), False, "host")):
             with self.subTest(args=args, inside=inside):
-                self.assertEqual(sync.where(inside, list(args)), want)
+                self.assertEqual(sync.where(inside, decl.parse("sync", cmd.COMMAND, list(args), inside)[1]), want)
 
-    def test_the_dispatcher_asks_cmd_sync_and_nothing_else_decides(self):
-        self.assertEqual(Decl(CMD_SYNC).where_for(["myws"]), "dynamic")
-        cp = subprocess.run([str(CMD_SYNC), "--where", "myws"], capture_output=True, text=True, timeout=30)
-        self.assertEqual((cp.returncode, cp.stdout.strip()), (0, "workspace"), cp.stderr)
+    def test_the_dispatcher_asks_cmd_syncs_table_and_nothing_else_decides(self):
+        args = decl.parse("sync", cmd.COMMAND, ["myws"])[1]
+        self.assertEqual(cmd.COMMAND.where(args, mock.Mock(in_workspace=lambda: False)), "workspace")
 
 
 class Steps(sync.Sync):

@@ -9,10 +9,11 @@ import sys
 import unittest
 
 from tests.fakes import FakeRegistry, FakeDriver
-from tests.support import REPO, WkTest, clean_env, run
+from tests.support import REPO, WkTest, clean_env, load_cmd, run
 from tests.test_bench_report import in_process
 
 sys.path.insert(0, str(REPO / "lib"))
+from wk import decl  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import cli, record, report  # noqa: E402
 from tests.fakes import FakeClock  # noqa: E402
@@ -358,17 +359,21 @@ def refusal(fn, *args):
     raise AssertionError("%s did not refuse" % fn.__name__)
 
 
+def where(reg, *words):
+    return cli.where(decl.parse("bench", load_cmd("bench").COMMAND, list(words))[1], reg)
+
+
 class TestWhere(WkTest):
 
     def test_each_verb_answers_where_it_runs(self):
         reg = registry(self.tmp)
-        self.assertEqual(cli.where(REPO, reg, ["ls"]), "local")
-        self.assertEqual(cli.where(REPO, reg, ["ls", "--continued"]), "store")
-        self.assertEqual(cli.where(REPO, reg, ["seed", "cws", "jetstream3"]), "workspace")
-        self.assertEqual(cli.where(REPO, reg, ["seed", "guest", "jetstream3"]), "host")
-        self.assertEqual(cli.where(REPO, reg, ["report", "t"]), "host")
-        self.assertEqual(cli.where(REPO, reg, ["run", "ws", "p", "--system", "mbp"]), "host", "a Mac's bench volume holds no workspace")
-        self.assertEqual(cli.where(REPO, reg, ["run", "ws", "p", "--system=rpi3"]), "workspace")
+        self.assertEqual(where(reg, "ls"), "local")
+        self.assertEqual(where(reg, "ls", "--continued"), "store")
+        self.assertEqual(where(reg, "seed", "cws", "jetstream3"), "workspace")
+        self.assertEqual(where(reg, "seed", "guest", "jetstream3"), "host")
+        self.assertEqual(where(reg, "report", "t"), "host")
+        self.assertEqual(where(reg, "run", "ws", "p", "--system", "mbp"), "host", "a Mac's bench volume holds no workspace")
+        self.assertEqual(where(reg, "run", "ws", "p", "--system=rpi3"), "workspace")
 
     def test_a_workspace_no_target_answers_for_is_asked_for_here(self):
         reg = registry(self.tmp)
@@ -376,7 +381,7 @@ class TestWhere(WkTest):
         def nowhere(ws):
             raise LookupError(ws)
         reg.ws_place = nowhere
-        self.assertEqual(cli.where(REPO, reg, ["seed", "gone", "p"]), "host")
+        self.assertEqual(where(reg, "seed", "gone", "p"), "host")
 
 
 class TestThroughWk(WkTest):

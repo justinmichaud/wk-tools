@@ -1,53 +1,44 @@
-#!/usr/bin/env python3
-#
-# wk status [<workspace> [--log]] -- what is happening, without guessing
-# wk: where=workspace name=optional here readonly group=workspaces
-# wk: opts --records,--json,--wait,--timeout=,--holds=,--log,--follow,-f,--all,-a,--gates,-g
-# wk: flag --log,--follow,-f,--all,-a,--gates,-g name=required here=no
-#
-# The workspaces on every place this machine knows and the tasks each store
-# records: their state, steps, holds, kill command and log. Read from the
-# records builds and tasks write, not a process list; what is healthy is
-# `wk doctor`'s.
-#
-# Exit status:
-#   0  idle or last build succeeded
-#   1  last build failed
-#   2  busy: a build running or `silent` (no log output for WK_STALL_SECONDS,
-#      inside the `abort_after` it recorded), or a workspace being created
-#   3  a build stalled and its watchdog killed it
-#   4  a workspace needs a person: a creation nothing is driving, a build
-#      silent past its `abort_after`, an environment removed under the record,
-#      an unreadable task record, an unreachable machine, or a workspace that
-#      did not answer about its job's pid (`unanswered`)
-#
-# The table is the default; --json prints the merged document.
-#
-#   --holds <res>   the live tasks in this machine's store holding <res>
-#   --records       the records, one JSON object per line
-#   --wait          block while busy (exit 2), then report; --timeout=<s>
-#                   stops waiting without claiming the work stopped
-#
-#   <workspace> --log   its newest log (its build, an image stage, its creation),
-#                       normalised, with the first error and the last output
-#     --follow, -f   stream it
-#     --all, -a      print all of it
-#     --gates, -g    the readings this build was collected under
+"""what is happening, without guessing
 
+The workspaces on every place this machine knows and the tasks each store records: their state, steps, holds, kill
+command and log. Read from the records builds and tasks write, not a process list; what is healthy is `wk doctor`'s.
+The table is the default; --json prints the merged document.
+
+Exit status:
+  0  idle or last build succeeded
+  1  last build failed
+  2  busy: a build running or `silent` (no log output for WK_STALL_SECONDS, inside the `abort_after` it recorded), or
+     a workspace being created
+  3  a build stalled and its watchdog killed it
+  4  a workspace needs a person: a creation nothing is driving, a build silent past its `abort_after`, an environment
+     removed under the record, an unreadable task record, an unreachable machine, or a workspace that did not answer
+     about its job's pid (`unanswered`)
+"""
 import json
-import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+from wk import images, pgo, places, record, statusview, store
+from wk.act import die, info, warn
+from wk.clock import Clock
+from wk.decl import Command, Opt
+from wk.record import Records
+from wk.status import Walk, wait
 
 ROOT = images.root()
-
-from wk import decl, pgo, places, record, statusview  # noqa: E402
-from wk.act import Refused, die, info, warn  # noqa: E402
-from wk.clock import Clock  # noqa: E402
-from wk.record import Records  # noqa: E402
-from wk.status import Walk, wait  # noqa: E402
+LOG = dict(name="required", here=False)
+COMMAND = Command(name="optional", here=True, readonly=True, group="workspaces", opts=(
+    Opt("--records", "the records, one JSON object per line"),
+    Opt("--json", "the merged document"),
+    Opt("--wait", "block while busy (exit 2), then report"),
+    Opt("--timeout", "with --wait: stop waiting without claiming the work stopped", value="<s>"),
+    Opt("--holds", "the live tasks in this machine's store holding <res>", value="<res>"),
+    Opt("--log", "its newest log (its build, an image stage, its creation), normalised, with the first error and the "
+        "last output", sets=LOG),
+    Opt("--follow", "with --log: stream it", sets=LOG), Opt("-f", "the same as --follow", sets=LOG),
+    Opt("--all", "with --log: print all of it", sets=LOG), Opt("-a", "the same as --all", sets=LOG),
+    Opt("--gates", "with --log: the readings this build was collected under", sets=LOG),
+    Opt("-g", "the same as --gates", sets=LOG)))
+LOG_FLAGS = ("--log", "--follow", "-f", "--all", "-a", "--gates", "-g")
 
 
 def holders(resource):
@@ -56,9 +47,6 @@ def holders(resource):
     for t in records.holders(resource):
         print(t.line())
     return 0
-
-
-LOG_FLAGS = ("--log", "--follow", "-f", "--all", "-a", "--gates", "-g")
 
 
 def show_log(args):
@@ -72,52 +60,32 @@ def show_log(args):
     if rest:
         die("--log shows the log alone: drop %s" % " ".join(rest))
     name = store.ws_name()
-    if not name:
-        die("wk status --log needs a workspace name")
     reg = places.Registry(ROOT)
-    try:
-        driver = reg.load(reg.ws_place(name))
-    except LookupError as e:
-        die(str(e))
+    driver = reg.load(reg.ws_place(name))
     if modes == ["gates"]:
         return pgo.show_gates(driver, name)
     return record.show_log(driver, name, modes[0] if modes else "", "" if reg.in_workspace() else " " + name)
 
 
-def main(argv):
-    args = decl.Args(decl.Decl(__file__), argv)
-    if any(args.flag(f) for f in LOG_FLAGS):
-        return show_log(args)
-    if args.value("--holds") is not None:
-        return holders(args.value("--holds"))
-    name = store.ws_name() or None
-    waited = None
-    if args.flag("--wait"):
-        waited = wait(lambda: Walk(ROOT, name=name).worst_only(), int(args.value("--timeout") or 0), Clock(), name, info, warn)
-    walk = Walk(ROOT, name=name)
-    if args.flag("--records"):
-        for r in walk.records(markers=False):
-            print(json.dumps(r, separators=(",", ":")))
-    elif args.flag("--json"):
-        json.dump(statusview.merge(walk.records()), sys.stdout, indent=2)
-        sys.stdout.write("\n")
-    else:
-        statusview.render_text_stream(walk.records(), sys.stdout, statusview.colour_wanted())
-    return verdict(waited, walk)
-
-
-def verdict(waited, walk):
-    """--wait's exit is the answer the wait confirmed, not the walk after it."""
-    return walk.worst if waited is None else waited
-
-
-if __name__ == "__main__":
+def main(args, inv):
     try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
+        if any(args.flag(f) for f in LOG_FLAGS):
+            return show_log(args)
+        if args.value("--holds") is not None:
+            return holders(args.value("--holds"))
+        name = store.ws_name() or None
+        waited = None
+        if args.flag("--wait"):
+            waited = wait(lambda: Walk(ROOT, name=name).worst_only(), int(args.value("--timeout") or 0), Clock(), name, info, warn)
+        walk = Walk(ROOT, name=name)
+        if args.flag("--records"):
+            for r in walk.records(markers=False):
+                print(json.dumps(r, separators=(",", ":")))
+        elif args.flag("--json"):
+            json.dump(statusview.merge(walk.records()), sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            statusview.render_text_stream(walk.records(), sys.stdout, statusview.colour_wanted())
+        return walk.worst if waited is None else waited   # --wait's exit is the answer the wait confirmed
     except LookupError as e:
-        sys.stderr.write("error: %s\n" % e)
-        sys.exit(1)
-    except KeyboardInterrupt:
-        sys.exit(130)
+        die(str(e))

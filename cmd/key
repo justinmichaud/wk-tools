@@ -1,86 +1,72 @@
-#!/usr/bin/env python3
-#
-# wk key check|setup|set|deploy|show|ensure|sudo -- the credentials this machine holds and its sudo policy
-# wk: where=host name=none group=sources needs gh,gh-auth takes=1 default=check verbs=check,setup,deploy,show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,ensure,adopt readonly check,show,pub,sshtest,fingerprints,verdict,give
-# wk: sub show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo needs=
-# wk: sub set,pub,sshtest,adopt,verdict,give takes=2
-# wk: sub set opts=--replace,--paste
-# wk: sub deploy,setup opts=--rotate
-# wk: sub sudo takes=2 opts=--on=,--all destructive=
-#
-#   wk key setup [--rotate]   every credential this machine needs, and one working credential of each kind on
-#                     every workstation: the one its issuer accepts wins (a tie goes to this machine) and is put on
-#                     every workstation holding another; when none works, this machine mints or asks for one. A build
-#                     machine is sent nothing. Asks once, first; can be killed and re-run
-#                       --rotate  turn every credential over instead: `deploy --rotate`, then `set <name> --replace`
-#   wk key set <name> [--replace] [--paste]
-#                     store one credential by name, or report on the one already here
-#                       --replace  rotate it: the old one is removed first
-#                       --paste    take the value on stdin instead of minting or asking for one
-#                     <name> is a row of lib/credcheck.py:
-#                       github-pat        a classic 'public_repo' token `git-webkit pr` opens a pull request with
-#                       bugzilla-api-key  what `git-webkit pr` files the bug with
-#                       claude            the Claude Code token (`claude setup-token`) a build box starts with
-#                       litellm           the API key `wk ai pi` reaches your LiteLLM endpoint with
-#                       tailnet           the fleet's tailnet auth key, seeded onto every card written here
-#                       tailnet-api       the tailnet API token that retires a stale fleet node
-#                       ntfy              the ntfy.sh topic notifications go to; minted here
-#   wk key deploy [--rotate]  the deploy keys alone, as `setup` does them, registered on GitHub with write
-#                     access. Asks once, first
-#                       --rotate  remove the old keys from GitHub and mint fresh ones
-#   wk key check      what every credential here and on each other workstation can do, asked now, and what needs
-#                     doing under `needs you:`. Read-only; what a bare `wk key` runs
-#   wk key show       the public halves, and the ntfy topic URL for a phone
-#   wk key ensure     create missing push keys without registering them
-#   wk key sudo [status|setup] [--on <machine>|--all]
-#                     root costs a password with a 30-second window, through
-#                     /etc/sudoers.d/zz-<user>-passwd. `status` (the default) reports; `setup` installs it,
-#                     checked by `visudo -c` before and after. Exits 0 when that policy holds, 1 otherwise
-#                       --on <machine>  the same, on a configured machine
-#                       --all           every configured machine, and this one
-#
-# For another workstation or `wk status` to call:
-#   wk key pub <key>         that deploy key's public half
-#   wk key sshtest <key>     does that deploy key authenticate, and as what
-#   wk key fingerprints      every key here, its fingerprint and its state
-#   wk key verdict <name>    one stored credential's verdict and fingerprint
-#   wk key adopt <key>       take a shared deploy key's private half on stdin
-#   wk key give <key>|<name> print that credential, the other half of `adopt`
-#
-# <key> is a deploy key of a repo in lib/wk/project.json's REPOS. Every credential is put to its lib/credcheck.py
-# rule when stored and when reported: one that cannot do its job is refused, one that reaches further is kept with
-# that reach named, one no network could judge is kept as unverified.
+"""the credentials this machine holds and its sudo policy
 
+  wk key setup [--rotate]   every credential this machine needs, and one working credential of each kind on every
+                    workstation: the one its issuer accepts wins (a tie goes to this machine) and is put on every
+                    workstation holding another; when none works, this machine mints or asks for one. A build machine
+                    is sent nothing. Asks once, first; can be killed and re-run. --rotate turns every credential over
+                    instead: `deploy --rotate`, then `set <name> --replace`
+  wk key set <name> [--replace] [--paste]
+                    store one credential by name, or report on the one already here. <name> is a row of
+                    lib/credcheck.py:
+                      github-pat        a classic 'public_repo' token `git-webkit pr` opens a pull request with
+                      bugzilla-api-key  what `git-webkit pr` files the bug with
+                      claude            the Claude Code token (`claude setup-token`) a build box starts with
+                      litellm           the API key `wk ai pi` reaches your LiteLLM endpoint with
+                      tailnet           the fleet's tailnet auth key, seeded onto every card written here
+                      tailnet-api       the tailnet API token that retires a stale fleet node
+                      ntfy              the ntfy.sh topic notifications go to; minted here
+  wk key deploy [--rotate]  the deploy keys alone, as `setup` does them, registered on GitHub with write access
+  wk key check      what every credential here and on each other workstation can do, asked now, and what needs doing
+                    under `needs you:`. What a bare `wk key` runs
+  wk key show       the public halves, and the ntfy topic URL for a phone
+  wk key ensure     create missing push keys without registering them
+  wk key sudo [status|setup] [--on <machine>|--all]
+                    root costs a password with a 30-second window, through /etc/sudoers.d/zz-<user>-passwd. `status`
+                    reports; `setup` installs it, checked by `visudo -c` before and after. Exits 0 when that policy
+                    holds, 1 otherwise
+
+For another workstation or `wk status` to call:
+  wk key pub <key>         that deploy key's public half
+  wk key sshtest <key>     does that deploy key authenticate, and as what
+  wk key fingerprints      every key here, its fingerprint and its state
+  wk key verdict <name>    one stored credential's verdict and fingerprint
+  wk key adopt <key>       take a shared deploy key's private half on stdin
+  wk key give <key>|<name> print that credential, the other half of `adopt`
+
+<key> is a deploy key of a repo in lib/wk/project.json's REPOS. Every credential is put to its lib/credcheck.py rule
+when stored and when reported: one that cannot do its job is refused, one that reaches further is kept with that reach
+named, one no network could judge is kept as unverified.
+"""
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images  # noqa: E402
+from wk import images, sudo
+from wk.decl import Command, Opt
+from wk.key import cli
+from wk.machine import Local
+from wk.places import Registry
 
 ROOT = images.root()
+ROTATE = Opt("--rotate", "turn every credential over instead of reusing the ones that work")
+COMMAND = Command(where="host", needs=("gh", "gh-auth"), default="check", group="sources", subs={
+    "check": dict(readonly=True), "setup": dict(destructive=True, opts=(ROTATE,)),
+    "deploy": dict(destructive=True, opts=(ROTATE,)), "show": dict(readonly=True, needs=()), "ensure": dict(needs=()),
+    "pub": dict(takes=("<key>",), readonly=True, needs=()), "sshtest": dict(takes=("<key>",), readonly=True, needs=()),
+    "fingerprints": dict(readonly=True, needs=()),
+    "set": dict(takes=("<name>",), needs=(), opts=(Opt("--replace", "rotate it: the old one is removed first",
+                                                        sets=dict(destructive=True)),
+                                                    Opt("--paste", "take the value on stdin instead of minting or asking for one"))),
+    "adopt": dict(takes=("<key>",), needs=()), "verdict": dict(takes=("<name>",), readonly=True, needs=()),
+    "give": dict(takes=("<key>|<name>",), readonly=True, needs=()),
+    "sudo": dict(needs=(), default="status", subs={"status": dict(readonly=True), "setup": {}},
+                 opts=(Opt("--on", "the same, on a configured machine", value="<machine>"),
+                       Opt("--all", "every configured machine, and this one"))),
+})
 
-from wk import decl, sudo  # noqa: E402
-from wk.key import cli  # noqa: E402
-from wk.act import Refused  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from wk.places import Registry  # noqa: E402
 
-
-def main(argv, env=None, reg=None):
-    args = decl.Args(decl.Decl(__file__), argv)
-    words = args.positionals
-    verb = words[0]
+def main(args, inv, env=None, reg=None):
+    verb, words = args.positionals[0], args.positionals[1:]
     if verb == "sudo":
-        return sudo.main(words[1:], args.value("--on"), args.flag("--all"),
+        return sudo.main(words, args.value("--on"), args.flag("--all"),
                          reg or Registry(ROOT, os.environ if env is None else env, Local()), env=env)
-    return cli.main(ROOT, verb, words[1] if len(words) > 1 else "", rotate=args.flag("--rotate"),
+    return cli.main(ROOT, verb, words[0] if words else "", rotate=args.flag("--rotate"),
                     replace=args.flag("--replace"), paste=args.flag("--paste"))
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

@@ -8,7 +8,7 @@ import unittest
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl as D  # noqa: E402
+from wk import decl  # noqa: E402
 
 BUILTINS = ("help", "completion")
 REF = re.compile(r"""(?:['`]|:\s+|\w=\S*\s+|/\s)wk ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?""")
@@ -21,13 +21,13 @@ def stale(text, decls):
     for m in REF.finditer(text):
         cmd, verb = m.groups()
         d = decls.get(cmd)
-        if cmd in BUILTINS or d and not (d.verbs and not d.default and verb and not D.in_list(verb, d.verbs)):
+        if cmd in BUILTINS or d and not (d.subs and not d.default and verb and verb not in d.subs):
             continue
         yield text.count("\n", 0, m.start()) + 1, " ".join(filter(None, m.groups()))
 
 
 def hits():
-    decls = {d.name: d for d in D.all_commands(REPO)}
+    decls = {name: m.COMMAND for name, m in decl.commands(REPO)}
     out = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard"],
                          cwd=REPO, capture_output=True, text=True, check=True).stdout.splitlines()
     for rel in sorted(set(out)):
@@ -44,7 +44,7 @@ def hits():
 
 class TestCommandNames(unittest.TestCase):
     def test_a_retired_command_or_verb_is_caught(self):
-        decls = {d.name: d for d in D.all_commands(REPO)}
+        decls = {name: m.COMMAND for name, m in decl.commands(REPO)}
         said = "run 'wk vm start <name>'\n  then:  wk bench mac <ws> --preflight\nWK_X=1 wk start ws\n'wk help push'"
         self.assertEqual([w for _, w in stale(said, decls)], ["vm start", "bench mac"])
 

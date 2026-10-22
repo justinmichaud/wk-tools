@@ -1,68 +1,52 @@
-#!/usr/bin/env python3
-#
-# wk sync [<workspace>|--mirror|--on <place|machine>|--all|--tools [<place|machine>]] [--fix] -- bring WebKit and the tooling up to date
-# wk: where=dynamic name=optional group=sources needs git dryrun opts --all,--on=,--tools,--mirror,--fix broker --mirror
-#
-# A fetch, and never a checkout: no branch is switched, merged or rebased. A
-# workspace stays on the snapshot it was made from.
-#
-#   wk sync                    this machine: its tooling, its one WebKit mirror,
-#                              a new snapshot, then a fetch in every workspace
-#                              here -- the containers and the macOS guests
-#   wk sync                    inside a workspace: the mirror, then a fetch in
-#                              this one. The mirror is mounted read-only in
-#                              there, so the refresh is asked of the machine
-#                              through the request broker
-#   wk sync <workspace>        a fetch in that one workspace, from its mirror
-#   wk sync --mirror           the mirror alone (asked of the broker in the
-#                              podman VM); a refresh that moves a ref remounts
-#                              the mirror share in each running guest
-#   wk sync --on <place|machine>
-#                              that one's furniture, then its workspaces
-#   wk sync --all              every place's furniture, then its workspaces
-#   wk sync --tools [<place|machine>]
-#                              the furniture alone: a machine's copy of
-#                              wk-tools, its WebKit mirror, and a new snapshot.
-#                              One place's, or all.
-#
-# Each fetch also reads the checkout's wiring back: `origin` is upstream
-# (fetch-only, push URL `no-push://`), each fork pushes over ssh through its
-# host alias, and a fetch reads the machine's mirror. A deviation is named
-# under the workspace, and so is one in the snapshot every new workspace
-# starts from.
-#
-#   --fix   before each fetch, re-assert the wiring, point the branch at the
-#           fork it pushes to, and finish `git-webkit setup` in a container or
-#           guest. Only git config and the commit hooks change -- never a
-#           commit or a working tree -- and a checkout already right is left
-#           as it is
-#
-#   WK_DEBUG=1          per-stage timing on stderr: 'stage <name>: <n>s'
-#   WK_BRANCH=<branch>  publish the snapshot from this remote-tracking branch
-#                       (origin/safari-7620-branch, wpe/wpe-2.46), not origin/main
-#
-#   0  everything in scope was brought up to date and is wired right
-#   1  something did not take, did not fetch, or is wired wrong (above)
+"""bring WebKit and the tooling up to date
 
-import os
-import sys
+A fetch, and never a checkout: no branch is switched, merged or rebased. A workspace stays on the snapshot it was made
+from.
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
-from wk import images, store  # noqa: E402
+  wk sync                    this machine: its tooling, its one WebKit mirror, a new snapshot, then a fetch in every
+                             workspace here -- the containers and the macOS guests
+  wk sync                    inside a workspace: the mirror, then a fetch in this one. The mirror is mounted read-only
+                             in there, so the refresh is asked of the machine through the request broker
+  wk sync <workspace>        a fetch in that one workspace, from its mirror
+  wk sync --mirror           the mirror alone (asked of the broker in the podman VM); a refresh that moves a ref
+                             remounts the mirror share in each running guest
+  wk sync --on <place|machine>   that one's furniture, then its workspaces
+  wk sync --all              every place's furniture, then its workspaces
+  wk sync --tools [<place|machine>]
+                             the furniture alone: a machine's copy of wk-tools, its WebKit mirror, and a new snapshot.
+                             One place's, or all.
+
+Each fetch also reads the checkout's wiring back: `origin` is upstream (fetch-only, push URL `no-push://`), each fork
+pushes over ssh through its host alias, and a fetch reads the machine's mirror. A deviation is named under the
+workspace, and so is one in the snapshot every new workspace starts from.
+
+  WK_DEBUG=1          per-stage timing on stderr: 'stage <name>: <n>s'
+  WK_BRANCH=<branch>  publish the snapshot from this remote-tracking branch (origin/safari-7620-branch,
+                      wpe/wpe-2.46), not origin/main
+
+  0  everything in scope was brought up to date and is wired right
+  1  something did not take, did not fetch, or is wired wrong (above)
+"""
+from wk import images, places, store, sync, workspace
+from wk.act import die
+from wk.clock import Clock
+from wk.decl import Command, Opt
+from wk.lock import Lock
 
 ROOT = images.root()
-
-from wk import decl, places, sync, workspace  # noqa: E402
-from wk.act import Refused, die  # noqa: E402
-from wk.clock import Clock  # noqa: E402
-from wk.lock import Lock  # noqa: E402
-
 USAGE = "usage: wk sync [<workspace>|--mirror|--on <place|machine>|--all|--tools [<place|machine>]] [--fix]"
+COMMAND = Command(where=lambda args, reg: sync.where(reg.in_workspace(), args), name="optional", needs=("git",),
+                  group="sources", opts=(
+    Opt("--all", "every place's furniture, then its workspaces"),
+    Opt("--on", "that one's furniture, then its workspaces", value="<place|machine>"),
+    Opt("--tools", "the furniture alone: wk-tools, the WebKit mirror and a new snapshot, of one place or all"),
+    Opt("--mirror", "the mirror alone, asked of the request broker", sets=dict(broker=True)),
+    Opt("--fix", "before each fetch, re-assert the wiring and finish `git-webkit setup`; only git config and the "
+        "commit hooks change")))
 
 
-def parse(argv, name=""):
+def parse(args, name=""):
     """(scope, the workspace named, the place named, --fix): ws | here | place | all | tools | mirror."""
-    args = decl.Args(decl.Decl(__file__), argv)
     scope, spelled, place = "", "", ""
 
     def set_scope(s, as_typed):
@@ -71,47 +55,28 @@ def parse(argv, name=""):
             die("%s and %s ask for different things -- one at a time.\n    %s" % (spelled, as_typed, USAGE))
         scope, spelled = s, as_typed
 
-    values = args.values("--on")
+    values, tools, named = args.values("--on"), args.flag("--tools"), args.name
     if len(values) > 1:
         die("one place at a time (got '%s' and '%s')" % (values[0], values[1]))
     if values:
         place = values[0]
-    tools = args.flag("--tools")
-
-    positionals = list(args.positionals)
-    if tools and positionals:
-        place = positionals.pop(0)
-
-    scope_named = {"--all": "all" if args.flag("--all") else None,
-                  "--mirror": "mirror" if args.flag("--mirror") else None,
-                  "--on": "place" if values else None, "--tools": "tools" if tools else None}
+    if tools and named:
+        place, named = named, None
+    scope_named = {"--all": "all" if args.flag("--all") else None, "--mirror": "mirror" if args.flag("--mirror") else None,
+                   "--on": "place" if values else None, "--tools": "tools" if tools else None}
     for opt in args.order:   # two scopes are refused in the order they were typed
-        named = scope_named.get(opt)
-        if named is not None:
-            set_scope(named, opt)
-
-    if positionals:
-        workspace.require_name(positionals[0])
-        name = positionals[0]
+        if scope_named.get(opt) is not None:
+            set_scope(scope_named[opt], opt)
+    if named:
+        workspace.require_name(named)
+        name = named
     if name:
         set_scope("ws", "'%s'" % name)
     return scope or "here", name, place, args.flag("--fix")
 
 
-def main(argv):
+def main(args, inv):
     reg = places.Registry(ROOT)
-    if argv[:1] == ["--where"]:
-        print(sync.where(reg.in_workspace(), argv[1:]))
-        return 0
-    scope, name, place, fix = parse(argv, store.ws_name())
+    scope, name, place, fix = parse(args, store.ws_name())
     clock = Clock()
     return sync.Sync(reg, clock, Lock(reg.store, reg.machine, clock), scope, name, place, fix).run()
-
-
-if __name__ == "__main__":
-    try:
-        sys.exit(main(sys.argv[1:]))
-    except Refused as e:
-        sys.exit(e.status)
-    except KeyboardInterrupt:
-        sys.exit(130)

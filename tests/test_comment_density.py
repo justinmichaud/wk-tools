@@ -38,7 +38,7 @@ def tracked_source_files():
         path = REPO / rel
         if path.is_symlink() or not path.is_file():
             continue
-        if rel.endswith(SOURCE_SUFFIXES):
+        if rel.endswith(SOURCE_SUFFIXES) or rel.startswith("cmd/"):
             yield rel, path
         elif not os.path.splitext(rel)[1]:
             try:
@@ -106,11 +106,11 @@ def python_counts(src):
 
 
 def prints_its_own_usage(rel, src):
-    return rel.startswith("cmd/") or 'usage_block "$0"' in src
+    return 'usage_block "$0"' in src
 
 
 def is_python_source(rel, lines):
-    if rel.endswith(".py"):
+    if rel.endswith(".py") or rel.startswith("cmd/"):
         return True
     return bool(lines) and lines[0].startswith("#!") and "python3" in lines[0]
 
@@ -126,6 +126,8 @@ def body_ratio(rel, path):
                                     or not lines[end].strip()):
             end += 1
 
+    if rel.startswith("cmd/"):   # a command's module docstring is its -h, held to the help-text rule instead
+        end = ast.parse(src).body[0].end_lineno
     if is_python_source(rel, lines):
         return python_counts("\n".join(lines[end:]))
     return shell_counts(lines[end:])
@@ -153,13 +155,12 @@ class TestCommentDensity(unittest.TestCase):
         nonblank, prose = python_counts("x = 1  # explains why x has to be 1\n")
         self.assertEqual((nonblank, prose), (1, 1))
 
-    def test_a_cmd_python_files_docstring_counts_and_its_help_block_does_not(self):
+    def test_a_cmd_modules_docstring_is_its_help_and_a_functions_counts(self):
         src = (
-            "#!/usr/bin/env python3\n"
-            "#\n"
-            "# wk thing <workspace> -- do a thing\n"
-            "# wk: where=workspace name=required\n"
+            "\"\"\"do a thing\n"
             "\n"
+            "What it does, at length.\n"
+            "\"\"\"\n"
             "def f():\n"
             "    \"\"\"Explains what f does.\"\"\"\n"
             "    return 1\n"
