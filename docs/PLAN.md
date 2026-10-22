@@ -1170,16 +1170,20 @@ exist.
    7.2 ∥ **The command table and the dispatcher.** The `# wk:` DSL, the
      argv arithmetic and the cmd bootstrap go; `cmd/*` are tables plus one
      function; `completion` and help come from the table.
-   7.3 ∥ **`Machine` and the `Driver` contract.** `places.py` to the twenty
-     methods; `PodmanVm`/`TartExec` as `Ssh` argv; one readiness wait.
+   7.3 ∥ **`Machine` and the `Driver` contract.** *Landed 2026-10-22* (`Driver.CONTRACT`/`FIELDS` checked by
+     `TestTheContract` over Container, Vm, LocalWorkspace, Remote and `Peer`; `Ssh.podman`/`Ssh.tart` are the one
+     `Ssh`; one copy path; one readiness wait `wait_ready`; one git probe `git.probe`; the fakes live in
+     `tests/fakes.py`). Rows: machine 491 of 400, places 1,781 of 950, workspace 2,552 of 1,150.
    7.4 ∥ **The record and the fleet.** *Landed 2026-10-22* (`record.Records.claim`/`holds=` absorb `Budget` and
      `busy_reason`; `fleet.each`/`ask`/`listing` replace six fan-outs; `Clock.wait_until` is the one wait).
      Row `record`: 1,155 of 550.
    7.5 ∥ **Diagnostics.** *Landed 2026-10-22* (`doctor` owns the daemons, the guest desktop and load rows, the
      machine-local table and `--all`; `status` reports machines, workspaces and tasks as text, `--json`, `--wait`).
      Row `status`: 1,723 of 700.
-   7.6 ∥ **Credentials and the wall.** One delivery, one verdict line,
-     `credcheck` imported; the per-caller bridge (fix-bridge) is the rule.
+   7.6 ∥ **Credentials and the wall.** *Landed 2026-10-22* (`secrets.deliver` for containers, guests and build
+     boxes; `credcheck` imported, one verdict line; `wall.measure` the one run-and-decide; `wk ai` ends its far
+     session on a signal; the per-exec bridge serving only its command's tree is the push rule). Row secrets:
+     2,454 of 1,150.
    7.7 ∥ **The bench `System`, `Run` and `AB`.** *Landed 2026-10-22* (`systems.System` over Container, Guest,
      Board and Mac `Volume`; one `Run`; `ab.AB` with `Arm(system, slot, args)` and `Rounds`; the fleet orchestrator
      is `change.py`; `stage` is `deploy`, `staged` is `run --system`; the autorun runs the AB in process).
@@ -1190,8 +1194,10 @@ exist.
      dry-run printer; the `_ws` halves read their own preset; the old-helper probes and the never-varied knobs are
      gone; the SDK's edits are the fork's `wk` branch at `SDK_PIN`). Row `sysimage`: 3,767 of 950 -- the card
      verbs, the Mac volume's provisioning and the two in-workspace builder halves remain.
-   7.10 ∥ **Guests and daemons.** The one supervisor; `guest.py`'s findings
-     into `doctor`. (The conveniences in `container/bin/` are gone.)
+   7.10 ∥ **Guests and daemons.** *Landed 2026-10-22* (`lib/wk/daemons.py` renders and converges the proxy, push
+     service, injector and broker on the host, in the podman machine and in a guest; `guest.py` is start, boot,
+     forwards and admission; `machine_cmd` is a kind table). Row guest: 2,387 of 900. Owed: the in-guest
+     LaunchDaemons of `vm/provision-base.sh` as rows (needs a base rebuild to test).
    7.11 **Tests by cluster.** After each package lands: the push service,
      credential, dispatcher, status, A/B, bench-run, boot and lifecycle
      clusters each to one module; `test_owed_live` generated.
