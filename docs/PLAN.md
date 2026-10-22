@@ -16,7 +16,7 @@ Measured 2026-10-22 12:00 MST on the host, after the day's cuts (`./wk selftest`
 | the slowest unit test | 10.8 s (`test_crash_only`'s stage converge), under the 30 s budget the runner enforces |
 | owed tests | 28 lint (the budget rows, `lint.no_addresses`, `lint.one_wifi_reader`, `lint.test_shape`), 55 in the unit tier counting the owed-live stubs |
 | the Owed table | `tests/test_owed_live.py` is generated from it at import: one stub per `live`/`unit` name no test holds (78) |
-| the last live run from the host | 2026-10-22, lane 15 on a1dee01: 171 tests, 2 failures, both answered since (a stale integ-container from lane 14; the guest base rebuilt from the tree at 11:40 MST) |
+| the last live run from the host | 2026-10-22, lane 16 on b5b423a: 171 tests, 1 failure (`git-webkit setup` did not finish in one of the lane's three fresh workspaces; the other two and the dev-integration rows ran it), and the guest rows on the rebuilt base: 13 of 14 `DevIntegrationTart` steps and all six `TestTheLiveWayIn`/`TestTheLiveRemount` rows green, the 14th being the doctor's store row the stopped podman machine withholds |
 
 Why bugs come back:
 
