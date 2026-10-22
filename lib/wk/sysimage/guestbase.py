@@ -31,9 +31,9 @@ def image(env):
     return env.get("WK_VM_IMAGE") or IMAGE
 
 
-def mirror_env_words():
-    from wk.places import GUEST_MIRROR_MOUNT, GUEST_MOUNT_MIRROR, MIRROR_TAG
-    return " ".join(("WK_MIRROR_TAG=" + MIRROR_TAG, "WK_MIRROR_MOUNT=" + GUEST_MIRROR_MOUNT, "WK_MOUNT_MIRROR=" + GUEST_MOUNT_MIRROR))
+def mount_mirror_word():
+    from wk.places import GUEST_MOUNT_MIRROR
+    return "WK_MOUNT_MIRROR=" + GUEST_MOUNT_MIRROR
 
 
 def inputs_hash(root, env):
@@ -41,7 +41,7 @@ def inputs_hash(root, env):
     for rel in INPUTS:
         with open(os.path.join(root, rel), "rb") as f:
             h.update(f.read())
-    h.update(("image=%s\nuser=%s\n" % (image(env), guest.vm_user(env))).encode() + mirror_env_words().encode())
+    h.update(("image=%s\nuser=%s\n" % (image(env), guest.vm_user(env))).encode() + mount_mirror_word().encode())
     return h.hexdigest()[:16]
 
 
@@ -263,7 +263,7 @@ class Base:
     def run_provisioning(self, g):
         """Detached and polled: provisioning is minutes, and a dropped connection takes a foreground exec with it."""
         argv = ["env", "WK_VM_DISPLAY=" + guest.display(self.env), "WK_VM_USER=" + self.vm.user(),
-                "WK_VM_PASSWORD=" + guest.password(self.env), *mirror_env_words().split(), "bash",
+                "WK_VM_PASSWORD=" + guest.password(self.env), mount_mirror_word(), "bash",
                 self.vm.tools(self.name) + "/vm/provision-base.sh"]
         if not g.act_run(["sh", "-c", job.remote_line(argv, PLOG, PRC)]).ok:
             die("could not start base provisioning in '%s'" % self.name)

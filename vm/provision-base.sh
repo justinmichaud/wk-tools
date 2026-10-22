@@ -41,44 +41,15 @@ sudo systemsetup -setcomputersleep Never >/dev/null 2>&1 || true
 WK_VM_USER="${WK_VM_USER:-admin}"
 WK_VM_PASSWORD="${WK_VM_PASSWORD:-admin}"
 
-WK_VM_DISPLAY="${WK_VM_DISPLAY:-1280x800}"
-WK_VM_DISPLAY_W="${WK_VM_DISPLAY%x*}"
-WK_VM_DISPLAY_H="${WK_VM_DISPLAY#*x}"
-
 { ( . "$WK_TOOLS_DIR/bench/mac-quiet-desktop.sh"; wk_quiet_desktop_script )
   cat "$WK_TOOLS_DIR/bench/mac-pyobjc.sh" "$WK_TOOLS_DIR/vm/desktop.sh"
 } | WK_VM_PASSWORD="$WK_VM_PASSWORD" bash -s
 
-sudo -n tee /Library/LaunchDaemons/org.wk.nosleep.plist >/dev/null <<'PLIST'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>org.wk.nosleep</string>
-  <key>ProgramArguments</key>
-  <array><string>/usr/bin/caffeinate</string><string>-dimsu</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><true/>
-</dict></plist>
-PLIST
-sudo -n launchctl bootout system/org.wk.nosleep 2>/dev/null || true
-sudo -n launchctl bootstrap system /Library/LaunchDaemons/org.wk.nosleep.plist 2>/dev/null || true
-
-: "${WK_MIRROR_TAG:?}" "${WK_MIRROR_MOUNT:?}" "${WK_MOUNT_MIRROR:?}"
+: "${WK_MOUNT_MIRROR:?}"
 sudo -n mkdir -p "$(dirname "$WK_MOUNT_MIRROR")"
 sudo -n install -m 0755 "$WK_TOOLS_DIR/vm/mount-mirror.sh" "$WK_MOUNT_MIRROR"
-sudo -n tee /Library/LaunchDaemons/org.wk.mirror.plist >/dev/null <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>org.wk.mirror</string>
-  <key>ProgramArguments</key>
-  <array><string>$WK_MOUNT_MIRROR</string><string>$WK_MIRROR_TAG</string><string>$WK_MIRROR_MOUNT</string></array>
-  <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-</dict></plist>
-PLIST
 
-# A login agent, because the CoreGraphics mode-picking call errors against a sleeping display. Do not raise the size: it is a floor on the tart window, and a large one makes the window unresizable.
+# Set by a login agent, since CoreGraphics' mode pick errors against a sleeping display. WK_VM_DISPLAY is a floor on the tart window: a large one makes it unresizable.
 mkdir -p "$HOME/.local/bin"
 cat > "$HOME/.local/bin/wk-set-display.m" <<'OBJC'
 #import <Foundation/Foundation.h>
@@ -103,20 +74,6 @@ OBJC
 clang -fobjc-arc -framework Foundation -framework CoreGraphics \
     "$HOME/.local/bin/wk-set-display.m" -o "$HOME/.local/bin/wk-set-display" 2>/dev/null ||     echo "warning: could not build wk-set-display; the guest will stay at its default resolution" >&2
 
-mkdir -p "$HOME/Library/LaunchAgents"
-cat > "$HOME/Library/LaunchAgents/org.wk.display.plist" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>org.wk.display</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$HOME/.local/bin/wk-set-display</string>
-    <string>${WK_VM_DISPLAY_W:-1280}</string>
-    <string>${WK_VM_DISPLAY_H:-800}</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-</dict></plist>
-PLIST
+PYTHONPATH="$WK_TOOLS_DIR/lib" python3 -m wk.daemons guest nosleep mirror display
 
 say "base provisioning complete"

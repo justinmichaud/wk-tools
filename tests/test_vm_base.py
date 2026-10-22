@@ -163,7 +163,7 @@ class TestTheBaseIsBuiltOnce(BaseTest):
         self.assertEqual([a[1] for a in self.w.streamed], ["pull", "clone"], "the tens-of-GB pull and the clone stream to the log")
         self.assertEqual([e[1] for e in self.w.effects if e[0] == "spawn"], [(TART, "run", "--no-graphics", "wk-base")] * 2)
         (started,) = [c for c in self.w.guest_cmds if "nohup" in c]
-        self.assertIn("WK_MIRROR_TAG=%s" % places.MIRROR_TAG, started)
+        self.assertIn("WK_MOUNT_MIRROR=%s" % places.GUEST_MOUNT_MIRROR, started)
         self.assertTrue([c for c in self.w.guest_cmds if "wc -c" in c], "nothing polled the detached log")
         self.assertIn("ssh-ed25519 AAAA wk-vm", [c for c in self.w.guest_cmds if "authorized_keys" in c][0])
         self.assertIn("inputs=%s\nfinished=" % guestbase.inputs_hash(str(REPO), self.w.env), self.marker())
