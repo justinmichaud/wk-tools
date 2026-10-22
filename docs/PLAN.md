@@ -136,7 +136,7 @@ Answered 2026-10-21 (second batch): kept in the workspace loop are `run --profil
 
 Answered 2026-10-05 (sixth batch): each repo has its own push identity (wk-tools its own deploy key); commands declare the repos they serve and the dispatcher refuses the rest; on a Mac the host-side injector holds and refreshes the claude.ai login and the podman VM's injector forwards Claude traffic to it, so a guest never needs the podman VM (the two VMs do not fit the Mac's memory envelope together); the injector adds the bearer for api.anthropic.com, claude.ai and platform.claude.com.
 
-Answered 2026-10-22: the Mac's bench default is set by hand in a later session (`wk boot mbp --status` read `firmware_default=the host install` at 08:10 MST, so `live boot.arm[mbp]`, `bench[mbp]` and `doctor.bench_readiness[mbp]` wait for it); a sudoers drop-in written at a container's first run keeps the bridge's proxy and CA variables across `sudo`, so a plain `sudo apt-get` has the network; the guest's three launchd jobs (nosleep, mirror, display) are `daemons.py` rows and the golden base is rebuilt in the session that lands them; `./setup --stage sdk` on Linux is owed to a session on moose (the podman VM's checkout is at `SDK_PIN`, the head of the fork's `wk` branch, measured); every bench, sysimage, secrets, places, workspace, status and guest behaviour stays except build snapshots, the ntfy publish and the build-box dependency findings, which go; the `cmd` row counts tables and `main` only (a command's docstring is its help, held by the help-text rule) and the bodies of `test`, `ai`, `run`, `pr`, `gui` and `stop` move into their lib modules; the budget table carries two numbers per row, the budget (10k and 15k stand) and the interim lint holds now -- the measured size after the day's cuts, lowered as each dedup pass lands and never raised; the tests are redesigned as regression tests (step 7.13), end to end through the dispatcher against the fake world, designed in this file first and rewritten module by module afterwards.
+Answered 2026-10-22: the Mac's bench default is set by hand in a later session (`wk boot mbp --status` read `firmware_default=the host install` at 08:10 MST, so `live boot.arm[mbp]`, `bench[mbp]` and `doctor.bench_readiness[mbp]` wait for it); a plain `sudo <command>` in a container workspace runs under a root bridge of its own through a `sudo` shim in `container/bin` (measured: a sudoers `env_keep` keeps the variables but the person's bridge cannot name a root client and refuses it 403, and the SDK's own `/etc/sudoers.d/sudoers` is not mode 0440, so a post-install `visudo -c` fails; the fork's `.wkdev-init` fix is owed); the guest's three launchd jobs (nosleep, mirror, display) are `daemons.py` rows and the golden base is rebuilt in the session that lands them; `./setup --stage sdk` on Linux is owed to a session on moose (the podman VM's checkout is at `SDK_PIN`, the head of the fork's `wk` branch, measured); every bench, sysimage, secrets, places, workspace, status and guest behaviour stays except the snapshot's bookkeeping (the SNAP column, `snap_behind`, the `wk ls` footer and `Snapshots.verify`; the overlay and the hard-linked snapshot refresh stay), the ntfy publish and the build-box dependency findings, which go; a command the broker runs never runs `./setup` (the setup restarts the broker serving it, measured); the `cmd` row counts tables and `main` only (a command's docstring is its help, held by the help-text rule) and the bodies of `test`, `ai`, `run`, `pr`, `gui` and `stop` move into their lib modules; the budget table carries two numbers per row, the budget (10k and 15k stand) and the interim lint holds now -- the measured size after the day's cuts, lowered as each dedup pass lands and never raised; the tests are redesigned as regression tests (step 7.13), end to end through the dispatcher against the fake world, designed in this file first and rewritten module by module afterwards.
 
 ## Cutting it down
 
@@ -246,25 +246,25 @@ three); no test asserts prose, README text, comment counts or line counts
 except the lint rules, which are one module with a rule table. `test_owed_live`
 is generated from the Owed table.
 
-**Budgets per package** (Python non-blank; lint holds each):
+**Budgets per package** (Python non-blank). The budget is the goal each row is owed; the interim is what lint holds now (measured 2026-10-22 after the day's cuts, in `tests/test_lint_budgets.py`), lowered as a dedup pass lands and never raised; a `cmd/*` file counts without its docstring, which is its help:
 
-| package | today | budget | tests today | tests budget |
-| --- | --- | --- | --- | --- |
-| dispatcher: `dispatch`, `decl`, `act`, `completion`, `wk` | 1,230 | 800 | 1,734 | 900 |
-| `machine` | 773 | 400 | 554 | 500 |
-| `places` and the drivers | 1,816 | 950 | 1,135 | 1,000 |
-| record, job, lock, resources, clock | 1,174 | 550 | 1,500 | 700 |
-| workspace, build, sync, pr, git, presets, store, tools, agents | 2,350 | 1,150 | 6,001 | 1,800 |
-| wall, pushgate, secrets, key, credcheck, ai, sudo | 3,000 | 1,150 | 5,400 | 2,000 |
-| status, doctor, gc, ls, fleet, reach | 2,100 | 700 | 1,600 | 900 |
-| bench, pgo, sched, scores | 7,300 | 1,300 | 9,500 | 2,200 |
-| boot | 1,433 | 650 | 3,000 | 1,100 |
-| sysimage, images, slot | 3,900 | 950 | 4,300 | 1,400 |
-| guest, mac, quiet, session, screen, notify, tailnet, machine_cmd | 2,600 | 900 | 3,300 | 1,000 |
-| `cmd/*` | 2,763 | 500 | -- | -- |
-| lint rules | -- | -- | 1,300 | 700 |
-| live bodies | -- | -- | 2,000 | 800 |
-| **sum** | **~30k + 2.8k cmd** | **10,000** | **~41k** | **15,000** |
+| package | today | budget | interim | tests today | tests budget | tests interim |
+| --- | --- | --- | --- | --- | --- | --- |
+| dispatcher: `dispatch`, `decl`, `act`, `completion`, `wk` | 1,230 | 800 | 773 | 1,734 | 900 | 932 |
+| `machine` | 773 | 400 | 491 | 554 | 500 | 1,786 |
+| `places` and the drivers | 1,816 | 950 | 1,786 | 1,135 | 1,000 | 4,020 |
+| record, job, lock, resources, clock | 1,174 | 550 | 1,242 | 1,500 | 700 | 2,700 |
+| workspace, build, sync, pr, git, presets, store, tools, agents | 2,350 | 1,150 | 3,010 | 6,001 | 1,800 | 5,748 |
+| wall, pushgate, secrets, key, credcheck, ai, sudo | 3,000 | 1,150 | 2,600 | 5,400 | 2,000 | 4,724 |
+| status, doctor, gc, ls, fleet, reach | 2,100 | 700 | 1,703 | 1,600 | 900 | 2,635 |
+| bench, pgo, sched, scores | 7,300 | 1,300 | 6,319 | 9,500 | 2,200 | 6,790 |
+| boot | 1,433 | 650 | 1,261 | 3,000 | 1,100 | 2,243 |
+| sysimage, images, slot | 3,900 | 950 | 3,756 | 4,300 | 1,400 | 3,060 |
+| guest, mac, quiet, session, screen, notify, tailnet, machine_cmd | 2,600 | 900 | 2,221 | 3,300 | 1,000 | 3,514 |
+| `cmd/*` | 2,763 | 500 | 951 | -- | -- | -- |
+| lint rules | -- | -- | -- | 1,300 | 700 | 2,070 |
+| live bodies | -- | -- | -- | 2,000 | 800 | 151 |
+| **sum** | **~30k + 2.8k cmd** | **10,000** | **26,113** | **~41k** | **15,000** | **42,178** |
 
 ## Testing, concretely
 
