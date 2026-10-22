@@ -1144,8 +1144,10 @@ class Container(Driver):
         h = "/home/%s" % u
         if not self.machine.run(self.podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
             act.info("installing openssh-server in '%s' (once per workspace; Zed needs an sshd to talk to)" % ws)
+            # `;` not `&&`: ddebs.ubuntu.com mid-sync fails the update (measured 2026-10-22) while the archive's indices
+            # landed, and the install from them is the verdict.
             r = self.machine.act_run(self.podman() + ["exec", c, BRIDGE, "/bin/sh", "-c",
-                                                        "apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server"])
+                                                        "apt-get update -qq; apt-get install -y -qq --no-install-recommends openssh-server"])
             show(r)
             if not r.ok or not self.machine.run(self.podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
                 act.die("could not install openssh-server in '%s'.\n    A refused fetch is 'DENY <host>:<port>' in"
