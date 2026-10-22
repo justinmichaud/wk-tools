@@ -60,7 +60,6 @@ class Report:
 
 
 def machine_images(env, vm_name):
-    """(podman's machine directory, the raw disk images of `vm_name` in it)."""
     data = env.get("XDG_DATA_HOME") or os.path.join(env.get("HOME", HOME), ".local", "share")
     mdir = os.path.join(data, "containers", "podman", "machine")
     return mdir, glob.glob(os.path.join(mdir, "*", vm_name + "-*.raw")) + glob.glob(os.path.join(mdir, "*", vm_name + ".raw"))
