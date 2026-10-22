@@ -19,7 +19,7 @@ from unittest import mock
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, pushgate, repos, secrets  # noqa: E402
+from wk import pushgate, repos, secrets  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
 
@@ -521,8 +521,8 @@ class TestEveryWorkspaceIsWiredToTheClient(WkTest):
         client = "container/push/wk-push-client.py"
         self.assertTrue(os.access(REPO / client, os.X_OK))
         self.assertIn('git config --global core.sshCommand "$WK_TOOLS/%s"' % client, (REPO / "container" / "firstrun.sh").read_text())
-        self.assertIn('git config --global core.sshCommand "$WK_TOOLS/%s"' % client, guest.CHECKOUT)
-        for text in ((REPO / "container" / "firstrun.sh").read_text(), guest.CHECKOUT):
+        self.assertIn('git config --global core.sshCommand "$WK_TOOLS/%s"' % client, (REPO / "vm" / "checkout.sh").read_text())
+        for text in ((REPO / "container" / "firstrun.sh").read_text(), (REPO / "vm" / "checkout.sh").read_text()):
             self.assertIn("git config --global ssh.variant ssh", text, "git would probe the client with -G")
         self.assertEqual(Place(Fake()).tools_src(), str(REPO))
 

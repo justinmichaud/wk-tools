@@ -1,5 +1,4 @@
 wk_eval wk.store paths
-. "$WK_ROOT/host/units.sh"
 
 WK_MACHINE="${WK_MACHINE:-wk}"; export WK_MACHINE   # wk.places podman-vm reads it from the environment
 
@@ -137,22 +136,7 @@ else
     changed "webkit-container-sdk at $_sdk_head_after"
 fi
 
-debug "installing the egress proxy in the machine"
-
-# %t in a unit body expands to /run/user/501: the machine's `core` is uid 501.
-_unit_root=/opt/wk-tools
-_unit_store=/var/lib/wk
-_unit_journal="podman machine ssh $WK_MACHINE -- "
-
-unit_start wk-proxy.service "$_unit_root" "$_unit_store" \
-    "workspaces will have no egress" "$_unit_journal" _rsh
-
-unit_start wk-push.service "$_unit_root" "$_unit_store" \
-    "no workspace here can push" "$_unit_journal" _rsh
-
-unit_start wk-github-inject.service "$_unit_root" "$_unit_store" \
-    "'git-webkit pr' in a workspace will fail" "$_unit_journal" _rsh
-unit_prune _rsh
+wk_eval wk.daemons vm proxy push github-inject
 
 if [ "$(_rsh 'git config --global --get include.path' 2>/dev/null)" = /opt/wk-tools/dotfiles/gitconfig ]; then
     unchanged "the machine's git identity and speed settings come from dotfiles/gitconfig"
@@ -168,5 +152,5 @@ else
   workspace answers 401 ('wk key set github-pat' stores one) and a push is refused"
 fi
 
-unset _state _ssh_port _ssh_key _ssh_user _unpinned _unit_root _unit_store _unit_journal _pb _pb_state _pb_changed
+unset _state _ssh_port _ssh_key _ssh_user _unpinned _pb _pb_state _pb_changed
 unset -f _verify_mounts _playbook_verdict

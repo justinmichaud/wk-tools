@@ -2,8 +2,8 @@
 
 import hashlib
 import os
-import re
 
+import treehash
 from wk import secrets
 from wk.kv import kv
 from wk.machine import Local
@@ -17,31 +17,8 @@ def digest(value):
     return hashlib.sha256((value + "\n").encode()).hexdigest()[:16]
 
 
-ON_BOX = ("wk_remote_deps", "wk_remote_family", "wk_remote_build_env_vars")
-
-
-def code_lines(text):
-    out = []
-    for line in text.splitlines():
-        line = re.sub(r"\s{2,}#\s.*$", "", line).strip()
-        if line and not line.startswith("#"):
-            out.append(line)
-    return out
-
-
-def shell_function(text, name):
-    lines = text.splitlines()
-    start = next(i for i, l in enumerate(lines) if l.startswith(name + "() {"))
-    end = next(i for i in range(start, len(lines)) if lines[i].rstrip() == "}")
-    return "\n".join(lines[start:end + 1])
-
-
 def inputs_hash(root):
-    """What provisions and probes a machine, recorded in its ~/.wk-remote: a comment or a reindent changes nothing."""
-    read = lambda f: open(os.path.join(str(root), "remote", f)).read()
-    deps_text = read("deps.sh")
-    parts = [read("provision.sh"), read("probe.sh")] + [shell_function(deps_text, fn) for fn in ON_BOX]
-    return hashlib.sha256("\n".join("\n".join(code_lines(p)) for p in parts).encode()).hexdigest()[:16]
+    return treehash.digest(os.path.join(str(root), "remote"), set())[:16]
 
 
 def deps(root):

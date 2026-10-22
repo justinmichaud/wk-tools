@@ -10,7 +10,7 @@ from wk.machine import Local, is_macos
 from wk.store import Store
 
 RECORD = "setup-applied"
-LAUNCH_AGENTS = ("com.wk.inject", "com.wk.broker")
+LAUNCH_AGENTS = ("com.wk.github-inject", "com.wk.broker")   # the agents ./setup installs (lib/wk/daemons.py)
 
 
 def tree(root, machine):

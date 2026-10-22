@@ -1,12 +1,10 @@
-"""What a macOS guest is given by the host daemons it shares: the injector's CA and placeholders, its tokens, and a proxy kept on the program in the tree.
+"""What a macOS guest is given by the host daemons it shares: the injector's CA and placeholders, and its tokens.
 `tart` and `ssh` are stubs whose guest is a scratch directory.
 """
 import contextlib
 import io
 import os
-import subprocess
 import sys
-import time
 import unittest
 from unittest import mock
 
@@ -14,7 +12,7 @@ from tests.support import (guest_step, REPO,
                            WkTest, stub_path)
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import guest, places  # noqa: E402
+from wk import daemons, guest, places  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 # `tart`: one running guest called wk-demo, and the guest itself as a directory. `tart exec` hands the guest's
@@ -100,7 +98,6 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
         self.assertFalse((home / ".wk-ca-bundle.pem").exists())
 
 
-# TEST-NET-1: a real Host kills whatever listens on its proxy address, so never the live guest bridge's.
 def _host(case, **env):
     """A Host over this machine and a scratch vm store, as a macOS host has one."""
     mac = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
@@ -119,23 +116,6 @@ def _quiet(fn, *args):
     return result, err.getvalue()
 
 
-class TestTheInjectorReadinessProbe(WkTest):
-    """`nc -z -U` answers 1 for a served unix socket on macOS, so the probe connects in python."""
-
-    def test_only_a_served_socket_reads_as_running(self):
-        import socket as sk
-        host = _host(self)
-        served, dead = sk.socket(sk.AF_UNIX), sk.socket(sk.AF_UNIX)
-        served.bind(str(self.tmp / "served.sock"))
-        served.listen(1)
-        self.addCleanup(served.close)
-        dead.bind(str(self.tmp / "dead.sock"))
-        dead.close()
-        for name, want in (("served.sock", True), ("dead.sock", False), ("absent.sock", False)):
-            with self.subTest(name=name), mock.patch.object(host, "path", lambda _n: str(self.tmp / name)):
-                self.assertEqual(want, host.inject_running())
-
-
 class TestTheGuestsInjectorGetsTheStandingCredentials(WkTest):
 
     def _start_inject(self, vmstore, pat=None, bz=None):
@@ -149,7 +129,7 @@ class TestTheGuestsInjectorGetsTheStandingCredentials(WkTest):
             else:
                 (held / name).write_text(value)
         host = _host(self, WK_VM_STORE=str(vmstore))
-        with mock.patch.object(host, "inject_running", lambda: True):
+        with mock.patch.object(daemons, "answers", lambda m, sock: True):
             return _quiet(host.start_inject)
 
     def files(self, vmstore):
@@ -184,40 +164,12 @@ class TestEveryGuestStartConvergesTheCredentials(WkTest):
         (vmstore / "vm").mkdir(parents=True, exist_ok=True)
         read_pat.write_text("ghp-yesterdays\n")
         host = _host(self, WK_VM_PROXY_ADDR="192.0.2.1")
-        with mock.patch.object(host, "proxy_running", lambda: True), mock.patch.object(host, "inject_running", lambda: True):
+        with mock.patch.object(host, "ensure", lambda word: True), mock.patch.object(daemons, "answers", lambda m, sock: True), \
+                mock.patch.object(host.clock, "wait_until", lambda *a: True):
             ok, err = _quiet(host.start_proxy)
         self.assertTrue(ok, err)
         self.assertEqual("ghp-todays\n", read_pat.read_text())
 
-class TestAHostDaemonOlderThanItsSourceIsRestarted(WkTest):
-    """A daemon whose pidfile is older than container/proxy's sources is restarted."""
-
-    def _run(self, stamp):
-        pidfile = self.tmp / "proxy.pid"
-        pid = int(subprocess.run(["sh", "-c", "sleep 60 >/dev/null 2>&1 & echo $!"], capture_output=True,
-                                 text=True).stdout.strip())
-        self.addCleanup(lambda: subprocess.run(["kill", str(pid)], capture_output=True))
-        pidfile.write_text("%d\n" % pid)
-        os.utime(pidfile, (stamp, stamp))
-        host = _host(self, WK_VM_PROXY_ADDR="192.0.2.1")
-        _, err = _quiet(host.restart_if_stale, str(pidfile), "egress proxy", host.proxy_where())
-        deadline = time.time() + 5
-        while time.time() < deadline and subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0:
-            time.sleep(0.1)
-        alive = subprocess.run(["kill", "-0", str(pid)], capture_output=True).returncode == 0
-        return alive, pidfile.exists(), err
-
-    def test_one_started_before_its_source_changed_is_stopped(self):
-        alive, kept, err = self._run(time.mktime((2001, 1, 1, 0, 0, 0, 0, 0, -1)))
-        self.assertFalse(alive, err)
-        self.assertFalse(kept)
-        self.assertIn("restarting the egress proxy", err, err)
-
-    def test_one_started_after_is_left_alone(self):
-        alive, kept, err = self._run(time.mktime((2030, 1, 1, 0, 0, 0, 0, 0, -1)))
-        self.assertTrue(alive, err)
-        self.assertTrue(kept)
-        self.assertNotIn("restarting", err)
 
 if __name__ == "__main__":
     unittest.main()
