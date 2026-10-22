@@ -1467,6 +1467,17 @@ def ssh_config_forwards_no_agent():
         ["ForwardAgent in Host %s" % h for h, b in blocks.items() if "forwardagent" in b.lower()]
 
 
+# lint.test_shape (step 7.13): a unit test enters through the dispatcher and names no lib module.
+LIB_NAMED = re.compile(r"^\s*(?:from wk\b|import wk\b)|patch(?:\.object)?\(\s*[\"']?wk\.", re.M)
+
+
+@rule(owed_because="every unit module imports or patches a lib module today; lands module by module (PLAN step 7.13)")
+def test_shape():
+    """A tests/test_*.py of the unit tier imports no `wk` module and patches no `wk.` name."""
+    return sorted(rel for rel in tracked() if rel.startswith("tests/test_") and rel.endswith(".py")
+                  and "TIER = \"live\"" not in text_of(rel) and "TIER = 'live'" not in text_of(rel) and LIB_NAMED.search(text_of(rel)))
+
+
 class Lint(unittest.TestCase):
     pass
 
