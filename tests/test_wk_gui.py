@@ -46,6 +46,7 @@ def _refused(case, fn):
 
 class TestRefusesARemotePlace(unittest.TestCase):
     def test_a_remote_target_is_refused_before_anything_else(self):
+        """`unit gui.refuses_remote`"""
         driver = _driver(kind="remote")
         with mock.patch.object(GUI.places, "Registry", return_value=_registry(driver)), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}):

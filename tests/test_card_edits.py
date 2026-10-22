@@ -61,7 +61,6 @@ JSON
 
 
 class CardEditTest(WkTest):
-
     def setUp(self):
         super().setUp()
         self.boot = self.tmp / "boot"

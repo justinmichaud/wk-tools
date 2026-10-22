@@ -3,12 +3,13 @@ merged in, and a place that was not asked is named."""
 import contextlib
 import io
 import json
+import os
 import sys
 import unittest
 from unittest import mock
 
 from tests.fakes import FakeDriver, FakeRegistry
-from tests.support import REPO, as_dispatched, fake_workspace, load_cmd, run
+from tests.support import REPO, as_dispatched, fake_workspace, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.fakes import Fake  # noqa: E402
@@ -45,10 +46,16 @@ class TestOneTable(unittest.TestCase):
 class TestInsideAWorkspace(unittest.TestCase):
     """From inside a workspace BASE and CHANGES are not applicable: the host holds them."""
 
+    def listed(self, ws, *argv):
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, ws.env()), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            ls.main(as_dispatched("ls", list(argv)), None)
+        return out.getvalue()
+
     def test_base_and_changes_are_not_applicable(self):
         with fake_workspace() as ws:
-            table = run("ls", env=ws.env()).stdout.splitlines()
-            doc = json.loads(run("ls", "--json", env=ws.env()).stdout)
+            table = self.listed(ws).splitlines()
+            doc = json.loads(self.listed(ws, "--json"))
         self.assertEqual(table[1].split(), ["selftest-ws", "local", "running", "n/a", "-", "native", "n/a"])
         (row,) = doc["workspaces"]
         self.assertEqual((row["base"], row["changes"]), ("n/a", "n/a"))

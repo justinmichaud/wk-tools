@@ -7,19 +7,19 @@ import shlex
 import signal
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeProc, FakeRegistry, WsDriver
-from tests.killpoints import converges
+from tests import fakes
+from tests.fakes import FakeProc, FakeRegistry, FlowTest, WsDriver
 from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, decl, dispatch, job, record, project, screen  # noqa: E402
+from wk import guest, job, record, project, resources, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import record as brecord, systems  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
+from wk.bench import board, mac_ab, pipeline, record as brecord, report, systems  # noqa: E402
 from wk.machine import Local, Result, Ssh  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
@@ -28,14 +28,6 @@ PLAN_JSON = json.dumps({"git_repository": {"url": "https://example.com/bench.git
 JSC_LOG = b'wk: bench pid 77\nScore: 12\n{"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [12.0]}}}}}}\n'
 RESULT = json.dumps({"Speedometer-3": {"metrics": {"Score": {"current": [30.0, 31.0]}}}})
 CMD = load_cmd("bench")
-
-
-class Acting:
-    """A machine that records each mutation as asked, so a dry run's plan can be compared with a wet run's effects."""
-
-    def act_run(self, argv, **kw):
-        self.effects.append(("act", tuple(argv)))
-        return super().act_run(argv, **kw)
 
 
 class StubWatch:
@@ -52,29 +44,8 @@ class StubWatch:
         return list(getattr(self.m, "drew", []))
 
 
-class CleanTest(unittest.TestCase):
-    """A scratch directory, and none of the knobs a run reads left set by the caller."""
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-bench-"))
-        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, True))
-        saved = dict(os.environ)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_DESTRUCTIVE", "WK_DEVICE_HELD", "WK_BENCH_ASLR", "WK_BENCH_PATH_PAD", "WK_BENCH_ENV_PAD"):
-            os.environ.pop(v, None)
-        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
-        self.addCleanup(act._forced.clear)
-
-    def same_plan(self, make, run, mutations):
-        """A dry run's plan is the wet run's mutations, and it makes none of them; returns (wet, dry)."""
-        wet, dry = make(), make()
-        run(wet)
-        os.environ["WK_DRY_RUN"] = "1"
-        try:
-            run(dry)
-        finally:
-            del os.environ["WK_DRY_RUN"]
-        self.assertEqual(*[[tuple(str(x).replace(str(w.tmp), "") for x in e) for e in mutations(w)] for w in (wet, dry)])
-        return wet, dry
+class CleanTest(FlowTest):
+    UNSET = FlowTest.UNSET
 
 
 class BenchDriver(WsDriver):
@@ -89,18 +60,13 @@ class BenchDriver(WsDriver):
         return Local(), os.path.join(self.store.ws_dir(ws), "bench")
 
 
-class World(Acting, Fake):
+class World(fakes.World):
     """This host benchmarking workspace `ws` on a container or a guest: the build is there, the payload
     is seeded, the machine is quiet, and the benchmark writes what run-benchmark or cli.js would."""
 
     def __init__(self, tmp, kind="container"):
-        super().__init__("here")
-        self.fake, self.kind, self.rc = self, kind, 0
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "XDG_RUNTIME_DIR": "/run/user/1", "WK_NAME": "ws",
-                    "WK_IN_VM": "1", "WK_JOB_PID_TRIES": "0", "WK_POLL_SECONDS": "1"}
-        self.clock = FakeClock()
+        super().__init__(tmp, XDG_RUNTIME_DIR="/run/user/1", WK_NAME="ws", WK_IN_VM="1", WK_JOB_PID_TRIES="0", WK_POLL_SECONDS="1")
+        self.kind, self.rc = kind, 0
         os.makedirs(os.path.join(self.env["WK_STORE"], "ws", "ws"))   # the workspace's directory, where its tasks live
         self.seed_dest = os.path.join(self.env["WK_STORE"], "cache", "bench", "jetstream3-" + SHA[:12])
         self.dirs.add(os.path.join(self.seed_dest, ".wk-seeded"))
@@ -210,8 +176,55 @@ class BenchTest(CleanTest):
         return json.loads((self.run_dir(w) / "env.json").read_text())
 
 
+class SystemConformance:
+    """What every bench System does, run once per system. A system's class gives `bench(*argv)` (rc, stderr) for a run
+    of `PLAN`, `outcome()` once it ran, and `kill()` (rc, stderr) with nothing running, which ends `KILL_RC` saying
+    `KILL_SAYS`; `SCREEN` says whether a run is bracketed by the screen watch."""
+    SCREEN, KILL_SAYS = True, "no bench is running"
+
+    def test_a_run_is_the_one_pipeline_into_the_one_record(self):
+        rc, err = self.bench()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("BENCH OK  %s" % self.PLAN, err)
+        self.assertEqual(self.outcome(), self.OUTCOME)
+
+    def test_the_run_is_bracketed_by_the_screen_watch_where_there_is_a_screen(self):
+        self.bench()
+        self.assertEqual([e for e in self.w.effects if e[0] == "watch"], [("watch", "start", 0), ("watch", "stop", 1)] if self.SCREEN else [])
+
+    def test_a_kill_with_nothing_running_says_so(self):
+        rc, err = self.kill()
+        self.assertEqual(rc, self.KILL_RC, err)
+        self.assertIn(self.KILL_SAYS, err)
+
+
+class WorkspaceSystem(SystemConformance):
+    PLAN, OUTCOME, KILL_RC = "speedometer3", ("complete", 1, "0"), 0
+
+    def bench(self):
+        return self.run_(self.w, "run", self.PLAN, "--preset", self.PRESET)
+
+    def outcome(self):
+        return self.w.state()
+
+    def kill(self):
+        return self.run_(None, "run", "--kill")
+
+
+class TestTheContainerSystem(WorkspaceSystem, BenchTest):
+    PRESET = "wpe-release"
+
+
+class TestTheGuestSystem(WorkspaceSystem, BenchTest):
+    PRESET = "mac-release"
+
+    def setUp(self):
+        super().setUp()
+        self.w = World(self.tmp, "vm")
+
+
 class TestConformance(BenchTest):
-    def test_each_system_runs_the_one_pipeline_into_the_one_record(self):
+    def test_each_plan_records_where_it_ran(self):
         for kind, plan, preset, host in (("container", "jetstream3", "jsc-release", "container"),
                                          ("container", "speedometer3", "wpe-release", "container"),
                                          ("vm", "jetstream3", "jsc-release", "guest"),
@@ -220,8 +233,6 @@ class TestConformance(BenchTest):
                 w = World(self.tmp, kind)
                 rc, err = self.run_(w, "run", plan, "--preset", preset)
                 self.assertEqual(rc, 0, err)
-                self.assertIn("BENCH OK  %s" % plan, err)
-                self.assertEqual(w.state(), ("complete", 1, "0"))
                 env = self.env_json(w)
                 self.assertEqual((env["bench_host"], env["preset"], env["plan"], env["webkit_sha"]), (host, preset, plan, SHA))
                 self.assertTrue((self.run_dir(w) / "result.json").is_file(), err)
@@ -320,7 +331,6 @@ class TestInterrupted(BenchTest):
 
 
 class TestARestart(BenchTest):
-
     ARGV = ("run", "jetstream3", "--preset", "jsc-release")
 
     def first(self):
@@ -438,11 +448,6 @@ class TestRefusals(BenchTest):
 
 
 class TestAMeasuredRunIsWatchedThroughout(BenchTest):
-
-    def test_the_run_is_bracketed_by_the_watch(self):
-        self.run_(None, "run", "speedometer3", "--preset", "wpe-release")
-        self.assertEqual([e for e in self.w.effects if e[0] == "watch"], [("watch", "start", 0), ("watch", "stop", 1)])
-
     def test_a_dry_run_starts_no_watch(self):
         os.environ["WK_DRY_RUN"] = "1"
         self.run_(None, "run", "speedometer3", "--preset", "wpe-release")
@@ -481,37 +486,142 @@ class TestRootDevice(unittest.TestCase):
         self.assertEqual(systems.linux_disk(f.run, f.read, "/"), "unknown")
 
 
-class TestKill(BenchTest):
-    def test_nothing_running_says_so(self):
-        rc, err = self.run_(None, "run", "--kill")
-        self.assertEqual(rc, 0)
-        self.assertIn("no bench is running in 'ws'", err)
+class TestCoresValid(unittest.TestCase):
+    def test_the_documented_shapes_and_nothing_else(self):
+        for spec, ok in (("0-3", True), ("2,3", True), ("0-1,4", True), ("7", True),
+                         ("a", False), ("1-", False), ("-1", False), ("1,,2", False)):
+            with self.subTest(spec=spec), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    pipeline.check_cores(spec)
+                    self.assertTrue(ok)
+                except Refused:
+                    self.assertFalse(ok)
 
 
-class TestDryRun(BenchTest):
-    def test_the_plan_is_the_runs_mutations(self):
-        def mutations(w):
-            locks = w.env["WK_LOCK_DIR"]
-            return [e for e in w.effects if e[0] in ("act", "write", "mkdir", "remove", "copy_in", "copy_out", "copy_tree_in", "spawn", "kill")
-                    and not (isinstance(e[1], str) and e[1].startswith(locks))]
-        for kind, preset in (("container", "wpe-release"), ("vm", "mac-release")):
-            with self.subTest(kind=kind):
-                wet, dry = self.same_plan(lambda: World(self.tmp, kind), lambda w: setattr(w, "said", self.run_(w, "run", "speedometer3", "--preset", preset)[1]),
-                                          mutations)
-                self.assertTrue(mutations(wet))
-                self.assertIn("would run: " + " ".join(shlex.quote(a) for a in wet.watched[0]).replace(str(wet.tmp), str(dry.tmp)), dry.said)
-                self.assertEqual((dry.watched, dry.tasks(), dry.recs().list()), ([], [], []))
+class TestAPinnedRun(BenchTest):
+    """`unit bench.pins_cores`: a run pins the cores it records."""
+
+    def test_a_container_run_is_exec_d_under_taskset_and_records_it(self):
+        rc, err = self.run_(None, "run", "jetstream3", "--preset", "jsc-release", "--cores", "0-3")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("exec taskset -c 0-3 ", self.w.watched[0][-1])
+        self.assertEqual(self.env_json()["cores"], {"set": "0-3", "pinned": True})
+
+    def test_an_unpinned_run_records_that_it_was_not(self):
+        self.run_()
+        self.assertNotIn("taskset", self.w.watched[0][-1])
+        self.assertEqual(self.env_json()["cores"], {"set": "", "pinned": False})
+
+    def test_a_guest_records_its_vcpu_count_and_refuses_a_pin(self):
+        w = World(self.tmp, "vm")
+        self.assertIn("no pin exists on macOS; the guest's vCPU count is not a pin",
+                      self.said("run", "jetstream3", "--preset", "jsc-release", "--cores", "0-1", w=w))
+        self.run_(w, "run", "jetstream3", "--preset", "jsc-release")
+        self.assertEqual(self.env_json(w)["host"]["cores"], "4")
+
+    def test_an_invalid_set_is_refused_before_anything_runs(self):
+        self.assertIn("is not a valid Linux cpu list", self.said("run", "jetstream3", "--cores", "a-b"))
+        self.assertEqual(self.w.effects, [])
 
 
-class TestKillPoints(BenchTest):
-    def test_a_run_killed_after_any_effect_and_rerun_converges(self):
-        for kind, preset in (("container", "wpe-release"), ("vm", "mac-release")):
-            def run_once(w, preset=preset):
-                w.clock.t += 1
-                with contextlib.redirect_stderr(io.StringIO()):
-                    invoke(w, ("run", "speedometer3", "--preset", preset))
-            with self.subTest(kind=kind):
-                converges(self, lambda: World(self.tmp, kind), run_once, World.state)
+def failing_df():
+    m = Fake()
+    m.answer(["df", "-Pk"], rc=1, err="df: no such file")
+    return m
+
+
+def disk_admit():
+    b = resources.Budget(failing_df(), {})
+    b.disk_admit("this build", 60, b.free_gb("/s"), "/s")
+
+
+def disk_admit_on_garbage():
+    resources.Budget(Fake(), {}).disk_admit("this build", 60, resources.parse_df("garbage"), "the guest")
+
+
+def host_disk():
+    guest.host_disk(types.SimpleNamespace(machine=failing_df(), env={}))
+
+
+def load_row():
+    system = types.SimpleNamespace(here=Fake(), reg=types.SimpleNamespace(env={}), host_os="linux")
+    rows = systems.System.idle_rows(system, types.SimpleNamespace(list=lambda: []))
+    if brecord.failed(rows):
+        raise Refused(1)
+
+
+class TestAnUnmeasuredPreflightIsUnknownNotFailure(unittest.TestCase):
+    CASES = {"disk_admit on a df that fails": disk_admit,
+             "disk_admit on a df nobody can parse": disk_admit_on_garbage,
+             "host_disk on a df that fails": host_disk,
+             "the bench machine-idle row on an unreadable load average": load_row}
+
+    def test_each_goes_ahead(self):
+        for name, check in self.CASES.items():
+            with self.subTest(name), contextlib.redirect_stderr(io.StringIO()):
+                check()
+
+    def test_a_measured_shortfall_still_refuses(self):
+        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()):
+            resources.Budget(Fake(), {}).disk_admit("this build", 60, 1, "/s")
+
+    def test_an_unreadable_word_size_does_not_refuse_the_profiler_stage(self):
+        run = types.SimpleNamespace(board="b", doc={}, bench=lambda: Fake(), facts_={})
+        leg = types.SimpleNamespace(o={}, slot="s")
+        with contextlib.redirect_stderr(io.StringIO()):
+            board.Board.profiler_stage(run, leg)
+
+    def test_an_unread_clock_is_not_a_failed_clock_check(self):
+        system = types.SimpleNamespace(clk={}, display="hdmi", throttled=lambda: "", doc={})
+        rows, _ = board.Board.checks(system, types.SimpleNamespace(slot="a"))
+        self.assertEqual([], brecord.failed(rows))
+        self.assertEqual(["clock pinned"], [what for _, what, _ in brecord.unmeasured(rows)])
+
+    def test_a_measured_unpinned_clock_still_fails(self):
+        system = types.SimpleNamespace(clk={"min": "600000", "max": "1400000"}, display="hdmi", throttled=lambda: "", doc={})
+        rows, _ = board.Board.checks(system, types.SimpleNamespace(slot="a"))
+        self.assertEqual(["clock pinned"], [what for _, what, _ in brecord.failed(rows)])
+
+    def test_an_absent_staging_root_or_bench_home_refuses_the_preflight(self):
+        for root, failed in (("", "staging root"), ("/r", "bench home")):
+            mac = types.SimpleNamespace(measures=True, root_dir=lambda root=root: root, home_dir=lambda: "", test=lambda *a: True,
+                                        read=lambda path: "provisioning complete")
+            run = types.SimpleNamespace(d=types.SimpleNamespace(mode="host", c=lambda k: ""), name="m", mac=mac)
+            run.gates = lambda run=run: mac_ab.Plant.gates(run)
+            with self.subTest(failed), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(1, mac_ab.Plant.preflight(run))
+                self.assertEqual([what for _, what, _, _ in brecord.failed(run.gates())], [failed])
+
+    def test_a_reboot_stops_on_a_display_or_firmware_default_it_could_not_read(self):
+        for guest, display, firmware in ((True, (brecord.UNKNOWN, "no JSON"), None),
+                                         (False, (True, ""), brecord.UNKNOWN),
+                                         (False, (True, ""), False)):
+            run = types.SimpleNamespace(name="m", display=lambda display=display: display,
+                                        firmware=lambda firmware=firmware, guest=guest: (True, "a guest") if guest else (firmware, "x"),
+                                        d=types.SimpleNamespace(boot_id=lambda: self.fail("rebooted")))
+            with self.subTest(guest=guest, display=display, firmware=firmware), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(Refused):
+                    mac_ab.Plant.restart(run)
+
+    def test_gates_and_preflight_count_the_rows_not_measured(self):
+        self.assertEqual("", brecord.not_measured(0))
+        self.assertIn("2", brecord.not_measured(2))
+
+    def test_a_reading_that_could_not_be_taken_is_named_in_the_result_and_its_report(self):
+        rows = [(True, "a", "fine"), (brecord.UNKNOWN, "b", "not read"), (False, "c", "measured bad")]
+        notes = brecord.preflight_notes(rows, ["n"])
+        self.assertIn("c: measured bad", notes)
+        self.assertIn(brecord.UNMEASURED + "b: not read", notes)
+        self.assertNotIn(brecord.UNMEASURED + "c", notes)
+        run = {"env": {"preflight_notes": notes}, "state": "ok", "dir": "/nowhere"}
+        verdicts = {(v, c) for v, c, _ in report.checks("/nowhere", {}, [run], "workspace")}
+        self.assertIn(("unknown", "preflight"), verdicts)
+
+    def test_an_unknown_row_renders_apart_from_ok_and_fail(self):
+        for ok, word in ((True, "ok"), (False, "FAIL"), (brecord.UNKNOWN, "unk")):
+            with self.subTest(word), contextlib.redirect_stderr(io.StringIO()) as e:
+                pipeline.check(ok, "x", "d")
+            self.assertTrue(e.getvalue().lstrip().startswith(word))
 
 
 if __name__ == "__main__":

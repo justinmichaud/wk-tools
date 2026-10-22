@@ -1,10 +1,7 @@
 """`wk zed` -- reaching a workspace's checkout in Zed."""
 import os
-import shutil
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from tests.support import DISPATCH_VARS, REPO, WkTest, load_cmd, run
@@ -13,28 +10,17 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import places, sshalias  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import HAVE, Result  # noqa: E402
+from tests.test_wk_places import DriversTest, SshFake  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
 os.environ.setdefault("WK_ROOT", str(REPO))
 ZED = load_cmd("zed")
 
 
-class DriverTest(unittest.TestCase):
+class DriverTest(DriversTest):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-zed-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
-                    "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1",
-                    "WK_ZED_PUBKEY": "ssh-ed25519 AAAAstub test",
-                    "PATH": os.environ.get("PATH", "")}
-        (self.tmp / "home").mkdir()
-        (self.tmp / "hosts").mkdir()
-        self.fake = Fake("here")
-        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
-
-    def conf(self, name, text):
-        kind = "kind=%s\n" % ("peer" if "peer=1" in text else "build")
-        (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text.replace("peer=1\n", ""))
+        super().setUp()
+        self.env["WK_ZED_PUBKEY"] = "ssh-ed25519 AAAAstub test"
 
 
 class ContainerTest(DriverTest):
@@ -54,6 +40,7 @@ class TestContainerAlias(ContainerTest):
         self.assertEqual(self.t.ssh_host("demo"), "wk-demo")
 
     def test_ssh_prepare_writes_a_proxycommand_alias(self):
+        """`unit zed.alias_is_proxycommand`"""
         self.t.ssh_prepare("demo")
         text = self.fake.read(sshalias.alias_path(self.env))
         self.assertIn("Host wk-demo", text)
@@ -90,24 +77,6 @@ class TestContainerAlias(ContainerTest):
         self.assertEqual(before, (self.fake.files, self.fake.dirs))
 
 
-class SshFake(Fake):
-
-    def __init__(self):
-        super().__init__("host")
-        self.remote = []
-
-    def answer_remote(self, needle, rc=0, out="", err=""):
-        self.remote.append((needle, Result(rc, out, err)))
-
-    def run(self, argv, input=None, timeout=None):
-        if argv and argv[0] == "ssh":
-            for needle, r in reversed(self.remote):
-                if needle in argv[-1]:
-                    self.record_run(argv)
-                    return r
-        return super().run(argv, input=input, timeout=timeout)
-
-
 PROBE = """/home/u
 Linux
 8
@@ -121,7 +90,6 @@ yes
 
 
 class TestPeerAlias(DriverTest):
-
     def setUp(self):
         super().setUp()
         self.fake = SshFake()
@@ -160,14 +128,12 @@ class TestBrokenRefusesNamingTheRepair(DriverTest):
 
 
 class TestZedRoute(WkTest):
-
     def test_route_needs_no_zed_on_path(self):
         cp = run("zed", "no-such-workspace-abcxyz", "--route", env={"PATH": "/usr/bin:/bin"})
         self.assertNotEqual(cp.returncode, 0)
         self.assertNotIn("zed is not installed", cp.stdout)
 
 class TestZedCli(unittest.TestCase):
-
     def test_zed_starts_without_the_dispatcher_variables(self):
         """Every terminal Zed opens inherits its environment."""
         leaked = {k: "x" for k in DISPATCH_VARS}

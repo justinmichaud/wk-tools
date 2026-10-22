@@ -1,79 +1,27 @@
-"""One `machines/` directory, read by lib/wk/fleet.py alone: no case arm names a machine (lint), and the reader."""
-TIER = "lint"
+"""One `machines/` directory, read by lib/wk/fleet.py alone (no code names a machine: tests/test_lint.py)."""
 import contextlib
 import io
-import os
-import re
-import shutil
-import subprocess
 import sys
-import tempfile
 import unittest
-from pathlib import Path
+from unittest import mock
 
+from tests.fakes import FlowTest
 from tests.support import FLEET_ENV, REAL_MACHINES, REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, fleet, places  # noqa: E402
+from wk import act, fleet, places, record  # noqa: E402
 from wk.boot.cli import load_conf  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
-USERS_OWN = {"CLAUDE.md", "docs/PLAN.md"}
-README_MARKER = "*** Claude edit below here ***"
-ARM = re.compile(r"^\s*\(?((?:[\"']?[A-Za-z0-9_.-]+[\"']?\s*\|\s*)*[\"']?[A-Za-z0-9_.-]+[\"']?)\)")
+HOST_NAME = record.host_name
 
 
-def tracked():
-    out = subprocess.run(["git", "-C", str(REPO), "ls-files", "-co", "--exclude-standard"],
-                         stdout=subprocess.PIPE, universal_newlines=True, check=True).stdout
-    for rel in out.splitlines():
-        p = REPO / rel
-        if rel in USERS_OWN or not p.is_file() or rel == "tests/test_machines_dir.py":
-            continue
-        try:
-            text = p.read_text()
-        except (UnicodeDecodeError, OSError):
-            continue
-        if rel == "README.md":
-            text = text.split(README_MARKER, 1)[-1]
-        yield rel, text
-
-
-def shell_case_arms(text):
-    """(line number, arm words) for every arm of every `case ... esac`."""
-    depth = 0
-    for i, line in enumerate(text.splitlines(), 1):
-        code = line.split(" #", 1)[0]
-        if re.search(r"\bcase\b.*\bin\b", code):
-            depth += 1
-        if depth:
-            m = ARM.match(code)
-            if m:
-                yield i, {w.strip().strip("\"'") for w in m.group(1).split("|")}
-        if re.search(r"\besac\b", code):
-            depth = max(0, depth - 1)
-
-
-class TestOneMachineDir(unittest.TestCase):
-    def test_no_case_arm_names_a_machine(self):
-        names = {p.stem for p in REAL_MACHINES.glob("*.conf")}
-        self.assertTrue(names)
-        hits = []
-        for rel, text in tracked():
-            if rel.endswith(".conf") or not (rel.endswith(".sh") or text.startswith("#!/usr/bin/env bash")
-                                             or text.startswith("#!/bin/sh")):
-                continue
-            for i, words in shell_case_arms(text):
-                if words & names:
-                    hits.append("%s:%d names %s" % (rel, i, sorted(words & names)))
-        self.assertEqual(hits, [], "a fact about one machine is a key in its conf:\n" + "\n".join(hits))
-
-
-class FleetTest(unittest.TestCase):
-    wk_tier = "unit"
-
+class FleetTest(FlowTest):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-fleet-"))
+        super().setUp()
+        p = mock.patch.object(record, "host_name", HOST_NAME)   # the fake machine answers this host's name
+        p.start()
+        self.addCleanup(p.stop)
         self.dir = self.tmp / "machines"
         self.local = self.tmp / "config" / "wk" / "machines"
         self.dir.mkdir()
@@ -81,8 +29,6 @@ class FleetTest(unittest.TestCase):
                     "HOME": str(self.tmp / "home")}
         self.fleet = fleet.Fleet(REPO, self.env)
 
-    def tearDown(self):
-        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def conf(self, name, text, where=None):
         d = where or self.dir

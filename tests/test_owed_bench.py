@@ -3,14 +3,7 @@ import os
 import platform
 import unittest
 
-from tests.support import TAILSCALE_KNOWS_NOTHING, WkTest, rand_suffix, requires_machine, run, scratch_dir, stub_path
-
-
-class TestBenchReachesTheRealMbp(unittest.TestCase):
-    @requires_machine("tolken")
-    def test_wk_boot_reaches_mbp(self):
-        cp = run("boot", "mbp", "--status")
-        self.assertIn(cp.returncode, (0, 2, 3), cp.stdout)
+from tests.support import TAILSCALE_KNOWS_NOTHING, WkTest, rand_suffix, run, scratch_dir, stub_path
 
 
 @unittest.skipUnless(platform.system() == "Darwin", "the GNU-tool risk this guards against is specific to a macOS driver")

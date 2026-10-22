@@ -267,7 +267,7 @@ class TestOwed(RunnerTest):
 
 class TestSelftestFlags(WkTest):
     def test_a_tier_flag_and_a_pattern_reach_the_runner(self):
-        cp = run("selftest", "--lint", "test_the_declared_options_are_the_ones_the_code_reads")
+        cp = run("selftest", "--lint", "test_declared_options_are_read")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("tiers: lint  tests: 1 ", cp.stdout)
 

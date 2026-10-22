@@ -40,7 +40,6 @@ def task_rec(kind, state, step, plan=None, steps=None, **extra):
 
 
 class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
-
     def _text(self, rec):
         return render([{"kind": "machine", "name": "tolken", "self": True}, rec])
 

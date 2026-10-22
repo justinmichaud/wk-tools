@@ -12,8 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.fakes import BenchHere
-from tests.killpoints import converges
+from tests.fakes import BenchHere, FlowTest
 from tests.support import REPO, live_selected, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -35,6 +34,7 @@ class BaseWorld(BenchHere):
 
     def __init__(self, base):
         super().__init__()
+        base = str(base)
         self.env = {"HOME": base + "/home", "WK_STORE": base + "/store", "WK_VM_STORE": base + "/vmstore",
                     "XDG_STATE_HOME": base + "/state", "WK_MACHINES_DIR": base + "/registry", "PATH": os.environ["PATH"]}
         self.state, self.disk, self.cached, self.sa, self.screen, self.prov_rc = "absent", 140, True, ["0"], CLEAR, "0"
@@ -113,18 +113,14 @@ class BaseWorld(BenchHere):
         return Result(0)
 
 
-class BaseTest(unittest.TestCase):
+class BaseTest(FlowTest):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-vm-base-")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
+        super().setUp()
         for p in (mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True),
                   mock.patch.object(places.Vm, "tart", lambda s: TART),
-                  mock.patch.object(tools, "push", lambda *a: True),
-                  mock.patch.dict(os.environ, {}, clear=False)):
+                  mock.patch.object(tools, "push", lambda *a: True)):
             p.start()
             self.addCleanup(p.stop)
-        for var in ("WK_DRY_RUN", "WK_YES", "WK_CONFIRMED", "WK_DESTRUCTIVE"):
-            os.environ.pop(var, None)
         self.w = BaseWorld(self.tmp)
         self.clock = FakeClock()
 
@@ -199,15 +195,6 @@ class TestTheBaseIsBuiltOnce(BaseTest):
         self.w.sa = ["1", "0"]
         self.assertEqual(self.build()[0], 0)
         self.assertIn("/usr/bin/python3 -", self.w.guest_cmds)
-
-    def test_killpoints_vm_base(self):
-        def run_once(w):
-            self.w = w.fake
-            self.build()
-
-        def final(w):
-            return w.fake.state, w.fake.disk, [l for l in self.marker().splitlines() if not l.startswith("finished=")]
-        converges(self, lambda: type("W", (), {"fake": BaseWorld(self.tmp)}), run_once, final, max_effects=80)
 
     def test_a_dry_run_clones_nothing_and_boots_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"

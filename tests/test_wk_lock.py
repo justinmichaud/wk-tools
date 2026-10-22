@@ -1,38 +1,37 @@
-"""lib/wk/lock.py: one holder at a time, a lock that dies with its holder, a live holder waited for and given up on."""
+"""lib/wk/lock.py: one holder at a time, a lock that dies with its holder, a live holder waited for and given up on;
+and two commands mutating one resource serialise or refuse naming the holder, each driven through the command's own
+entry with the resource held by a live process on the Fake (`guest start` is tests/test_guest.py's; a workspace's job
+is a hold on its record, tests/test_wk_record.py's)."""
+import contextlib
 import io
 import os
 import re
 import subprocess
 import sys
-import tempfile
-import unittest
 from contextlib import redirect_stderr
-from unittest import mock
 
+from tests import fakes, test_sync, test_vm_base
+from tests.fakes import FakeClock, FlowTest
 from tests.support import REPO
-from tests import fakes
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import machine  # noqa: E402
+from wk import machine, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 PAYLOAD = re.compile(r"^pid=(\d+) tok=[0-9a-f]{8} at=\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ cmd=\S+$")
+
+
 DEAD = "pid=4242 tok=deadbeef at=2000-01-01T00:00:00Z cmd=wk"
 
 
-class LockTest(unittest.TestCase):
+class LockTest(FlowTest):
+    HOST = record.host_name()   # a taker in another process names the lock by this host's real name
+
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-lock-")
-        self.addCleanup(machine.Local().remove, self.tmp)
-        self.env = mock.patch.dict(os.environ, {}, clear=False)
-        self.env.start()
-        self.addCleanup(self.env.stop)
-        for f in ("WK_DRY_RUN", "WK_QUIET", "WK_CMD"):
-            os.environ.pop(f, None)
-        self.store = Store({"HOME": self.tmp, "WK_LOCK_DIR": os.path.join(self.tmp, "locks"), "WK_CMD": "new"})
+        super().setUp()
+        self.store = Store({"HOME": str(self.tmp), "WK_LOCK_DIR": os.path.join(str(self.tmp), "locks"), "WK_CMD": "new"})
         self.path = self.store.lock_path("r")
 
     def stderr(self, fn):
@@ -212,7 +211,7 @@ class TestRealProcesses(LockTest):
     """Takers in separate processes on this host, every lock under a scratch WK_LOCK_DIR."""
 
     def spawn(self, resource, mode, *rest, timeout=20):
-        env = dict(os.environ, WK_LOCK_DIR=self.store.lock_dir(), HOME=self.tmp)
+        env = dict(os.environ, WK_LOCK_DIR=self.store.lock_dir(), HOME=str(self.tmp))
         return subprocess.Popen([sys.executable, "-c", HOLDER, resource, str(timeout), mode] + list(rest),
                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
@@ -251,10 +250,6 @@ class TestRealProcesses(LockTest):
         self.assertFalse(os.path.lexists(self.path))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestALockItsHolderLeftIsRubble(LockTest):
     def test_gc_names_and_takes_a_dead_holders_lock_and_leaves_a_live_ones_and_another_hosts(self):
         from wk import lock as wklock
@@ -275,3 +270,50 @@ class TestALockItsHolderLeftIsRubble(LockTest):
         wklock.rubble(self.store, here)[0].take()
         self.assertEqual(sorted([os.path.basename(self.store.lock_path("held")), "theirs@elsewhere.lock"]),
                          sorted(os.listdir(self.store.lock_dir())))
+
+
+HOLDER_PID = 4242
+
+
+def hold(fake, store, resource):
+    """`resource`'s lock, held by a pid alive in `fake`'s process table."""
+    path = store.lock_path(resource)
+    fake.mkdir_now(os.path.dirname(path))
+    fake.symlink("pid=%d tok=beef at=2000-01-01T00:00:00Z cmd=wk" % HOLDER_PID, path)
+    fake.pids.add(HOLDER_PID)
+
+
+def refusal(fn):
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        try:
+            fn()
+        except Refused:
+            return err.getvalue()
+    raise AssertionError("the command ran under another command's lock")
+
+
+class TestTwoSyncs(test_sync.SyncTest):
+    def test_one_lock_per_resource_sync(self):
+        """A mirror refresh waits on the store lock, names its holder, and refuses when the holder outlasts it."""
+        hold(self.w, self.w.store, "store")
+        err = refusal(self.w.sync("mirror").run)
+        self.assertIn(str(HOLDER_PID), err)
+        self.assertNotIn(("run", ("sh", "-c", "REFRESH %s" % self.w.mirror)), self.w.effects)
+
+    def test_a_dead_holder_does_not_stop_the_sync(self):
+        hold(self.w, self.w.store, "store")
+        self.w.pids.discard(HOLDER_PID)
+        self.stderr(self.w.sync("mirror").run)
+        self.assertIn(("run", ("sh", "-c", "REFRESH %s" % self.w.mirror)), self.w.effects)
+
+
+class TestBaseRefreshDuringABuild(test_vm_base.BaseTest):
+    def test_one_lock_per_resource_base_refresh(self):
+        """`--refresh` while the base is being built waits on the guest-base lock, then refuses naming the builder."""
+        self.w.state = "stopped"
+        base = self.base()
+        hold(self.w, base.vm.store, "guest-base")
+        rc, err = self.build("--refresh")
+        self.assertEqual(1, rc)
+        self.assertIn(str(HOLDER_PID), err)
+        self.assertEqual([], self.tart_acts())

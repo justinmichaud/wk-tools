@@ -46,7 +46,6 @@ def _wait_registered(name, timeout=600):
 
 @requires_container_place()
 class TestWkNewKilledMidway(WkTest):
-
     def setUp(self):
         super().setUp()
         self.name = f"wk-test-{rand_suffix()}"
@@ -81,7 +80,6 @@ class TestWkNewKilledMidway(WkTest):
 
 @requires_container_place()
 class TestWkRmOfRubble(WkTest):
-
     def setUp(self):
         super().setUp()
         self.name = f"wk-test-{rand_suffix()}"
@@ -141,7 +139,6 @@ NEEDS_THE_MACHINE = ("tools", "settings", "sharing", "machine",
 
 
 class TestSetupStagesConverge(WkTest):
-
     def _home(self):
         home = self.tmp / f"home-{rand_suffix()}"
         (home / ".config").mkdir(parents=True)

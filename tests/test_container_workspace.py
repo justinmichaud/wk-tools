@@ -1,4 +1,5 @@
-"""Live: one real container workspace created, read, a real build cancelled in it, and destroyed."""
+"""Live: one real container workspace created, read, stopped and started, reached by `wk zed --url`, a real build
+cancelled in it, and destroyed; `wk new --kill` with and without a creation running."""
 import json
 import os
 import pty
@@ -7,9 +8,8 @@ import subprocess
 import sys
 import time
 import unittest
-from unittest import mock
 
-from tests.support import REPO, WK, WkTest, rand_suffix, requires_container_place, run
+from tests.support import REPO, WK, WkTest, rand_suffix, requires_container_place, run, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 
@@ -105,6 +105,32 @@ class TestContainerWorkspaceLifecycle(WkTest):
                          f"no 'claude' on $PATH in the workspace: {cp.stdout}")
         self.assertTrue(cp.stdout.strip().endswith("claude"), cp.stdout)
 
+    def _state_line(self, ls_output):
+        return next((l for l in ls_output.splitlines() if self.name in l), "")
+
+    def _assert_stop_and_start_and_the_shared_store(self):
+        cp = run("stop", self.name)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        cp = run("ls")
+        self.assertIn(self.name, cp.stdout)
+        self.assertNotIn("running", self._state_line(cp.stdout))
+        cp = run("start", self.name)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("running", self._state_line(run("ls").stdout))
+        # The store is mounted at the same path inside, so an in-workspace build's status reaches the host.
+        cp = run("enter", self.name, "--", "test", "-d", f"/var/lib/wk/ws/{self.name}")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+
+    def _assert_zed_url_prints_the_url_and_runs_no_zed(self):
+        with scratch_dir() as bindir:
+            fake = bindir / "zed"
+            fake.write_text('#!/bin/sh\necho "FAKE ZED WAS INVOKED: $*" >&2\nexit 1\n')
+            fake.chmod(0o755)
+            cp = run("zed", "--url", self.name, env={"PATH": f"{bindir}:{os.environ.get('PATH', '')}"}, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("ssh://", cp.stdout)
+        self.assertNotIn("FAKE ZED WAS INVOKED", cp.stdout)
+
     def test_create_list_status_build_dry_run_remove(self):
         t0 = time.time()
         cp = run("new", self.name, "--on", "container", timeout=600)
@@ -120,15 +146,18 @@ class TestContainerWorkspaceLifecycle(WkTest):
         cp = run("ls")
         self.assertIn(self.name, cp.stdout, f"'wk ls' does not list {self.name}: {cp.stdout}")
 
-        cp = run("status", self.name, "--no-fleet")
-        self.assertIn(cp.returncode, (0, 2), f"'wk status {self.name} --no-fleet' exited {cp.returncode}: {cp.stdout + cp.stderr}")
+        cp = run("status", self.name)
+        self.assertIn(cp.returncode, (0, 2), f"'wk status {self.name}' exited {cp.returncode}: {cp.stdout + cp.stderr}")
 
         cp = run("build", self.name, "jsc-release", "--dry-run")
         self.assertEqual(cp.returncode, 0, f"'wk build {self.name} jsc-release --dry-run' failed: {cp.stdout + cp.stderr}")
         self.assertTrue(cp.stdout.strip(), "the dry run printed no command")
 
-        cp = run("rm", self.name, env={"WK_YES": "1"})
-        self.assertEqual(cp.returncode, 0, f"'wk rm {self.name}' failed: {cp.stdout + cp.stderr}")
+        self._assert_stop_and_start_and_the_shared_store()
+        self._assert_zed_url_prints_the_url_and_runs_no_zed()
+
+        cp = run("rm", self.name, f"wk-test-{rand_suffix()}-nonexistent", env={"WK_YES": "1"})
+        self.assertNotEqual(cp.returncode, 0, "a removal naming one absent workspace ends non-zero: " + cp.stdout)
         self._created = False
 
         cp = run("ls")
@@ -161,7 +190,7 @@ class TestCancellingARealBuild(WkTest):
 
     def _build_task(self):
         """(`wk status --records` result, the build's task record or the workspace row's build sub)."""
-        cp = run("status", self.name, "--records", "--no-fleet", timeout=300)
+        cp = run("status", self.name, "--records", timeout=300)
         task, sub = None, None
         for line in cp.stdout.splitlines():
             if not line.startswith("{"):
@@ -250,20 +279,18 @@ class TestCancellingARealBuild(WkTest):
         self.assertNotEqual(cp.returncode, 2, f"still busy after --kill:\n{cp.stdout}")
 
 
-class TestOnePodmanWrapper(unittest.TestCase):
-    """`Container.podman()` names the machine's connection from a macOS host."""
+@requires_container_place()
+class TestNewKillStopsTheCreation(unittest.TestCase):
+    def test_it_takes_nothing_that_belongs_to_a_creation(self):
+        cp = run("new", "kill-probe-%s" % rand_suffix(), "--kill", "--no-wait")
+        self.assertNotEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("stops the creation already running", cp.stdout)
 
-    def container(self, env, system):
-        from wk import places
-        from tests.fakes import Fake
-        with mock.patch("wk.places.os.uname", return_value=mock.Mock(sysname=system)):
-            return places.Container("container", str(REPO), env, Fake("here")).podman()
+    def test_with_no_creation_running_it_says_so_and_ends_well(self):
+        cp = run("new", "kill-probe-%s" % rand_suffix(), "--kill")
+        self.assertEqual(cp.returncode, 0, cp.stdout)
+        self.assertIn("no new is running", cp.stdout)
 
-    def test_a_macos_host_names_the_machines_connection_and_a_local_daemon_is_plain(self):
-        for env, system, want in (({}, "Darwin", ["podman", "-c", "wk"]),
-                                  ({"WK_MACHINE": "other"}, "Darwin", ["podman", "-c", "other"]),
-                                  ({"WK_IN_VM": "1"}, "Darwin", ["podman"]), ({}, "Linux", ["podman"])):
-            self.assertEqual(want, self.container(env, system), (env, system))
 
 if __name__ == "__main__":
     unittest.main()

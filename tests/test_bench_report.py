@@ -10,7 +10,7 @@ import sys
 import unittest
 import unittest.mock
 
-from tests.support import REPO, WkTest
+from tests.support import REPO, WkTest, scratch_dir
 from tests.test_ab_precision import (
     JETSTREAM3_CHILDREN, JETSTREAM3_HEADLINE, MOTIONMARK_CHILDREN, MOTIONMARK_HEADLINE,
     SPEEDOMETER3_HEADLINE, aggregate_doc, fields, speedometer_doc,
@@ -81,7 +81,6 @@ def side(tmp, name, runs):
 
 
 class TestRecordLoadTellsMissingFromCorrupt(WkTest):
-
     def test_a_missing_file_reads_as_empty_and_a_corrupt_one_is_not_reported_as_merely_missing(self):
         self.assertEqual({}, record.load(str(self.tmp / "nosuch.json")))
         path = self.tmp / "env.json"
@@ -91,7 +90,6 @@ class TestRecordLoadTellsMissingFromCorrupt(WkTest):
 
 
 class TestReportWalkerAndStats(WkTest):
-
     def _write_pair(self, tmp, a_doc, b_doc, a_extra=(), b_extra=()):
         common = ("plan=jetstream3", "config=jsc-release", "count=6", "class=cpu", "runner=jsc", "bench_host=container")
         return run_dir(tmp / "a", a_doc, *common, *a_extra), run_dir(tmp / "b", b_doc, *common, *b_extra)
@@ -252,7 +250,6 @@ class TestReportWalkerAndStats(WkTest):
 
 
 class TestTheHeadlineRow(WkTest):
-
     def _pair(self, tmp, doc):
         return tuple(run_dir(tmp / s, doc, "plan=mac-ab", "runner=browser") for s in "ab")
 
@@ -347,7 +344,6 @@ class TestTheHeadlineRow(WkTest):
 
 
 class TestSpreadWithinAndBetweenRuns(WkTest):
-
     def test_each_side_carries_both_spreads_for_the_suite_row(self):
         a = side(self.tmp, "a", [[100.0, 101.0], [110.0, 111.0]])
         b = side(self.tmp, "b", [[100.0, 101.0], [100.0, 101.0]])
@@ -371,7 +367,6 @@ class TestSpreadWithinAndBetweenRuns(WkTest):
 
 
 class TestPrecisionCarriesTheNoiseFloor(WkTest):
-
     def _precision(self, a, b):
         out = io.StringIO()
         report.precision(side(self.tmp, "a", [[[v]] for v in a]), side(self.tmp, "b", [[[v]] for v in b]), 0.3, out=out)
@@ -390,6 +385,23 @@ class TestPrecisionCarriesTheNoiseFloor(WkTest):
     def test_a_delta_of_zero_leaves_the_ratio_empty_rather_than_dividing(self):
         out = self._precision([100.0, 102.0], [100.0, 102.0])
         self.assertEqual("", out["delta_vs_mde"])
+
+
+class TestCoresAxisWarning(WkTest):
+    def _pair(self, tmp, a_cores, b_cores):
+        doc = {"JetStream3.0": {"tests": {"t": {"metrics": {"Score": {"current": [1.0, 2.0]}}}}}}
+        return tuple(run_dir(tmp / s, doc, "plan=jetstream3", "class=cpu", "runner=jsc", "bench_host=container",
+                             *([f"cores.set={cores}"] if cores is not None else [])) for s, cores in (("a", a_cores), ("b", b_cores)))
+
+    def test_two_runs_pinned_differently_warn(self):
+        for a_cores, b_cores, warns in (("0-3", "4-7", ("0-3", "4-7")), ("0-3", "0-3", None),
+                                        (None, "0-3", ("unpinned",)), (None, None, None)):
+            with self.subTest(a=a_cores, b=b_cores), scratch_dir() as tmp:
+                cp = rep(*self._pair(tmp, a_cores, b_cores))
+                self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+                self.assertEqual("different core pins" in cp.stdout, bool(warns), cp.stdout)
+                for word in warns or ():
+                    self.assertIn(word, cp.stdout)
 
 
 if __name__ == "__main__":

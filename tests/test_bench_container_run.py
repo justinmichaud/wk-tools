@@ -86,7 +86,6 @@ class TestBenchContainerRun(WkTest):
 
 
 class TestTheWatchIsInertInAContainer(unittest.TestCase):
-
     def watch(self, system):
         """ps and the window probe answer as a container's would; the must-not-run table is bench/mac-quiet-desktop.sh's own."""
         m = Fake()

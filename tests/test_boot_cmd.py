@@ -3,7 +3,6 @@ transition, the EEPROM boot order, killpoints[boot], and what `wk doctor` reads 
 import contextlib
 import hashlib
 import io
-import json
 import os
 import shutil
 import sys
@@ -12,7 +11,6 @@ import types
 import unittest
 from unittest import mock
 
-from tests.killpoints import converges
 from tests.support import REPO, WkTest, requires_machine, run as wk_run
 from tests.fake_boot import board
 
@@ -238,36 +236,6 @@ class TestDiag(unittest.TestCase):
         rc, err = run(b.diag)
         self.assertEqual(rc, (act.Refused, 1), err)
         self.assertIn("--back", err)
-
-
-class TestKillpoints(unittest.TestCase):
-    """killpoints[boot]: a `wk boot` killed after any effect and run again reaches the state one run does."""
-
-    def world(self, kind, start=None):
-        def make():
-            fake, d = board(kind)
-            if start:
-                run(getattr(boot_over(fake, d), start))
-            fake.applied = 0
-            return types.SimpleNamespace(fake=fake, d=d)
-        return make
-
-    def state(self, w):
-        f = w.fake
-        return (f.running, f.record, json.dumps(f.fat, sort_keys=True), f.one_shot)
-
-    def flow(self, action):
-        def run_once(w):
-            got, err = run(getattr(boot_over(w.fake, w.d), action))
-            if got != 0 and not err.count("already in bench mode"):
-                raise AssertionError(err)
-        return run_once
-
-    def test_arm_back_and_disarm_converge_on_every_pi(self):
-        for kind in PI_KINDS:
-            for action, start in (("arm", None), ("back", "arm"), ("disarm", None)):
-                with self.subTest(kind=kind, action=action):
-                    converges(self, self.world(kind, start), self.flow(action), self.state)
 
 
 class TestEnter(unittest.TestCase):

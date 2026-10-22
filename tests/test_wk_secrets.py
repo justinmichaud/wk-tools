@@ -16,11 +16,11 @@ import types
 import unittest
 from unittest import mock
 
+from tests import fakes
 from tests.support import REPO, bash, clean_env
 
 sys.path.insert(0, str(REPO / "lib"))
-import credcheck  # noqa: E402
-from wk import act, claudelogin, guest, repos, secrets  # noqa: E402
+from wk import claudelogin, guest, repos, secrets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
@@ -33,11 +33,11 @@ KEYS = [k[0] for k in secrets.push_keys()]
 PLACEHOLDER = "placeholder-value-for-this-test"
 
 
-class World(Fake):
+class World(fakes.World):
     """One machine: its files, and every stdin it was handed in `inputs`."""
 
     def __init__(self, base):
-        super().__init__("here")
+        super().__init__()
         self.base = base
         self.env = {"HOME": base + "/home", "WK_STORE": base + "/store", "WK_STORE_DEFAULT": base + "/store",
                     "WK_HOST_SECRETS": base + "/store/secrets", "XDG_STATE_HOME": base + "/state",
@@ -78,12 +78,6 @@ class World(Fake):
         if input:
             self.inputs.append((tuple(argv), input))
         return super().run(argv, input=input, timeout=timeout)
-
-    def act_run(self, argv, **kw):
-        self.effects.append(("act", tuple(argv)))
-        if act.dry_run():
-            return Result(0)
-        return super().act_run(argv, **kw)
 
     def _mv(self, src, dst):
         if src not in self.files:
@@ -142,17 +136,13 @@ def quiet(fn, *args):
     return result, err.getvalue()
 
 
-class SecretsTest(unittest.TestCase):
+class SecretsTest(fakes.FlowTest):
+    UNSET = fakes.FlowTest.UNSET + ("WK_IN_VM",)
+
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-secrets-")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
+        super().setUp()
+        self.tmp = str(self.tmp)
         os.makedirs(self.tmp + "/store")   # a store this process can write: on a macOS host that is the local one
-        p = mock.patch.dict(os.environ, {}, clear=False)
-        p.start()
-        self.addCleanup(p.stop)
-        for v in ("WK_DRY_RUN", "WK_YES", "WK_FORCE", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_IN_VM"):
-            os.environ.pop(v, None)
-        self.addCleanup(act._forced.clear)
         self.w = World(self.tmp)
 
     def refused(self, fn, *args):
@@ -403,16 +393,6 @@ class TestSecretsIsPublished(SecretsTest):
         before = len(self.w.acts())
         quiet(self.w.sec().publish)
         self.assertEqual(before, len(self.w.acts()), self.w.acts()[before:])
-
-    def test_a_publish_killed_after_any_effect_and_rerun_converges(self):
-        from tests.killpoints import converges
-
-        def world():
-            w = World(self.tmp)
-            w.seed()
-            return types.SimpleNamespace(fake=w)
-
-        converges(self, world, lambda n: quiet(n.fake.sec().publish), lambda n: n.fake.state())
 
     def test_in_the_podman_vm_nothing_is_written_and_what_is_there_is_read(self):
         self.w.env["WK_IN_VM"] = "1"

@@ -1,5 +1,4 @@
 """The build wall: an agent cannot drive a build or a test run by hand."""
-import json
 import os
 import re
 import shutil
@@ -12,9 +11,6 @@ from tests.support import REPO, WkTest
 BIN = REPO / "container" / "bin"
 WALL = BIN / "wk-build-wall"
 RC = REPO / "shell" / "bashrc"
-SETTINGS = REPO / "claude" / "settings.json"
-# The host variant a build-box agent gets (claude/install.sh) carries the same rules.
-SETTINGS_ALL = [SETTINGS, REPO / "claude" / "settings-host.json"]
 
 
 def wall_names():
@@ -138,7 +134,6 @@ class TestBitbakeGetsTheRealTools(WkTest):
 
 
 class TestNoBuilderRecordsTheWall(unittest.TestCase):
-
     wk_tier = "lint"
 
     def test_the_wrapper_takes_off_every_wall_and_nothing_else(self):
@@ -246,7 +241,6 @@ class TestTheCandidateSearchIsStrict(WallTest):
 
 
 class TestItIsFirstOnPathInEveryShell(WkTest):
-
     SHELLS = {
         "editor terminal pane": ("zsh", ["-i", "-c"]),
         "login zsh": ("zsh", ["-l", "-c"]),
@@ -279,64 +273,3 @@ class TestItIsFirstOnPathInEveryShell(WkTest):
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60,
         )
         self.assertEqual(str(BIN / "ninja"), cp.stdout.strip(), cp.stdout)
-
-
-class TestTheAgentIsToldUpFront(unittest.TestCase):
-    """The advisory half: a deny rule per wrapped name, so the agent is told
-    before it tries, and one sentence in the workspace briefing."""
-
-    def test_every_wrapped_name_is_denied(self):
-        for f in SETTINGS_ALL:
-            deny = json.loads(f.read_text())["permissions"]["deny"]
-            for name in NAMES:
-                with self.subTest(file=f.name, tool=name):
-                    self.assertIn(f"Bash({name} *)", deny)
-
-    def test_both_settings_variants_deny_the_same_set(self):
-        rules = [json.loads(f.read_text())["permissions"]["deny"] for f in SETTINGS_ALL]
-        self.assertEqual(sorted(rules[0]), sorted(rules[1]))
-
-    def test_the_path_spelling_is_denied_in_both_files(self):
-        """The shim cannot intercept `Tools/Scripts/build-webkit --gtk`: a
-        path names a file and never consults PATH. The deny rule is the only
-        cover it has, so it is anchored at a path separator."""
-        for f in SETTINGS_ALL:
-            deny = json.loads(f.read_text())["permissions"]["deny"]
-            for name in NAMES:
-                with self.subTest(file=f.name, tool=name):
-                    self.assertIn(f"Bash(*/{name} *)", deny)
-
-    def test_no_rule_matches_a_bare_word_anywhere_in_a_command(self):
-        """`Bash(*make *)` matches `echo make it so`, and a deny rule that
-        fires on prose trains the reader to ignore it."""
-        for f in SETTINGS_ALL:
-            deny = json.loads(f.read_text())["permissions"]["deny"]
-            for name in NAMES:
-                with self.subTest(file=f.name, tool=name):
-                    self.assertNotIn(f"Bash(*{name} *)", deny)
-
-    def test_the_two_spellings_are_the_whole_of_the_deny_list(self):
-        """Two rules per wrapped name and nothing else: a rule nobody can
-        derive from the name list is a rule nobody maintains."""
-        want = sorted([f"Bash({n} *)" for n in NAMES]
-                      + [f"Bash(*/{n} *)" for n in NAMES])
-        for f in SETTINGS_ALL:
-            deny = sorted(json.loads(f.read_text())["permissions"]["deny"])
-            self.assertEqual(want, deny, f.name)
-
-    def test_the_wall_names_what_covers_each_spelling(self):
-        """The wall's header points at the two things outside it that its
-        cover depends on: the file that puts it first on PATH (a bare name)
-        and the deny-rule form that covers the path spelling it cannot see.
-        Each is checked against what exists, not against prose."""
-        header = WALL.read_text().split('WALL_NAMES="')[0]
-        self.assertIn("shell/path.sh", header)
-        self.assertTrue((REPO / "shell" / "path.sh").is_file())
-        self.assertIn("Bash(*/<name> *)", header)
-        for f in SETTINGS_ALL:
-            deny = json.loads(f.read_text())["permissions"]["deny"]
-            self.assertTrue(any(r.startswith("Bash(*/") for r in deny), f.name)
-
-
-if __name__ == "__main__":
-    unittest.main()

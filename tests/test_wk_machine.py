@@ -1,7 +1,6 @@
 """lib/wk/machine.py: the seam every effect goes through, over the local, fake, ssh and tart transports."""
 import io
 import os
-import re
 import shlex
 import signal
 import subprocess
@@ -19,7 +18,6 @@ from tests import fakes
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import machine  # noqa: E402
-from tests.killpoints import TestConverges  # noqa: E402,F401  discovery reads test_*.py only
 
 INTERFACE = ("run", "run_tty", "read", "exists", "isdir", "listdir", "alive", "act_run",
              "write", "remove", "mkdir", "kill", "spawn",
@@ -601,28 +599,6 @@ class TestForward(MachineTest):
 
 
 # A copy's transport named outside the seam: an argv headed scp or rsync, a shell line starting one, podman's cp, shutil's copies.
-COPY = re.compile(r"\[\s*[\"'](scp|rsync)[\"']|[\"'](scp|rsync) -|podman\(\)\s*\+\s*\[[\"']cp[\"']|\bshutil\.copy\w*\(")
-COPIES_ELSEWHERE = {
-    "lib/wk/places.py": "the container driver's half of the one copy: `podman cp` is how bytes cross into a container",
-    "lib/wk/bench/mac.py": "pins a payload into the staging tree: both ends are this host's own filesystem",
-    "lib/wk/sysimage/macvolume.py": "stages wk-tools onto the bench volume, mounted on the machine that runs the copy",
-}
-
-
-class TestOneCopyPath(unittest.TestCase):
-    def test_nothing_outside_the_machine_copies(self):
-        files = list((REPO / "lib" / "wk").rglob("*.py"))
-        files += [p for p in (REPO / "cmd").iterdir() if p.is_file()]
-        found = set()
-        for p in files:
-            rel = str(p.relative_to(REPO))
-            if rel != "lib/wk/machine.py" and any(COPY.search(l) and not l.lstrip().startswith("#")
-                                                  for l in p.read_text(errors="replace").splitlines()):
-                found.add(rel)
-        self.assertEqual(sorted(found - set(COPIES_ELSEWHERE)), [], "copies outside lib/wk/machine.py")
-        self.assertEqual(sorted(set(COPIES_ELSEWHERE) - found), [], "listed, and no longer copying")
-
-
 class TestADetachedJobIsInitsChild(unittest.TestCase):
     def test_the_job_outlives_its_starter_as_a_child_of_init(self):
         """A parent that never reaps (tart's guest agent) would leave the job a zombie that answers `kill -0`.

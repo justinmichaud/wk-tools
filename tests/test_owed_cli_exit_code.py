@@ -3,7 +3,7 @@ import os
 import unittest
 
 from tests.support import WkTest, rand_suffix, run, scratch_dir, stub_path
-from tests.test_build_liveness import write_task
+from tests.test_wk_record import write_task
 
 
 _ANSWERING_SSH = '''#!/bin/sh

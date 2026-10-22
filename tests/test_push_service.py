@@ -21,12 +21,12 @@ from pathlib import Path
 from unittest import mock
 
 from tests import test_pr_workflow, test_wk_places
-from tests.support import REPO, WkTest, requires_container_place
+from tests.support import REPO, WkTest, load_cmd, requires_container_place
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import git, pushgate, repos, secrets  # noqa: E402
+from wk import decl, git, pushgate, repos, secrets  # noqa: E402
 from wk.machine import Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from tests.fakes import Fake, FlowTest, World  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 SERVICE = REPO / "container" / "push" / "wk-push.py"
@@ -540,11 +540,10 @@ class TestEveryWorkspaceIsWiredToTheClient(WkTest):
         self.assertEqual(Place(Fake()).tools_src(), str(REPO))
 
     def test_the_switch_is_gone_and_the_dispatcher_refuses_its_name(self):
-        for argv in (("key", "push", "on"), ("key", "push", "status")):
-            with self.subTest(argv=argv):
-                cp = self.run_wk(*argv)
-                self.assertEqual(2, cp.returncode, cp.stdout)
-                self.assertIn("unknown verb: push", cp.stdout)
+        for argv in (("push", "on"), ("push", "status")):
+            with self.subTest(argv=argv), self.assertRaises(decl.Usage) as e:
+                decl.parse("key", load_cmd("key").COMMAND, list(argv))
+            self.assertIn("unknown verb: push", str(e.exception))
 
     def test_the_sockets_a_workspace_and_the_service_use(self):
         env = {"HOME": "/home/u", "XDG_RUNTIME_DIR": "/run/user/501"}
@@ -557,11 +556,10 @@ class TestEveryWorkspaceIsWiredToTheClient(WkTest):
             self.assertEqual("/home/u/.wk-push.sock", Store(env).workspace_push_socket())
 
 
-class TestTheGate(unittest.TestCase):
+class TestTheGate(FlowTest):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-gate-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), True)
-        self.machine = Fake("here")
+        super().setUp()
+        self.machine = World()
         self.machine.answer(PS, out="%s\twk-demo\n%s\tnot-a-workspace\n" % (ID, "cd" * 32))
         self.place = Place(self.machine)
         self.proc = Proc(self.tmp)
@@ -748,17 +746,11 @@ def forwarded(argv):
 
 class TestABoxHoldsNoKey(test_wk_places.RemoteTest):
     def test_no_ssh_to_a_box_forwards_an_agent(self):
-        """Neither an argv wk builds nor a block of dotfiles/ssh/config, the gateway's included."""
+        """No argv wk builds forwards an agent; dotfiles/ssh/config is lint.ssh_config_forwards_no_agent."""
         for argv in (self.t.machine.argv("true"), self.t.build_argv("a", ["ninja"])[0], self.t.exec_argv("a", ["true"])[0],
                      self.t.exec_argv("a", ["claude"], tty=True)[0], self.t.enter_argv("a")[0]):
             self.assertEqual("ssh", argv[0])
             self.assertIsNone(forwarded(argv), argv)
-        config = (REPO / "dotfiles" / "ssh" / "config").read_text()
-        blocks = dict((m.group(1).strip(), m.group(2)) for m in re.finditer(r"^Host (.+)\n((?:[ \t].*\n|\n)*)", config, re.M))
-        self.assertNotIn("*", blocks)
-        self.assertIn("igalia.com", blocks)
-        for host, block in blocks.items():
-            self.assertNotIn("forwardagent", block.lower(), host)
 
 
 class TestAPushFromABoxIsMadeHere(test_wk_places.RemoteTest):

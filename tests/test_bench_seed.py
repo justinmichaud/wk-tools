@@ -5,11 +5,10 @@ import io
 import json
 import os
 import sys
-import types
 from unittest import mock
 
+from tests import fakes
 from tests.fakes import FakeRegistry
-from tests.killpoints import converges
 from tests.support import REPO, WkTest
 from tests.test_bench_board import _mv
 from tests.test_bench_report import in_process
@@ -20,7 +19,6 @@ from wk.bench import cli, seed  # noqa: E402
 from tests.fakes import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -30,7 +28,7 @@ DEST = "%s/jetstream3-%s" % (SEEDS, SHA[:12])
 
 
 def fake(clone_ok=True):
-    m = Fake("here")
+    m = fakes.World()
     m.answer(["git", "ls-remote"], out="%s\trefs/heads/JetStream3.0\n" % SHA)
     m.answer(["git", "-C"], rc=0)
 
@@ -66,7 +64,6 @@ def ran(m, word):
 
 
 class TestAPayloadIsSeededOnce(WkTest):
-
     def test_the_first_seed_clones_and_pins_it_without_its_history(self):
         m = fake()
         with quiet():
@@ -105,19 +102,6 @@ class TestAPayloadIsSeededOnce(WkTest):
         self.assertEqual(order[0], ("symlink", lock_path()))
         self.assertNotIn(lock_path(), m.files)
 
-    def test_a_seed_killed_after_any_effect_and_rerun_converges(self):
-        def world():
-            return types.SimpleNamespace(fake=fake())
-
-        def run_once(w):
-            with quiet():
-                seeder(w.fake).seed("jetstream3", PLAN)
-
-        def payload(w):
-            return ({p: t for p, t in w.fake.files.items() if p.startswith(SEEDS + "/")},
-                    sorted(d for d in w.fake.dirs if d.startswith(SEEDS + "/")))
-        converges(self, world, run_once, payload)
-
     def test_a_dry_seed_prints_the_fetch_and_makes_nothing(self):
         m = fake()
         before = (dict(m.files), set(m.dirs))
@@ -146,7 +130,6 @@ class TestAPayloadIsSeededOnce(WkTest):
 
 
 class TestWhatCannotBeSeeded(WkTest):
-
     def test_a_plan_with_no_pinnable_source_is_refused(self):
         for plan in (json.dumps({"remote_archive": "https://x/y.zip"}), "not json",
                      json.dumps({"github_source": "https://example.com/elsewhere"})):
@@ -187,7 +170,6 @@ def mirror_fake(has_sha=True):
 
 
 class TestWebKitsOwnPayloadComesFromTheMirror(WkTest):
-
     def test_it_is_archived_out_of_the_mirror_and_nothing_is_cloned(self):
         m = mirror_fake()
         with quiet():
@@ -214,7 +196,6 @@ class TestWebKitsOwnPayloadComesFromTheMirror(WkTest):
 
 
 class TestThePlanIsRead(WkTest):
-
     def test_a_plan_naming_another_is_followed(self):
         files = {"webkitpy/benchmark_runner/data/plans/speedometer3.plan": "speedometer3.1.plan\n",
                  "webkitpy/benchmark_runner/data/plans/speedometer3.1.plan": PLAN}
@@ -228,7 +209,6 @@ class TestThePlanIsRead(WkTest):
 
 
 class TestTheVerb(WkTest):
-
     class Driver:
         def __init__(self):
             self.read = []
@@ -257,4 +237,3 @@ class TestTheVerb(WkTest):
         with self.assertRaises(Refused):
             with quiet():
                 b.seed("w", "", True)
-

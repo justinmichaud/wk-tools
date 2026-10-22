@@ -4,7 +4,6 @@ import contextlib
 import io
 import os
 import re
-import shutil
 import signal
 import subprocess
 import sys
@@ -13,16 +12,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests import fakes
 from tests.fakes import FakeProc, FakeRegistry, WsDriver
-from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import images, job, pgo, record, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
 from wk.machine import Result, isolated_module  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
 from wk.sysimage import buildroot, task, yocto  # noqa: E402
 
 SHA = "a" * 40
@@ -43,7 +40,7 @@ class Box(WsDriver):
         return "running" if self.machine.made else "absent"
 
 
-class World(Fake):
+class World(fakes.World):
     """This machine holding one builder's image workspace on its container place `box`; a stage writes `out` to its log
     and exits `rc` after `polls` polls (for ever when None). A subclass is one builder and what the lifecycle expects of it."""
 
@@ -55,18 +52,12 @@ class World(Fake):
     SUBJECT, UNKNOWN = "", (["--stage", "image"], ["--resume"])
 
     def __init__(self, tmp):
-        super().__init__("here")
+        super().__init__(tmp, WK_IN_VM="1", WK_AVAIL_MB="65536", WK_CGROUP_CORES="8", WK_JOB_PID_TRIES="0", WK_KILL_WAIT="2",
+                         WK_ROOT=str(REPO))
         self.ws = self.KIND + "-" + self.PRESET
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
         store = self.tmp / "store"
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(store), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_IN_VM": "1", "WK_AVAIL_MB": "65536",
-                    "WK_CGROUP_CORES": "8", "WK_JOB_PID_TRIES": "0", "WK_KILL_WAIT": "2", "WK_ROOT": str(REPO)}
-        self.clock = FakeClock()
-        self.dirs.add(self.env["WK_LOCK_DIR"])
         self.made, self.rc, self.polls, self.grow, self.interrupt, self.kind = True, 0, 0, None, None, "container"
         self.detaching, self.out = None, self.OUT
-        self.answer(["hostname"], out="here\n")
         self.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 209715200 1% /\n")
         self.answer(["du", "-sh"], rc=1)
         self.answer(["podman", "image", "exists"])
@@ -78,10 +69,6 @@ class World(Fake):
         self.ws_dir = os.path.join(str(store), "ws", self.ws)
         os.makedirs(os.path.join(self.ws_dir, "home"))
         self.log = os.path.join(self.ws_dir, "home", "%s-image.log" % self.KIND)
-
-    @property
-    def fake(self):
-        return self
 
     def tag(self):
         return self.driver().host_image()[1]
@@ -151,20 +138,12 @@ class World(Fake):
         return 8, 16384
 
 
-class TaskTest(unittest.TestCase):
+class TaskTest(fakes.FlowTest):
     WORLD = World
+    UNSET = fakes.FlowTest.UNSET + ("WK_PLACE",)
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-sysimage-task-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), True)
-        osenv = mock.patch.dict(os.environ, {}, clear=False)
-        osenv.start()
-        self.addCleanup(osenv.stop)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_PLACE"):
-            os.environ.pop(v, None)
-        p = mock.patch.object(record, "host_name", return_value="here")
-        p.start()
-        self.addCleanup(p.stop)
+        super().setUp()
         self.w = self.WORLD(self.tmp)
 
     def fresh(self):
@@ -297,13 +276,6 @@ class Lifecycle:
         for line in ("would build image %s (builder: %s)" % (self.w.PRESET, self.w.KIND), "dry run -- nothing was built.") + self.w.DRY:
             self.assertIn(line, err)
         self.assertEqual((self.w.recs().list(), [e for e in self.w.effects if e[0] != "run"]), ([], []))
-
-    def test_a_build_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[sysimage build]`: each run its own record, whatever the killed one held gone with it."""
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                w.driver().build([])
-        converges(self, lambda: self.WORLD(self.tmp), run_once, self.WORLD.state)
 
 
 class TestTheBuildrootLifecycle(Lifecycle, TaskTest):

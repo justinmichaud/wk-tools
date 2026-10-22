@@ -9,7 +9,6 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk.clock import Clock  # noqa: E402
 
 
-
 class TestTheRecordCarriesIt(WkTest):
     def test_a_reader_sees_it_against_the_running_build(self):
         subject = ("slot base in yocto-p at 6f7bb97a3e06 -- instrumented, "
@@ -25,7 +24,6 @@ class TestTheRecordCarriesIt(WkTest):
 
 
 class TestTheWatchdogMeasuresWhatDetached(WkTest):
-
     WATCHDOG = REPO / "build" / "mem-watchdog.sh"
 
     def _lift(self, func):
@@ -66,12 +64,6 @@ class TestSelftestRefusesBesideABuild(WkTest):
         self.assertIn("--force proceeds anyway", cp.stdout)
         self.assertIn("wk selftest\n", cp.stdout)
         self.assertNotIn("tiers:", cp.stdout)
-
-    def test_the_tiers_that_need_no_machine_run_beside_a_build(self):
-        env = builds_on_the_books_env(self.tmp, "wk-test-fake-build")
-        cp = run("selftest", "test_the_task_a_log_names_is_the_last_one", env=env)
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("tiers: lint,unit  tests: 1 ", cp.stdout)
 
 
 if __name__ == "__main__":

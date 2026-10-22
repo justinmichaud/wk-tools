@@ -13,11 +13,11 @@ import unittest
 from unittest import mock
 
 from tests.fakes import FakeRegistry, WsDriver
-from tests.support import REPO, as_dispatched, load_cmd, run
+from tests.support import REPO, as_dispatched, load_cmd
 from tests.test_doctor_wall import _Wall
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, places, wall  # noqa: E402
+from wk import act, decl, places, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
@@ -281,11 +281,9 @@ class TestWhatIsWkTheAgentNever(_Flow):
     def test_each_refusal(self):
         for argv, said in (((), "'wk ai' needs one of: claude, pi"),
                            (("gpt", "demo"), "unknown verb: gpt (one of claude, pi)")):
-            with self.subTest(argv=argv):
-                cp = run("ai", *argv)
-                self.assertEqual(2, cp.returncode, cp.stdout)
-                self.assertIn(said, cp.stdout)
-                self.assertIn("usage: wk ai claude|pi <workspace>", cp.stdout)
+            with self.subTest(argv=argv), self.assertRaises(decl.Usage) as e:
+                decl.parse("ai", AI.COMMAND, list(argv))
+            self.assertEqual(said, str(e.exception))
 
     def test_an_invalid_name_is_refused(self):
         self.env["WK_NAME"] = "-x"

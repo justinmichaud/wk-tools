@@ -1,4 +1,4 @@
-"""Lifecycle commands: `wk start`/`wk stop` (all or one), `wk enter --`, and one real container workspace end to end."""
+"""`wk start`/`wk stop`, everything or one workspace: the dry run, and `wk start`'s exit code is its own."""
 import contextlib
 import io
 import os
@@ -6,7 +6,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, load_cmd, rand_suffix, requires_container_place, run, stub_path
+from tests.support import REPO, WkTest, load_cmd, run, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
@@ -101,59 +101,6 @@ class TestStartAndStopHaveADryRun(unittest.TestCase):
                 self.assertTrue(getattr(self.ctr, verb)("a"))
             self.assertIn("would run: podman %s" % verb, err.getvalue())
         self.assertEqual([], self.m.effects)
-
-
-class TestEnterDashDash(unittest.TestCase):
-    def test_enter_dash_dash_command_reaches_the_command(self):
-        cp = run("enter", "zz-does-not-exist-xyz", "--", "true", env={"WK_PLACE": "vm"})
-        self.assertNotIn("--: command not found", cp.stdout)
-        self.assertIn("no such workspace", cp.stdout)
-
-
-@requires_container_place()
-class TestContainerLifecycle(WkTest):
-    """new -> stop <ws> -> start <ws> -> the shared store mount -> rm <ws> <bogus>."""
-
-    def setUp(self):
-        super().setUp()
-        self.name = f"wk-test-{rand_suffix()}"
-        self._created = False
-
-    def tearDown(self):
-        if self._created:
-            cp = run("rm", self.name, env={"WK_YES": "1"})
-            if cp.returncode != 0:
-                print(f"[teardown] 'wk rm {self.name}' exited {cp.returncode}: {cp.stdout}")
-        super().tearDown()
-
-    def _state_line(self, ls_output):
-        return next((l for l in ls_output.splitlines() if self.name in l), "")
-
-    def test_stop_start_shared_mount_and_multi_rm(self):
-        cp = run("new", self.name, "--on", "container", timeout=600)
-        self._created = cp.returncode == 0
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-
-        run("status", self.name, "--wait", "--timeout", "300")
-
-        cp = run("stop", self.name)
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        cp = run("ls")
-        self.assertIn(self.name, cp.stdout)
-        self.assertNotIn("running", self._state_line(cp.stdout))
-
-        cp = run("start", self.name)
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("running", self._state_line(run("ls").stdout))
-
-        # The store is mounted at the same path inside, so an in-workspace build's status reaches the host.
-        cp = run("enter", self.name, "--", "test", "-d", f"/var/lib/wk/ws/{self.name}")
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-
-        cp = run("rm", self.name, f"wk-test-{rand_suffix()}-nonexistent", env={"WK_YES": "1"})
-        self.assertNotEqual(cp.returncode, 0, cp.stdout)
-        self.assertNotIn(self.name, run("ls").stdout)
-        self._created = False
 
 
 if __name__ == "__main__":

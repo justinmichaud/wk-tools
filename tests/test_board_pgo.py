@@ -12,15 +12,14 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+from tests import fakes
 from tests.fakes import FakeRegistry
-from tests.killpoints import converges
 from tests.test_ab_plan import ABTest, Inline
 from tests.support import REPO, WkTest, _clean_env, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import images, pgo, record as progress, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -32,16 +31,17 @@ WK = str(REPO / "wk")
 RES = "machine:tolken"
 
 
-class World:
+class World(fakes.World):
     """This host holding the image workspace, a board `rpi5` running `mode`, and every step's command answered by the state it leaves."""
 
     def __init__(self, tmp, mode="bench %s-0123abcd" % PROFILE, fail=""):
+        super().__init__()
         self.tmp, self.mode, self.fail = Path(tmp), mode, fail
         self.env = {"WK_STORE": str(self.tmp / "store"), "XDG_STATE_HOME": str(self.tmp / "state"), "HOME": str(self.tmp),
                     "XDG_CONFIG_HOME": str(self.tmp / "config"), "WK_MACHINES_DIR": str(self.tmp / "machines")}
         (self.tmp / "machines").mkdir(parents=True, exist_ok=True)
         (self.tmp / "machines" / "rpi5.conf").write_text("kind=board\nssh=rpi5-rescue\n")
-        self.fake, self.clock, self.built = Fake("here"), FakeClock(), []
+        self.built = []
         self.fake.answer(["hostname", "-s"], out="tolken\n")
         self.fake.react(["sh", "-c", sched.LOGGED], self.logged)
         self.fake.react([WK, "sysimage", "holds"], self.holds)
@@ -102,7 +102,6 @@ class PgoTest(ABTest):
 
 
 class TestWhichProfilesAreProfileGuided(unittest.TestCase):
-
     def wanted(self, glob):
         seen = {}
         for conf in sorted((REPO / "image" / "presets").glob(glob)):
@@ -135,7 +134,6 @@ class TestTheBoardIsReadOffTheFleet(PgoTest):
 
 
 class TestThePhasesAndTheirOrder(PgoTest):
-
     def test_it_instruments_then_collects_every_benchmark_then_mixes_then_rebuilds(self):
         order = [s.id for s in sched.plan_order(list(self.graph(self.world()).values()))]
         self.assertEqual(order, ["instr:%s:pr" % WS, "deploy:rpi5:pr-instr"] + ["collect:rpi5:pr:" + p for p in pgo.BENCHMARKS]
@@ -170,7 +168,6 @@ class TestThePhasesAndTheirOrder(PgoTest):
 
 
 class TestEachPhaseByItself(PgoTest):
-
     def phase(self, w, preset, slot="pr"):
         rc, err = self.webkit(w, "--commit", SHA, "--slot", slot, "--preset", preset)
         self.assertEqual(rc, 0, err)
@@ -213,7 +210,6 @@ class TestTheDryRun(PgoTest):
 
 
 class TestTheCycle(PgoTest):
-
     def test_the_whole_cycle_runs_every_phase_once_into_one_record(self):
         w = self.world()
         rc, err = self.webkit(w, "--commit", SHA, "--slot", "pr")
@@ -229,18 +225,6 @@ class TestTheCycle(PgoTest):
         self.assertIn("the cycle for 'pr' stopped", self.refused(w, "--commit", SHA, "--slot", "pr"))
         self.assertNotIn("/state/mix/pr", w.state())
         self.assertNotEqual(w.recs().list()[0].field("exit"), "0")
-
-    def test_a_cycle_killed_after_any_effect_and_run_again_converges(self):
-        base = os.path.join(self.tmp, "kill")
-
-        def make():
-            self.n += 1
-            return World(os.path.join(base, str(self.n)))
-
-        def once(w):
-            rc, err = self.quiet(w.cycle().webkit, ["--commit", SHA, "--slot", "pr"])
-            self.assertEqual(rc, 0, err)
-        converges(self, make, once, World.state)
 
     def test_stop_with_no_cycle_running_says_so_and_exits_0(self):
         rc, err = self.webkit(self.world(), "--slot", "pr", "--stop")
@@ -390,7 +374,6 @@ class TestTheMixingIsUpstreams(MixTest):
 
 
 class TestTheGateReadsBothLayouts(MixTest):
-
     def setUp(self):
         super().setUp()
         self.mix()
@@ -461,7 +444,6 @@ class TestTheDriverPullsWhatTheBoardWrote(WkTest):
 
 
 class TestARealCollection(unittest.TestCase):
-
     def collection(self, board):
         found = sorted(Path(Store().ws_dir("x")).parent.glob("yocto-webkit-2.52-yocto-%s-*/build/wk-pgo/*/profile-check.json"
                                                                      % board), key=os.path.getmtime)

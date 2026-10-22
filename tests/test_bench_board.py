@@ -14,16 +14,16 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes import FakeProc, FakeRegistry, WsDriver
-from tests.killpoints import converges
 from tests.support import REPO, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_report import in_process  # noqa: E402
 from tests.test_bench_task import refusal  # noqa: E402
-from tests.test_bench_pipeline import PLAN_JSON, RESULT, SHA, Acting, CleanTest, registry as pipeline_registry, invoke  # noqa: E402
+from tests import fakes
+from tests.test_bench_pipeline import PLAN_JSON, RESULT, SHA, CleanTest, SystemConformance, registry as pipeline_registry, invoke  # noqa: E402
 from wk import images, pgo, project, record, samply  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import board, cli, plans, record as brecord  # noqa: E402
+from wk.bench import ab, board, cli, plans, record as brecord  # noqa: E402
 from wk.bench.pipeline import Run  # noqa: E402
 from wk.boot import cli as bootcli  # noqa: E402
 from wk.boot.driver import Driver, Onboard, part  # noqa: E402
@@ -97,7 +97,7 @@ def board_conf():
             "role": "bench-device", "root": "/dev/mmcblk0p2", "device": "/dev/sda", "note": "test board"}
 
 
-class BenchSide(Acting, Side):
+class BenchSide(Side):
     """One side as a real `Ssh` looks to a run: a destination and options, and `via` the machine holding its forward."""
 
     def __init__(self, fakeboard, name):
@@ -152,13 +152,13 @@ def machines_dir(tmp):
     return str(tmp / "machines")
 
 
-class DeployWorld:
+class DeployWorld(fakes.World):
+    """A board's bench system holding the slot a deploy lands, and the image workspace it is built in."""
+
     def __init__(self, tmp):
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
+        super().__init__(tmp, name="board")
         self.env = {"WK_STORE": str(self.tmp / "store"), "WK_MACHINES_DIR": machines_dir(self.tmp)}
-        self.fake = Fake("board")
-        self.fake.react(["mv", "-f"], _mv)
-        self.clock = FakeClock()
+        self.react(["mv", "-f"], _mv)
         self.board = BenchBoard(board_conf(), self.clock)
         self.slotdir, self.doc = write_slot(self.env, "a")
 
@@ -176,7 +176,7 @@ class DeployWorld:
         return board.for_board(str(REPO), self.bench().reg, WS, self.clock, BOARD, machine=self.fake, driver=Driver(REPO, board_conf(), self.board))
 
     def state(self):
-        return dict(self.fake.files), set(self.fake.dirs)
+        return {self.rel(p): v for p, v in self.files.items()}, sorted(self.rel(d) for d in self.dirs)
 
 
 # A board's process table as directories, and the tools clear.sh signals with acting on it; a pid listed in $STUBBORN dies only to -9.
@@ -192,7 +192,6 @@ killall() { local s= x y; [ "$1" = -9 ] && { s=-9; shift; }; for x; do for y in 
 
 
 class TestClearingABoard(unittest.TestCase):
-
     def run_clear(self, procs, mine="10.0.0.1 5000 10.0.0.2 22", stubborn=""):
         with tempfile.TemporaryDirectory() as d:
             for pid, comm, conn in procs:
@@ -271,18 +270,8 @@ class TestDeploy(CleanTest):
         self.assertIn("another live task holds it", self.refused(w))
         self.assertEqual(w.fake.effects, [])
 
-    def test_the_deploy_plan_is_its_mutations(self):
-        _, dry = self.same_plan(lambda: DeployWorld(self.tmp), DeployWorld.deploy,
-                                lambda w: [e for e in w.fake.effects if e[0] in ("mkdir", "remove", "copy_in", "copy_tree_in")])
-        self.assertEqual(dry.fake.files, {})
-        self.assertNotIn(board.slot_path("a"), dry.fake.dirs)
-
-    def test_a_deploy_killed_after_any_effect_and_rerun_converges(self):
-        converges(self, lambda: DeployWorld(self.tmp), lambda w: w.deploy(), DeployWorld.state)
-
 
 class TestInAWorkspaceItIsABrokerRequest(unittest.TestCase):
-
     def world(self, socket_up=True):
         here = Fake("here")
         here.answer(["test", "-S"], rc=0 if socket_up else 1)
@@ -347,22 +336,18 @@ def cached_samply(w):
     return path
 
 
-class BoardWorld(Acting, Fake):
+class BoardWorld(fakes.World):
     """This host running `wk bench run ws <plan> --system testboard`: its store, the mirror the runner tree is
     exported from (already exported), the payload pinned, and a BenchBoard up in bench mode with slot `a` on it.
     `start` is run-benchmark: it writes the result and the driver's running-binary check, and notes whether
     the board's forward was held while it ran."""
 
     def __init__(self, tmp, rc=0):
-        super().__init__("here")
+        super().__init__(tmp, WK_NAME="ws", WK_IN_VM="1", WK_JOB_PID_TRIES="0", WK_POLL_SECONDS="1")
+        self.env["WK_MACHINES_DIR"] = machines_dir(self.tmp)
         self.kind, self.rc, self.driver_cls = "container", rc, Driver
         self.fails = lambda exports: False
         self.evidence = lambda exports: EVIDENCE
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_NAME": "ws", "WK_MACHINES_DIR": machines_dir(self.tmp),
-                    "WK_IN_VM": "1", "WK_JOB_PID_TRIES": "0", "WK_POLL_SECONDS": "1"}
-        self.clock = FakeClock()
         self.board = BenchBoard(board_conf(), self.clock)
         self.fake = self.board.bench
         self.board.bench.files[board.slot_path("a") + "/slot.json"] = json.dumps(SLOT_DOC)
@@ -474,7 +459,6 @@ class TestARun(BoardTest):
     def test_the_board_is_prepared_and_the_run_is_run_here_with_its_forward_held_into_one_record(self):
         w = self.world()
         self.assertEqual(w.invoke(), 0, w.err)
-        self.assertIn("BENCH OK  jetstream3", w.err)
         ((argv, cwd),) = w.watched
         self.assertEqual((argv[:2], cwd), (["bash", "-c"], w.tree))
         self.assertTrue(w.forwarded[0], "no forward was held while run-benchmark ran")
@@ -507,6 +491,7 @@ class TestARun(BoardTest):
         self.assertEqual((w.run_dir() / "browser.log").read_text(), "browser said this\n")
 
     def test_a_failed_leg_keeps_its_evidence(self):
+        """`unit bench.failed_leg_keeps_evidence`"""
         w = self.world(rc=3)
         self.assertEqual(w.invoke(), 3, w.err)
         d = w.run_dir()
@@ -596,7 +581,6 @@ class TestRefusals(BoardTest):
 
 
 class TestTheLaunch(unittest.TestCase):
-
     def system(self, session="drm"):
         s = board.Board(str(REPO), mock.Mock(), "", FakeClock(), BOARD, None, Fake())
         s.doc, s.session = dict(SLOT_DOC), session
@@ -647,7 +631,6 @@ class TestTheLaunch(unittest.TestCase):
 
 
 class TestALegForAnAB(BoardTest):
-
     def task(self, w):
         taskdir = w.bench_dir() / "t1"
         brecord.task_write(str(taskdir), kv(["task=t1", "requested=x", "devices=" + BOARD, "plans=jetstream3", "rounds=2", "slots=a,b"]), ["wk bench run --ab"])
@@ -730,38 +713,30 @@ class TestTheRunnerTree(BoardTest):
         self.assertIn("'wk sync' makes one", err.getvalue())
 
 
-class TestKill(BoardTest):
-    def test_nothing_running_says_so(self):
-        w = self.world()
-        self.assertEqual(w.invoke("--kill"), 2, w.err)
-        self.assertIn("no bench is running for 'ws'", w.err)
+class TestTheBoardSystem(SystemConformance, BoardTest):
+    PLAN, OUTCOME, KILL_RC, SCREEN = "jetstream3", ("complete", 1, "0"), 2, False
 
+    def setUp(self):
+        super().setUp()
+        self.w = self.world()
+
+    def bench(self):
+        return self.w.invoke(), self.w.err
+
+    def outcome(self):
+        return self.w.state()
+
+    def kill(self):
+        return self.w.invoke("--kill"), self.w.err
+
+
+class TestKill(BoardTest):
     def test_a_live_run_is_stopped_and_recorded_cancelled(self):
         w = self.world()
         w.pids.add(99)
         w.recs().begin("bench", "here", "ws", "k", "/l", ["x"], pid=99)
         self.assertEqual(w.invoke("--kill"), 0, w.err)
         self.assertEqual(w.recs().list()[-1].field("exit"), "cancelled")
-
-
-class TestDryRun(BoardTest):
-    def test_the_plan_is_the_runs_mutations(self):
-        def mutations(w):
-            both = [("board",) + e for e in w.board.bench.effects] + [("here",) + e for e in w.effects]
-            return [e for e in both if e[1] in ("act", "write", "mkdir", "remove", "copy_in", "copy_out", "forward")
-                    and not (isinstance(e[2], str) and e[2].startswith(w.env["WK_LOCK_DIR"]))]
-        _, dry = self.same_plan(self.world, BoardWorld.invoke, mutations)
-        self.assertIn("dry run -- nothing was benchmarked", dry.err)
-        self.assertIn("would run: bash -c", dry.err)
-        self.assertEqual((dry.watched, dry.tasks(), dry.recs().list()), ([], [], []))
-
-
-class TestKillPoints(BoardTest):
-    def test_a_run_killed_after_any_effect_on_the_board_and_rerun_converges(self):
-        def run_once(w):
-            w.clock.t += 1
-            w.invoke()
-        converges(self, self.world, run_once, BoardWorld.state)
 
 
 class ABTest(BoardTest):
@@ -783,7 +758,6 @@ class ABTest(BoardTest):
 
 
 class TestASlotAB(ABTest):
-
     def test_a_discarded_warmup_then_rounds_that_alternate_the_lead(self):
         w = self.ab_world()
         self.assertEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "2"), 0, w.err)
@@ -912,7 +886,6 @@ class TestASlotAB(ABTest):
 
 
 class TestTwoSystemsOnFake(ABTest):
-
     def systems_world(self):
         w = self.world()
         w.driver_cls = Rpi5Usb
@@ -949,7 +922,6 @@ def live_board(name):
 
 
 class TestARealBoardAnswersWhatALegRecords(unittest.TestCase):
-
     def evidence(self, name):
         d, system = live_board(name)
         mode = d.probe()
@@ -972,6 +944,63 @@ class TestARealBoardAnswersWhatALegRecords(unittest.TestCase):
     @requires_machine("root@rpi5-bench")
     def test_rpi5(self):
         self.evidence("rpi5")
+
+
+class TestTheLegsSystem(BoardTest):
+    """Each leg boots its system through Boot.enter (tests/test_boot_cmd.py's TestEnter holds the retry rule)."""
+
+    def test_a_leg_whose_system_will_not_come_up_is_lost_and_nothing_runs(self):
+        w = self.world()
+        w.board.write_system(part("/dev/sda", 3), "sys-b")
+        w.board.stuck = True
+        err = io.StringIO()
+        with w.patches(), contextlib.redirect_stderr(err):
+            reg = pipeline_registry(w)
+            s = board.for_board(str(REPO), reg, "ws", w.clock, BOARD, driver=Rpi5Usb(REPO, w.board.conf, w.board))
+            a = ab.AB(str(REPO), reg, w.clock, "ws", ["jetstream3"], {}, "system", [ab.Arm("sys-a", s, "a", ident="sys-a"),
+                                                                                   ab.Arm("sys-b", s, "a", ident="sys-b")], cli.ab_report)
+            self.assertFalse(a.arm_leg(1, "jetstream3", {"round": "1"}))
+        self.assertIn("would not come up as sys-b in %d attempts; the leg is lost" % bootcli.TRIES, err.getvalue())
+        self.assertFalse(w.board.kept)
+
+
+class TestTheWidth(unittest.TestCase):
+    def test_a_system_id_or_a_preset_name_reads_its_presets_width(self):
+        s = board.Board(str(REPO), type("R", (), {"env": os.environ, "machine": Fake()})(), "", FakeClock(), BOARD, None, Fake())
+        for name, bits in (("webkit-2.52-yocto-rpi3-32-ebb646f3bf67", 32), ("webkit-2.52-yocto-rpi5-64-cddf63dc0d4b", 64),
+                           ("webkit-2.52-yocto-rpi4-32", 32)):
+            self.assertEqual(s.width([name]), bits, name)
+
+    def test_every_exclusion_names_a_width_and_a_reason(self):
+        for line in (REPO / ab.EXCLUSIONS).read_text().splitlines():
+            if line.strip() and not line.startswith("#"):
+                plan, bits, name, why = line.split(None, 3)
+                self.assertIn(bits, ("32", "64"), name)
+                self.assertTrue(why.strip(), name)
+
+
+class TestTheKeptSubtests(unittest.TestCase):
+    NARROW = ["argon2-wasm", "dotnet-aot-wasm", "dotnet-interp-wasm", "transformersjs-bert-wasm"]
+    PLAN = {"subtests": {"": ["a-wasm"] + NARROW + ["b", "c"]}}
+
+    def kept(self, bits, drop=""):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            try:
+                return ab.subtests(str(REPO), "jetstream3", self.PLAN, bits, "", drop)
+            except Refused:
+                return err.getvalue()
+
+    def test_the_narrow_width_drops_its_exclusions_from_the_plan_and_the_wide_one_nothing(self):
+        sub, dropped = self.kept(32)
+        self.assertEqual(sub.split(), ["a-wasm", "b", "c"])
+        self.assertEqual(dropped.split(","), self.NARROW)
+        self.assertEqual(self.kept(64), ("", ""))
+
+    def test_a_name_the_plan_does_not_have_refuses(self):
+        self.assertIn("names no subtest", self.kept(64, "nope"))
+
+    def test_excluding_everything_refuses(self):
+        self.assertIn("every subtest", self.kept(64, ",".join(self.PLAN["subtests"][""])))
 
 
 if __name__ == "__main__":

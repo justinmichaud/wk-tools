@@ -19,7 +19,6 @@ def _argvs(steps):
 
 
 class TestFetchRefspecs(unittest.TestCase):
-
     def test_origin_is_narrowed_to_the_mirrored_branches_wherever_it_comes_from(self):
         for mirror in ("/mirror/WebKit.git", ""):
             self.assertEqual(git.fetch_refspecs("origin", mirror, ["main"]), ["+refs/heads/main:refs/remotes/origin/main"])
@@ -37,7 +36,6 @@ class TestFetchRefspecs(unittest.TestCase):
 
 
 class TestTheWiringWritesThoseRefspecs(unittest.TestCase):
-
     def test_each_remote_gets_its_specs_and_no_tags(self):
         steps = git.fetch_config("/mirror/WebKit.git", ["main"], FIFTH)
         argvs = _argvs(steps)

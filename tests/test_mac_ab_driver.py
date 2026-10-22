@@ -177,7 +177,6 @@ def mutations(m):
 
 
 class TestTheFirmwareDefaultIsAsserted(WkTest):
-
     def test_only_the_bench_volume_group_as_the_default_passes(self):
         for boot, ok, said in ((None, True, BENCH_GROUP), ("host", False, "the host install"),
                                (Result(0, "a:b:11111111-2222-3333-4444-555555555555\n"), False, "neither install"),
@@ -194,7 +193,6 @@ class TestTheFirmwareDefaultIsAsserted(WkTest):
 
 
 class TestOnlyTheDeclaredDisplay(WkTest):
-
     def test_one_online_display_of_the_declared_kind(self):
         ext = {"builtin": False, "online": True, "points": [3840, 2160]}
         for doc, want, ok, said in ((BENCH_DISPLAY, "builtin", True, "builtin 1470x956"), (HOST_DISPLAY, "builtin", True, ""),
@@ -223,7 +221,6 @@ class TestThePinnedDisplayIsConfig(WkTest):
 
 
 class TestPreflight(WkTest):
-
     def test_each_gate_fails_by_name_and_a_ready_mac_is_clean_and_changed_nothing(self):
         two = {"displays": [BENCH_DISPLAY["displays"][0], {"online": True, "points": [3840, 2160]}]}
         empty = lambda m: m.fake.answer(r"^ls -1 .*/staged", Result(0, ""))   # noqa: E731
@@ -285,7 +282,6 @@ class TestItSharesTheBoardABsRefusals(WkTest):
 
 
 class TestThePlant(WkTest):
-
     def plant(self, m, setup=lambda m: None):
         ready(m)
         setup(m)
@@ -455,7 +451,6 @@ class TestTheWholeTrip(WkTest):
 
 
 class TestTheWaitReadsBothNodes(WkTest):
-
     def wait(self, m, same_boot=False):
         ready(m)
         m.boot_before = m.d.boot_id() if same_boot else "1"
@@ -494,7 +489,6 @@ class TestAFailedNotifyCostsNothing(WkTest):
 
 
 class TestTheArmsAreBuiltInTheWorkspace(WkTest):
-
     def build(self, patch="refs/heads/pr", setup=lambda m: None, **o):
         with world(systems="", patch=patch, workspace="mac-rel", **o) as m:
             mgr = m.manager_fake

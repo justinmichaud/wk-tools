@@ -30,7 +30,6 @@ def sh(script, cwd=None, timeout=120):
 
 
 class TestAReadingCannotHangALeg(WkTest):
-
     def _read(self, script):
         return sh(f'set -euo pipefail\n. {str(QUIET)!r}\n{script}\n')
 
@@ -81,7 +80,6 @@ class TestAReadingCannotHangALeg(WkTest):
 
 
 class TestATimedOutReadingIsUnknownAndNotAFault(WkTest):
-
     def _judge(self, probe):
         cp = sh(f'set -euo pipefail\n. {str(QUIET)!r}\n'
                 f'wk_quiet_desktop_findings {probe!r} "the remedy"\n')

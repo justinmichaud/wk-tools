@@ -1,23 +1,28 @@
-"""The dispatcher's rules (lib/wk/dispatch.py), each one body over every command's table, driven in process."""
+"""The dispatcher's rules (lib/wk/dispatch.py), each one body over every command's table, driven in process; act's
+dry run, confirm and barrier (lib/wk/act.py); `wk completion`, generated from the tables."""
 import contextlib
 import dataclasses
 import io
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import types
 import unittest
+from contextlib import redirect_stderr
 from unittest import mock
 
-from tests.support import REPO, WkTest, clean_env, fake_workspace, stub_path
+from tests.fakes import Fake, FlowTest
+from tests.support import clean_env, fake_workspace, REPO, stub_path, WK, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, decl, dispatch, places, presets, project, repos, sshalias, store, workspace  # noqa: E402
+from wk import act, completion as C, decl, dispatch, places, presets, project, repos, sshalias, store, workspace  # noqa: E402
 from wk.decl import Command  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from wk.machine import Local  # noqa: E402
+
 
 TABLES = [(name, m.COMMAND) for name, m in decl.commands(REPO)]
 
@@ -377,7 +382,11 @@ class TestTheDirectoryNamesTheWorkspaceOnABuildBox(WkTest):
 
 _ASK = ("import sys; sys.path.insert(0, sys.argv[1]); from wk import places\n"
         "a = getattr(places.Registry(sys.argv[2]), sys.argv[3])(sys.argv[4])\nprint(a if isinstance(a, str) else ' '.join(a))\n")
+
+
 _MACHINE_CONF = "kind=build\ndriver=remote\nhost={host}\n"
+
+
 _LOCAL_CONF = "kind=build\ndriver=remote\nlocal=1\nroot={root}\nstore={store}\n"
 
 
@@ -418,5 +427,238 @@ class TestTheFleetIsWalkedOnce(WkTest):
         self.assertIn("fakedown", cp.stderr)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class ActTest(FlowTest):
+    def stderr(self, fn):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            result = fn()
+        return result, buf.getvalue()
+
+
+class TestAct(ActTest):
+    def test_a_dry_run_prints_the_command_and_runs_nothing(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        marker = self.tmp / "ran"
+        cp, err = self.stderr(lambda: Local().act_run(["touch", str(marker)]))
+        self.assertFalse(marker.exists())
+        self.assertIn("would run: touch", err)
+
+    def test_it_runs_otherwise(self):
+        marker = self.tmp / "ran"
+        cp, _ = self.stderr(lambda: Local().act_run(["touch", str(marker)]))
+        self.assertEqual(cp.rc, 0)
+        self.assertTrue(marker.exists())
+
+    def test_a_destructive_command_cannot_act_before_asking(self):
+        os.environ["WK_DESTRUCTIVE"] = "1"
+        marker = self.tmp / "ran"
+        with self.assertRaises(act.Refused):
+            self.stderr(lambda: Local().act_run(["touch", str(marker)]))
+        self.assertFalse(marker.exists())
+
+    def test_nothing_to_ask_acts_without_prompting(self):
+        os.environ["WK_DESTRUCTIVE"] = "1"
+        marker = self.tmp / "ran"
+        _, err = self.stderr(act.nothing_to_ask)
+        self.assertEqual(err, "")
+        self.assertTrue(act.asked())
+        cp, _ = self.stderr(lambda: Local().act_run(["touch", str(marker)]))
+        self.assertEqual(cp.rc, 0)
+        self.assertTrue(marker.exists())
+
+    def test_an_answered_confirm_lets_a_destructive_command_act(self):
+        os.environ["WK_DESTRUCTIVE"] = "1"
+        os.environ["WK_YES"] = "1"
+        ok, _ = self.stderr(lambda: act.confirm("remove it?"))
+        self.assertTrue(ok and act.asked())
+        cp, _ = self.stderr(lambda: Local().act_run(["true"]))
+        self.assertEqual(cp.rc, 0)
+
+    def test_a_declined_confirm_still_cannot_act(self):
+        os.environ["WK_DESTRUCTIVE"] = "1"
+        ok, _ = self.stderr(lambda: act.confirm("remove it?", stdin=io.StringIO("y\n")))
+        self.assertFalse(ok or act.asked())
+        with self.assertRaises(act.Refused):
+            self.stderr(lambda: Local().act_run(["true"]))
+
+
+class TestConfirm(ActTest):
+    def test_yes_answers_and_records_the_answer(self):
+        os.environ["WK_YES"] = "1"
+        ok, err = self.stderr(lambda: act.confirm("remove it?"))
+        self.assertTrue(ok)
+        self.assertEqual(os.environ.get("WK_CONFIRMED"), "1")
+        self.assertEqual(err, "")
+
+    def test_a_dry_run_says_what_it_would_ask(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        ok, err = self.stderr(lambda: act.confirm("remove it?"))
+        self.assertTrue(ok)
+        self.assertIn("remove it?", err)
+
+    def test_no_terminal_declines(self):
+        ok, _ = self.stderr(lambda: act.confirm("remove it?", stdin=io.StringIO("y\n")))
+        self.assertFalse(ok)
+        self.assertNotIn("WK_CONFIRMED", os.environ)
+
+    def test_a_terminal_answer_decides(self):
+        class Tty(io.StringIO):
+            def isatty(self):
+                return True
+        ok, _ = self.stderr(lambda: act.confirm("remove it?", stdin=Tty("y\n")))
+        self.assertTrue(ok)
+        os.environ.pop("WK_CONFIRMED", None)
+        ok, _ = self.stderr(lambda: act.confirm("remove it?", stdin=Tty("n\n")))
+        self.assertFalse(ok)
+        self.assertNotIn("WK_CONFIRMED", os.environ)
+
+
+class TestBarrier(ActTest):
+    def test_a_barrier_refuses_and_names_force(self):
+        with self.assertRaises(act.Refused) as cm:
+            self.stderr(lambda: act.barrier("the board is held"))
+        self.assertEqual(cm.exception.status, 1)
+
+    def test_retry_is_its_own_status(self):
+        with self.assertRaises(act.Refused) as cm:
+            self.stderr(lambda: act.barrier("another step is ending", retry=True))
+        self.assertEqual(cm.exception.status, act.RETRY_EXIT)
+
+    def test_force_crosses_it_and_says_so_again_at_the_end(self):
+        os.environ["WK_FORCE"] = "1"
+        _, err = self.stderr(lambda: act.barrier("the board is held\nsecond line"))
+        self.assertIn("FORCED", err)
+        _, summary = self.stderr(act.forced_summary)
+        self.assertIn("the board is held", summary)
+        self.assertNotIn("second line", summary)
+
+
+class TestCompletionGenerator(unittest.TestCase):
+    def test_a_values_list_answered_by_a_store_is_not_asked_at_tab(self):
+        cmds = {name: m.COMMAND for name, m in decl.commands(REPO)}
+        self.assertEqual(C.values_cmd(cmds["bench"]), "")
+        self.assertEqual(C.values_cmd(cmds["boot"]), "--list")
+
+    def test_workspace_listing_never_touches_a_machine(self):
+        tmp = tempfile.mkdtemp(prefix="wk-completion-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        os.makedirs(os.path.join(tmp, "ws", "demo-ws"))
+        env = dict(os.environ, WK_STORE=tmp)
+        with mock.patch.object(Local, "run", side_effect=AssertionError("probed a machine")), \
+             mock.patch.object(Local, "run_tty", side_effect=AssertionError("probed a machine")):
+            self.assertEqual(C.local_workspaces(REPO, env=env), ["demo-ws"])
+
+
+class TestCompletionScripts(unittest.TestCase):
+    def script(self, shell):
+        """`wk completion <shell>` driven through the dispatcher in process: (exit, the script)."""
+        with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(dispatch.Exit) as cm:
+                dispatch.completion_cmd([shell])
+        return cm.exception.status, out.getvalue()
+
+    def test_zsh_completion_registers_wk_where_no_rc_ran_compinit(self):
+        zsh = shutil.which("zsh")
+        if not zsh:
+            self.skipTest("zsh not installed")
+        rc, text = self.script("zsh")
+        self.assertEqual(rc, 0, text)
+        tmp = tempfile.mkdtemp(prefix="wk-completion-zsh-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        script = os.path.join(tmp, "completion.zsh")
+        with open(script, "w") as f:
+            f.write(text)
+        proc = subprocess.run([zsh, "-f", "-c", f"source {script}; print -r -- ${{_comps[wk]}}"],
+                              env={**os.environ, "HOME": tmp}, capture_output=True, text=True, timeout=30)
+        self.assertEqual(proc.stderr, "", f"the completion script complained:\n{proc.stderr}")
+        self.assertIn("_wk_completion", proc.stdout, "`wk` was left with no completion")
+
+    def test_completion_refuses_an_unknown_shell(self):
+        self.assertEqual(self.script("fish")[0], 2)
+
+
+class TestBashCompletionFunction(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="wk-completion-bash-")
+        cls.script = os.path.join(cls.tmp, "completion.bash")
+        with open(cls.script, "w") as f:
+            f.write(C.generate(REPO, "bash"))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def _complete(self, comp_words, cword, env=None):
+        words = " ".join(f"'{w}'" for w in comp_words)
+        script = f"""
+set -e
+source "{self.script}"
+COMP_WORDS=({words})
+COMP_CWORD={cword}
+_wk_completion
+printf '%s\\n' "${{COMPREPLY[@]}}"
+"""
+        cp = subprocess.run(["bash", "-c", script], cwd=str(REPO), env=dict(os.environ, **(env or {})),
+                            capture_output=True, text=True, timeout=30)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        return [l for l in cp.stdout.splitlines() if l]
+
+    def test_a_prefix_completes_to_the_command_or_verb(self):
+        self.assertEqual(self._complete([str(WK), "bu"], 1), ["build"])
+        self.assertEqual(self._complete([str(WK), "key", "che"], 2), ["check"])
+
+    def test_completing_the_command_word_offers_every_command(self):
+        reply = self._complete([str(WK), ""], 1)
+        self.assertIn("build", reply)
+        self.assertIn("new", reply)
+        self.assertIn("completion", reply)
+
+    def test_config_flag_completes_build_configs(self):
+        reply = self._complete([str(WK), "test", "somews", "--preset", ""], 4)
+        self.assertIn("jsc-release", reply)
+        self.assertIn("mac-release", reply)
+
+    def test_the_word_after_a_value_taking_flag_is_not_the_workspace(self):
+        reply = self._complete([str(WK), "build", "--branch", "x", ""], 4, env=self._store())
+        self.assertIn("demo-ws", reply)
+
+    def test_the_argument_after_the_workspace_offers_the_declared_values(self):
+        reply = self._complete([str(WK), "build", "somews", ""], 3)
+        self.assertIn("jsc-release", reply)
+        self.assertNotIn("available", reply)
+
+    def _store(self):
+        tmp = tempfile.mkdtemp(prefix="wk-completion-test-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        os.makedirs(os.path.join(tmp, "ws", "demo-ws"))
+        return {"WK_STORE": tmp}
+
+    def test_the_workspace_place_is_the_verbs(self):
+        env = self._store()
+        first = self._complete([str(WK), "bench", ""], 2, env=env)
+        self.assertIn("run", first)
+        self.assertNotIn("demo-ws", first)
+        self.assertIn("demo-ws", self._complete([str(WK), "bench", "run", ""], 3, env=env))
+
+    def test_a_default_verb_that_takes_a_workspace_offers_it_first(self):
+        reply = self._complete([str(WK), "pr", ""], 2, env=self._store())
+        self.assertIn("rebase", reply)
+        self.assertIn("demo-ws", reply)
+
+    def test_every_verb_of_every_command_completes_its_declared_options(self):
+        want, lines = {}, []
+        for name, m in decl.commands(REPO):
+            for v, fields in m.COMMAND.subs.items():
+                want[f"{name} {v}"] = " ".join(C.flags(decl.under(m.COMMAND, fields)))
+                lines.append(f"t {name} {v}")
+        script = ('source <("%s" completion bash)\n'
+                  't() { COMP_WORDS=(wk "$1" "$2" --); COMP_CWORD=3; _wk_completion; echo "$1 $2:${COMPREPLY[*]}"; }\n%s\n'
+                  % (WK, "\n".join(lines)))
+        cp = subprocess.run(["bash", "-c", script], cwd=str(REPO), capture_output=True, text=True, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        got = dict(l.split(":", 1) for l in cp.stdout.splitlines())
+        self.assertEqual(got, want)
+
+    def test_completion_offers_its_shells(self):
+        self.assertEqual(self._complete([str(WK), "completion", ""], 2), ["bash", "zsh"])

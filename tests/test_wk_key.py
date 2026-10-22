@@ -16,7 +16,6 @@ import unittest
 from unittest import mock
 
 from tests.fakes import FakeRegistry, FakeDriver
-from tests.killpoints import converges
 from tests.test_wk_secrets import ROOT, SECRETFILE, SecretsTest, World
 
 import credcheck  # noqa: E402
@@ -91,10 +90,6 @@ class KeyWorld(World):
         self.answer(["git", "-c", "safe.directory=*", "-C", ROOT, "remote", "get-url", "origin"], out="git@github.com:someone/wk-tools.git\n")
         self.react(["hostname", "-s"], lambda a, f: Result(0, "here\n"))
         self.react(["rm"], self._rm)
-
-    @property
-    def fake(self):
-        return self
 
     def state(self):
         return (dict(self.files), {n: p.state() for n, p in self.peers.items()},
@@ -222,6 +217,17 @@ class KeyTest(SecretsTest):
         self.assertEqual(0, rc)
         self.assertEqual(value + "\n", w.files[w.sec().cred_path(name)])
         return [" ".join(a) for a in w.argvs()], [i for _, i in w.inputs]
+
+    def fleet_world(self):
+        w = KeyWorld(self.tmp, [Peer("peerbox", creds={"github-pat": STALE})])
+        w.holds("github-pat", GOOD)
+        return w
+
+    def keyed_fleet(self):
+        w = self.fleet_world()
+        w.keys()
+        w.holds("ntfy", TOPIC)
+        return w
 
     def provisioned(self, *peers, pat=GOOD):
         w = self.world(*peers)
@@ -360,74 +366,18 @@ class TestAMintedValueIsShownOnlyWhenItMayTravel(KeyTest):
         self.assertNotIn("printed once", said)
 
 
-class TestCrashOnlyAndDryRun(KeyTest):
-    def fleet_world(self):
-        w = KeyWorld(self.tmp, [Peer("peerbox", creds={"github-pat": STALE})])
-        w.holds("github-pat", GOOD)
-        return w
-
-    def setup_once(self, w):
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.key(w).setup()
-
-    def test_setup_killed_after_any_effect_and_rerun_converges(self):
+class TestADrySet(KeyTest):
+    def test_a_dry_set_stops_at_the_mint_and_the_wet_one_stores_it(self):
+        """A minted value exists only once minted, so a dry `set` plans nothing past the mint."""
         os.environ["WK_YES"] = "1"
-        converges(self, self.fleet_world, self.setup_once, KeyWorld.state, max_effects=120)
-        w = self.fleet_world()
-        self.setup_once(w)
-        self.assertEqual({"github-pat": GOOD, "ntfy": TOPIC}, w.peers["peerbox"].creds)
-        self.assertEqual({f: "KEY:%s-g1" % f for f in REPOS}, w.peers["peerbox"].keys)
-        self.assertEqual([pub_of("KEY:fork-g1")], list(w.github[REPOS["fork"]].values()))
-
-    def test_deploy_killed_after_any_effect_and_rerun_converges(self):
-        os.environ["WK_YES"] = "1"
-
-        def deploy(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                self.key(w).deploy()
-        converges(self, self.fleet_world, deploy, KeyWorld.state, max_effects=80)
-
-    def keyed_fleet(self):
-        w = self.fleet_world()
-        w.keys()
-        w.holds("ntfy", TOPIC)
-        return w
-
-    def test_a_dry_run_of_each_verb_is_the_wet_runs_plan_and_touches_nothing(self):
-        """`minted`: the wet run publishes the public half of a key the dry one did not write, so has none to derive."""
-        os.environ["WK_YES"] = "1"
-        fresh = lambda: KeyWorld(self.tmp)
-        for name, make, verb, minted, planned in (
-                ("setup", self.keyed_fleet, lambda k: k.setup(), False,
-                 lambda a: a[0] == "act" and "PEER peerbox key adopt fork" in " ".join(a[1])),
-                ("deploy", self.keyed_fleet, lambda k: k.deploy(), False,
-                 lambda a: a[0] == "act" and a[1][:2] == ("gh", "api")),
-                ("set", fresh, lambda k: k.set("ntfy"), False, lambda a: True),
-                ("ensure", fresh, lambda k: k.ensure(), True, lambda a: True),
-                ("adopt", fresh, lambda k: k.adopt_verb("fork", lambda: b"KEY:taken\n"), True, lambda a: True)):
-            with self.subTest(verb=name):
-                os.environ.pop("WK_DRY_RUN", None)
-                wet = make()
-                with contextlib.redirect_stderr(io.StringIO()), mock.patch("os.urandom", return_value=b"\0" * 8):
-                    try:
-                        verb(self.key(wet))
-                    except Refused:
-                        pass
-                    dry = make()
-                    before = dry.state()
-                    os.environ["WK_DRY_RUN"] = "1"
-                    try:
-                        verb(self.key(dry))
-                    except Refused:
-                        pass
-                plan = wet.acts()
-                self.assertTrue([a for a in plan if planned(a)], plan)
-                if name == "set":   # a minted value exists only once minted, so the dry run stops at the mint
-                    plan = []
-                self.assertEqual([a for a in plan if not (minted and (".pub" in str(a) or "/view" in str(a)))], dry.acts())
-                self.assertEqual(before, dry.state())
-                if name == "set":
-                    self.assertIn(TOPIC + "\n", wet.files.values())
+        wet, dry = KeyWorld(self.tmp), KeyWorld(self.tmp)
+        with contextlib.redirect_stderr(io.StringIO()), mock.patch("os.urandom", return_value=b"\0" * 8):
+            self.key(wet).set("ntfy")
+            before = dry.state()
+            os.environ["WK_DRY_RUN"] = "1"
+            self.key(dry).set("ntfy")
+        self.assertIn(TOPIC + "\n", wet.files.values())
+        self.assertEqual(([], before), (dry.acts(), dry.state()))
 
 
 class TestTheFleetQuestion(KeyTest):

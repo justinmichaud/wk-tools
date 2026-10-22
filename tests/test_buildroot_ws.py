@@ -4,12 +4,11 @@ import io
 import sys
 import unittest
 
+from tests import fakes
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from tests.fakes import FakeClock  # noqa: E402
 from wk.machine import Result, isolated_module  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
 from wk.sysimage import Failed, buildroot_ws as bt  # noqa: E402
 
 TOOLS, SRC = "/opt/wk-tools", "/src/WebKit"
@@ -24,14 +23,13 @@ GUARD = ("env", "WK_MB_PER_JOB=%d" % bt.MB_PER_JOB)
 KT = "/cache/buildroot/dl/wk-kernel-6.1.tar"
 
 
-class WsWorld(Fake):
+class WsWorld(fakes.World):
     """A workspace an in-workspace builder's `Build` runs in."""
 
     BUILD, PARSE, ENV = bt.Build, staticmethod(bt.parse), ENV
 
     def __init__(self):
-        super().__init__("ws")
-        self.clock = FakeClock()
+        super().__init__(name="ws")
 
     def build(self, argv, **preset):
         b = self.BUILD(self.PARSE(argv), self, dict(self.ENV), self.clock, TOOLS)

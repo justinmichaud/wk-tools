@@ -8,7 +8,7 @@ import plistlib
 import sys
 from unittest import mock
 
-from tests.killpoints import converges
+from tests import fakes
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -16,7 +16,6 @@ from wk import daemons  # noqa: E402
 from tests.fakes import FakeClock  # noqa: E402
 from wk.daemons import Daemon  # noqa: E402
 from wk.machine import Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
 
 HOME = "/home/u"
 UNITS = HOME + "/.config/systemd/user/"
@@ -29,11 +28,11 @@ def quiet(fn, *a):
         return fn(*a), err.getvalue()
 
 
-class Box(Fake):
+class Box(fakes.World):
     """systemd and launchd as sets: `active` units, `loaded` labels, `serving` sockets; a name in `refuse` never starts."""
 
     def __init__(self):
-        super().__init__("box")
+        super().__init__(name="box")
         self.active, self.loaded, self.serving, self.refuse, self.boots = set(), set(), set(), set(), {}
         self.answer(["sh", "-c", 'printf %s "$HOME"'], out=HOME)
         self.answer(["systemctl", "--user"])
@@ -162,49 +161,73 @@ class TestTheReadinessProbe(WkTest):
                 self.assertEqual(want, daemons.answers(Local(), where))
 
 
-class TestSystemd(DaemonTest):
-    def ensure(self, word="proxy", sup=None):
+class RendererConformance:
+    """What every renderer does with a row: systemd units in a Linux machine, launchd agents on a Mac. Each class names
+    its renderer's unit for a word, converges one, plants one no row names, and makes one never answer."""
+
+    def test_a_first_run_starts_it_and_a_second_changes_nothing(self):
+        self.assertEqual((True, ["start " + self.name()]), self.converge()[::2])
+        self.box.effects.clear()
+        self.assertEqual((True, []), self.converge()[::2])
+        self.assertEqual([], [e for e in self.box.effects if e[0] not in ("run",)])
+
+    def test_a_changed_program_restarts_it_with_the_new_stamp(self):
+        self.converge()
+        self.stamps[self.PROGRAM] = "2"
+        self.assertEqual((True, ["restart " + self.name()]), self.converge()[::2])
+        self.assertIn(self.STAMPED, self.box.files[self.unit_file()])
+
+    def test_one_that_never_answers_is_named_and_not_called_started(self):
+        self.never_answers()
+        ok, err, changes = self.converge("push")
+        self.assertEqual((False, []), (ok, changes))
+        self.assertIn("%s did not reach readiness -- no workspace here can push" % self.name("push"), err)
+
+    def test_one_no_row_names_is_stopped_and_removed_and_the_rest_are_left(self):
+        other = self.plant_stale()
+        quiet(self.sup().prune, ("proxy", "push", "github-inject"))
+        self.assertEqual(other, set(self.box.files))
+        self.assertEqual((set(), set()), (self.box.active, self.box.loaded))
+
+
+class TestSystemd(RendererConformance, DaemonTest):
+    PROGRAM, STAMPED = "container/proxy/wk-proxy.py", "WK_PROGRAM_STAMP=2"
+
+    def sup(self):
+        return self._sup if hasattr(self, "_sup") else self.systemd()
+
+    def name(self, word="proxy"):
+        return "wk-%s.service" % word
+
+    def unit_file(self):
+        return UNITS + self.name()
+
+    def converge(self, word="proxy", sup=None):
         sup = sup or self.systemd()
         ok, err = quiet(sup.ensure, self.rows()[word])
         return ok, err, sup.changes
 
-    def acts(self):
-        return [e[1][2:4] for e in self.box.effects if e[0] == "run" and e[1][:2] == ("systemctl", "--user") and e[1][2] != "is-active"]
+    def never_answers(self):
+        self.box.refuse.add(self.name("push"))
 
-    def test_a_first_run_writes_the_unit_and_starts_it_and_a_second_changes_nothing(self):
-        self.assertEqual((True, ["start wk-proxy.service"]), self.ensure()[::2])
-        self.assertIn(UNITS + "wk-proxy.service", self.box.files)
-        self.assertEqual(["wk-proxy.service"], sorted(self.box.active))
-        self.box.effects.clear()
-        self.assertEqual((True, []), self.ensure()[::2])
-        self.assertEqual([], self.acts())
-
-    def test_a_changed_program_stops_it_before_the_unit_is_rewritten_and_starts_it_again(self):
-        self.ensure()
-        self.box.effects.clear()
-        self.stamps["container/proxy/wk-proxy.py"] = "2"
-        self.assertEqual((True, ["restart wk-proxy.service"]), self.ensure()[::2])
-        order = [e[0] if e[0] != "run" else e[1][2] for e in self.box.effects if e[0] in ("write", "run") and e[1][:1] != ("sh",)]
-        self.assertLess(order.index("disable"), order.index("write"))
-        self.assertLess(order.index("write"), order.index("enable"))
-        self.assertIn("WK_PROGRAM_STAMP=2", self.box.files[UNITS + "wk-proxy.service"])
-
-    def test_a_unit_that_does_not_reach_readiness_is_named_with_where_to_look(self):
-        self.box.refuse.add("wk-push.service")
-        ok, err, changes = self.ensure("push")
-        self.assertEqual((False, []), (ok, changes))
-        self.assertIn("wk-push.service did not reach readiness -- no workspace here can push", err)
-        self.assertIn("podman machine ssh wk -- journalctl --user -u wk-push.service -e", err)
-
-    def test_a_unit_no_row_names_is_stopped_and_removed_and_the_rest_are_left(self):
+    def plant_stale(self):
         for name in ("wk-old.service", "wk-proxy.service", "other.service"):
             self.box.write(UNITS + name, "x")
         self.box.active.add("wk-old.service")
-        sup = self.systemd()
-        quiet(sup.prune, ("proxy", "push", "github-inject"))
-        self.assertEqual(["stopped and removed wk-old.service (no row names it)"], sup.changes)
-        self.assertEqual({UNITS + "wk-proxy.service", UNITS + "other.service"}, set(self.box.files))
-        self.assertEqual(set(), self.box.active)
+        return {UNITS + "wk-proxy.service", UNITS + "other.service"}
+
+    def test_a_changed_program_stops_it_before_the_unit_is_rewritten(self):
+        self.converge()
+        self.box.effects.clear()
+        self.stamps[self.PROGRAM] = "2"
+        self.converge()
+        order = [e[0] if e[0] != "run" else e[1][2] for e in self.box.effects if e[0] in ("write", "run") and e[1][:1] != ("sh",)]
+        self.assertLess(order.index("disable"), order.index("write"))
+        self.assertLess(order.index("write"), order.index("enable"))
+
+    def test_a_unit_that_does_not_reach_readiness_names_where_to_look(self):
+        self.never_answers()
+        self.assertIn("podman machine ssh wk -- journalctl --user -u wk-push.service -e", self.converge("push")[1])
 
     def test_a_dry_run_says_what_it_would_do_and_does_none_of_it(self):
         self.box.write(UNITS + "wk-old.service", "x")
@@ -212,29 +235,15 @@ class TestSystemd(DaemonTest):
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
             sup = self.systemd()
             quiet(sup.prune, daemons.WORDS)
-            ok, err, changes = self.ensure("proxy", sup)
+            ok, err, changes = self.converge("proxy", sup)
         self.assertEqual(before, self.box.state())
         self.assertEqual(["would have stopped and removed wk-old.service (no row names it)", "would start wk-proxy.service"], changes)
         self.assertIn("would run on box: systemctl --user enable --now wk-proxy.service", err)
 
-    def test_killpoints_daemons(self):
-        def world():
-            box = Box()
-            box.write(UNITS + "wk-old.service", "x")
-            box.write(UNITS + "wk-proxy.service", "old")
-            box.active |= {"wk-old.service", "wk-proxy.service"}
-            box.effects.clear()
-            return type("W", (), {"fake": box})
 
-        def run_once(w):
-            sup = self.systemd(w.fake)
-            quiet(sup.prune, ("proxy", "push", "github-inject"))
-            for word in ("proxy", "push", "github-inject"):
-                quiet(sup.ensure, self.rows()[word])
-        converges(self, world, run_once, lambda w: w.fake.state(), max_effects=40)
+class TestLaunchd(RendererConformance, DaemonTest):
+    PROGRAM, STAMPED = "container/proxy/wk-proxy.py", "<key>WK_PROGRAM_STAMP</key>\n\t\t<string>2</string>"
 
-
-class TestLaunchd(DaemonTest):
     def setUp(self):
         super().setUp()
         self.login = str(self.tmp / "login" / ".credentials.json")
@@ -242,57 +251,59 @@ class TestLaunchd(DaemonTest):
         p = mock.patch.dict(os.environ, {"WK_TEST_LOGIN_DIR": os.path.dirname(self.login)})
         p.start()
         self.addCleanup(p.stop)
-        self.sup = daemons.Launchd(self.box, "/r", "/logs", self.clock)
+        self._sup = daemons.Launchd(self.box, "/r", "/logs", self.clock)
+
+    def sup(self):
+        return self._sup
+
+    def name(self, word="proxy"):
+        return "com.wk." + word
+
+    def unit_file(self):
+        return AGENTS + self.name() + ".plist"
 
     def row(self, word="github-inject", boot=True):
         return Daemon(word, {"SOCK": "/s/%s.sock" % word}, "/s/%s.sock" % word, boot=boot, lock=self.login if word == "github-inject" else None)
 
-    def ensure(self, row):
-        self.sup.changes = []
-        return quiet(self.sup.ensure, row)
+    def converge(self, word="proxy"):
+        self._sup.changes = []
+        ok, err = quiet(self._sup.ensure, self.row(word))
+        return ok, err, self._sup.changes
+
+    def never_answers(self):
+        self.converge("push")
+        self.box.refuse.add(self.name("push"))
+        self.box.serving.clear()
+
+    def plant_stale(self):
+        self.box.write(AGENTS + "com.wk.old.plist", "x")
+        self.box.write(AGENTS + "org.other.plist", "x")
+        self.box.loaded.add("com.wk.old")
+        return {AGENTS + "org.other.plist"}
 
     def test_a_changed_agent_is_booted_out_under_the_logins_lock_and_bootstrapped_back(self):
-        self.assertTrue(self.ensure(self.row())[0])
-        self.assertEqual(["start com.wk.github-inject"], self.sup.changes)
+        self.converge("github-inject")
         self.assertEqual([], self.box.lock_held, "nothing was loaded to boot out")
         self.stamps["container/proxy/github-inject.py"] = "2"
-        self.assertTrue(self.ensure(self.row())[0])
-        self.assertEqual((["restart com.wk.github-inject"], [True]), (self.sup.changes, self.box.lock_held))
+        self.converge("github-inject")
+        self.assertEqual([True], self.box.lock_held)
         self.assertIn("/logs", self.box.dirs)
 
-    def test_an_agent_that_runs_and_answers_is_left_alone(self):
-        self.ensure(self.row("broker"))
-        self.box.effects.clear()
-        self.assertEqual((True, []), (self.ensure(self.row("broker"))[0], self.sup.changes))
-        self.assertEqual([], [e for e in self.box.effects if e[0] != "run" or e[1][1] not in ("print", "-c")])
-
     def test_an_on_demand_agent_is_bootstrapped_then_kickstarted(self):
-        self.assertTrue(self.ensure(self.row("proxy", boot=False))[0])
-        self.assertIn(("run", ("launchctl", "kickstart", self.sup.svc("proxy"))), self.box.effects)
+        self.assertTrue(quiet(self._sup.ensure, self.row("proxy", boot=False))[0])
+        self.assertIn(("run", ("launchctl", "kickstart", self._sup.svc("proxy"))), self.box.effects)
         self.assertIn("/s/proxy.sock", self.box.serving)
 
     def test_a_bootstrap_launchd_refuses_is_named_with_where_to_look(self):
         self.box.refuse.add("com.wk.github-inject")
-        ok, err = self.ensure(self.row())
+        ok, err, _ = self.converge("github-inject")
         self.assertFalse(ok)
         self.assertIn("launchctl print gui/%d/com.wk.github-inject; the log is /logs/github-inject.log" % os.getuid(), err)
 
-    def test_a_loaded_agent_that_never_answers_is_not_called_started(self):
-        self.ensure(self.row("push"))
-        self.box.refuse.add("com.wk.push")
-        self.box.serving.clear()
-        ok, err = self.ensure(self.row("push"))
-        self.assertEqual((False, []), (ok, self.sup.changes))
-        self.assertIn("com.wk.push did not reach readiness -- no workspace here can push", err)
+    def test_a_loaded_agent_that_never_answers_is_waited_for_its_whole_bound(self):
+        self.never_answers()
+        self.converge("push")
         self.assertGreaterEqual(sum(self.clock.slept), daemons.READY_WAIT)
-
-    def test_an_agent_no_row_names_is_booted_out_and_removed(self):
-        self.box.write(AGENTS + "com.wk.old.plist", "x")
-        self.box.write(AGENTS + "org.other.plist", "x")
-        self.box.loaded.add("com.wk.old")
-        quiet(self.sup.prune, daemons.WORDS)
-        self.assertEqual({AGENTS + "org.other.plist"}, set(self.box.files))
-        self.assertEqual(set(), self.box.loaded)
 
 
 class TestTheCommand(DaemonTest):

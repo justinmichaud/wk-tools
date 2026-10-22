@@ -1,7 +1,6 @@
 """`wk sync`: cmd/sync's parse and `--where`, and lib/wk/sync.py's flows over fake places on a fake machine."""
 
 import contextlib
-import io
 import json
 import os
 import subprocess
@@ -13,15 +12,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from tests import fakes
 from tests.fakes import FakeRegistry
-from tests.killpoints import converges
 from tests.support import REPO, load_cmd
-from tests.test_wk_workspace import FlowTest, RecordsActs, Scratch
+from tests.fakes import FlowTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import git, images, places, pr, sync  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
 from wk import decl  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.store import Store  # noqa: E402
@@ -106,17 +104,13 @@ class SyncDriver(places.Driver):
         return self.machine.wk_rc.get(args[1] if len(args) > 1 else "", 0), "said %s\n" % " ".join(args)
 
 
-class World(Scratch, Fake):
+class World(fakes.World):
     """This host: a store in a scratch directory, a mirror the refresh makes, git answering for the snapshot, the
     bridged bash functions answering from `bash`, and each workspace's exec answering from `fetched`."""
 
     def __init__(self, tmp, kinds=None):
-        super().__init__("here")
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_MARKER": str(self.tmp / "no-marker")}
-        self.clock = FakeClock()
-        self.dirs.add(self.env["WK_LOCK_DIR"])
+        super().__init__(tmp)
+        self.env["WK_MARKER"] = str(self.tmp / "no-marker")
         self.workspaces, self.states, self.mirrors, self.far, self.wk_rc = {}, {}, {}, {}, {}
         self.fetched, self.fixes = {}, {}
         self.steps, self.refuse_tools = [], set()
@@ -218,10 +212,6 @@ class World(Scratch, Fake):
         store = self.env["WK_STORE"]
         return (sorted(self.rel(p) for p in self.files if p.startswith(store)),
                 sorted(self.rel(d) for d in self.dirs if d.startswith(store + "/base")), sorted(self.rel(d) for d in self.dirs if d == self.mirror))
-
-
-class Recording(RecordsActs, World):
-    pass
 
 
 class SyncTest(FlowTest):
@@ -661,7 +651,7 @@ class TestTheSnapshot(SyncTest):
 
     def setUp(self):
         super().setUp()
-        self.w = self.make_world(cls=Recording)
+        self.w = self.make_world(cls=World)
 
     def publish_raw(self):
         self.w.sync("place", place="container").sync_snapshot(self.w.reg.load("container"))
@@ -731,37 +721,6 @@ class TestTheSnapshot(SyncTest):
         self.w.react(["git", "clone"], lambda a, f: Result(128, "", "fatal: no space"))
         self.assertIn("fatal: no space", self.refused(self.publish_raw))
         self.assertNotIn(os.path.join(self.w.snapshots_dir(), self.w.clock.stamp()), self.w.dirs)
-
-    def test_a_publish_killed_after_any_effect_and_rerun_converges(self):
-        def world():
-            w = self.make_world()
-            w.publish("20190101T000000Z", sha="b" * 40)
-            return w
-
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                w.sync("tools", place="container").run()
-        converges(self, world, run_once, World.state)
-        w = world()
-        run_once(w)
-        self.assertEqual(w.complete(), [w.clock.stamp(), "20190101T000000Z"])
-
-    def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        def world():
-            w = self.make_world(cls=Recording)
-            w.dirs.add(w.mirror)
-            w.publish("20190101T000000Z", sha="b" * 40)
-            w.workspaces["container"] = ["ws"]
-            return w
-        wet = world()
-        self.stderr(wet.sync("place", place="container", fix=True).run)
-        dry = world()
-        before = dry.state()
-        os.environ["WK_DRY_RUN"] = "1"
-        rc, err = self.stderr(dry.sync("place", place="container", fix=True).run)
-        self.assertEqual(dry.mutations(), wet.mutations())
-        self.assertGreaterEqual(len(dry.mutations()), 10)
-        self.assertEqual(dry.state(), before)
 
 
 class TestTheBaseWiring(SyncTest):

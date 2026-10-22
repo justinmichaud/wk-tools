@@ -102,6 +102,7 @@ class TestHostTools(unittest.TestCase):
                 self.assertEqual(state, self._row(True, fake, "zed")[0])
 
     def test_git_lfs_on_path_or_off_path_is_ok_and_absent_names_the_stage(self):
+        """`unit doctor.TestHostToolsGitLfs`"""
         for macos, on_path, off_path, want in ((True, 1, 1, MISS), (False, 1, 1, MISS), (True, 1, 0, OK), (False, 0, 1, OK)):
             with self.subTest(macos=macos, on_path=on_path, off_path=off_path):
                 fake = Fake()

@@ -13,8 +13,10 @@ import os
 import unittest
 import unittest.mock
 from pathlib import Path
+from unittest import mock
 
-from tests.support import (REPO, WkTest, container_side, container_store, run_here,
+from tests.test_ab_precision import wk
+from tests.support import (REPO, WkTest, container_side, container_store,
                            requires_container_place, run)
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -148,7 +150,6 @@ def load_driver():
 
 
 class TestBoardDriver(unittest.TestCase):
-
     def setUp(self):
         self.d = load_driver()
         self.expect = {"process": "WPEWebProcess",
@@ -205,14 +206,19 @@ class TestBoardDriver(unittest.TestCase):
         self.assertEqual(len(self.d.judge(self.expect, {"pids": "0"})), 1)
 
 
+def dry_wk(cmd, *argv):
+    with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+        return wk(cmd, *argv)
+
+
 class TestSysimageWebkitRefusals(WkTest):
     def test_a_yocto_slot_is_the_webkit_stage(self):
-        cp = run_here("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--commit", "a" * 40, "--slot", "base", "--dry-run", timeout=60)
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn("webkit", cp.stdout)
+        cp = dry_wk("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--commit", "a" * 40, "--slot", "base")
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        self.assertIn("webkit", cp.stdout + cp.stderr)
 
     def test_a_yocto_slot_needs_both_commit_and_slot(self):
-        cp = run_here("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--slot", "base", "--dry-run", timeout=60)
+        cp = dry_wk("sysimage", "webkit", "webkit-2.52-yocto-rpi3-32", "--slot", "base")
         self.assertEqual(cp.returncode, 1, cp.stdout)
 
 
@@ -220,7 +226,7 @@ class TestSysimageLs(WkTest):
     """`wk sysimage ls` is asked of the machine holding the store."""
 
     def test_ls_answers_cleanly(self):
-        cp = run("sysimage", "ls", timeout=120)
+        cp = wk("sysimage", "ls")
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertNotIn("command not found", cp.stdout)
 

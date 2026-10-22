@@ -7,7 +7,6 @@ import unittest
 from unittest import mock
 
 from tests import test_wk_places
-from tests.killpoints import converges
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -133,28 +132,13 @@ class TestABoxBuildIsHandedToTheBox(test_wk_places.RemoteTest):
             self.assertEqual("box", dispatch.delegate_driver("box").name)
 
     def test_the_hand_over_is_the_whole_command_and_changes_nothing_here(self):
-        def world():
-            w = test_wk_places.RemoteTest()
-            w.setUp()
-            w.env["WK_PLACE"] = "box"
-            w.ran = []
-            self.addCleanup(w.tearDown)
-            return w
-
-        def run_once(w):
-            with mock.patch.object(dispatch, "_registry", w.reg), mock.patch.object(dispatch.os, "execvp", lambda f, a: w.ran.append(a)):
-                dispatch.delegate_run(dispatch.delegate_driver("box"), "build", ["a", "jsc-release", "--detach"])
-
-        def final(w):
-            return self.made_here(w.reg.load("box")), [a[-1] for a in w.ran]
-
-        converges(self, world, run_once, final)
-        w = world()
-        run_once(w)
-        (argv,) = w.ran
+        ran = []
+        with mock.patch.object(dispatch, "_registry", self.reg), mock.patch.object(dispatch.os, "execvp", lambda f, a: ran.append(a)):
+            dispatch.delegate_run(dispatch.delegate_driver("box"), "build", ["a", "jsc-release", "--detach"])
+        (argv,) = ran
         self.assertEqual(argv[0], "ssh")
         self.assertIn("/home/u/wk/tools/wk build a jsc-release --detach", argv[-1])
-        self.assertEqual(([], []), self.made_here(w.reg.load("box")))
+        self.assertEqual(([], []), self.made_here(self.reg.load("box")))
 
     def test_a_box_without_a_wk_of_its_own_is_refused_and_nothing_is_recorded(self):
         self.fake.answer_remote("test -f $HOME/.wk-remote", rc=1)

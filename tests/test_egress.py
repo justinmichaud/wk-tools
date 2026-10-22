@@ -618,7 +618,6 @@ class TestTheInjector(WkTest):
 
 
 class TestTheInjectorBoundsTheUpstream(WkTest):
-
     def drive(self, connect, timeouts=(0.3, 0.3)):
         client, _up, _opened, logged = inject(self.tmp, http("GET /user HTTP/1.1", body=b""), read="t", connect=connect,
                                               timeouts=timeouts)

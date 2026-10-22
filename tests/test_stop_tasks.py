@@ -1,19 +1,22 @@
-"""`wk stop --tasks` ends what is still running through the kill command each record names, and reads the tasks
+"""`wk stop` in process: `--tasks` ends what is still running through the kill command each record names, and reads the tasks
 again afterwards for its exit status."""
 import contextlib
 import io
 import os
 from unittest import mock
 import shlex
-import shutil
 import subprocess
 import sys
 import unittest
 
-from tests.support import REPO, WkTest, as_dispatched, load_cmd
+from tests.fakes import FlowTest
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import record  # noqa: E402
+from wk.act import Refused  # noqa: E402
+
+STOP = load_cmd("stop")
 
 
 def alive(pid):
@@ -24,8 +27,9 @@ def alive(pid):
     return True
 
 
-@unittest.skipUnless(shutil.which("podman"), "`wk stop` declares `needs podman`")
-class TestStopTasks(WkTest):
+class TestStopTasks(FlowTest):
+    """Each kill command runs for real on this host against a real pid; the command is run in process."""
+
     def setUp(self):
         super().setUp()
         self.env = {"WK_STORE": str(self.tmp / "store")}
@@ -51,57 +55,64 @@ class TestStopTasks(WkTest):
         """(pid, the flag its kill command touches)."""
         pid = self.spawn()
         flag = self.tmp / (name + ".killed")
-        self.make_task(kind, name, "touch %s && kill %d" % (shlex.quote(str(flag)), pid),
-                       pid=pid)
+        self.make_task(kind, name, "touch %s && kill %d" % (shlex.quote(str(flag)), pid), pid=pid)
         return pid, flag
+
+    def stop(self, *flags, **env):
+        """(exit or the refusal's status, what it said), run as `wk stop --tasks <flags>`."""
+        os.environ.update(env)
+        with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out, \
+                mock.patch.object(sys, "stdin", io.StringIO()):
+            try:
+                rc = STOP.main(as_dispatched("stop", ["--tasks"] + list(flags), os.environ), None)
+            except Refused as e:
+                rc = e.status
+        return rc, out.getvalue() + err.getvalue()
 
     def test_each_task_is_ended_by_the_command_its_record_names(self):
         one, flag_one = self.a_live_task("build", "ws1")
         two, flag_two = self.a_live_task("test", "ws2")
-        cp = self.run_wk("stop", "--tasks", "--yes", env=self.env)
-        self.assertEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("build ws1", cp.stdout)
-        self.assertIn("test ws2", cp.stdout)
-        self.assertTrue(flag_one.exists(), cp.stdout)
-        self.assertTrue(flag_two.exists(), cp.stdout)
-        self.assertFalse(alive(one), cp.stdout)
-        self.assertFalse(alive(two), cp.stdout)
+        rc, said = self.stop(WK_YES="1", WK_STORE=self.env["WK_STORE"])
+        self.assertEqual(0, rc, said)
+        self.assertIn("build ws1", said)
+        self.assertIn("test ws2", said)
+        self.assertTrue(flag_one.exists() and flag_two.exists(), said)
+        self.assertFalse(alive(one) or alive(two), said)
 
     def test_it_asks_before_it_acts(self):
         pid, flag = self.a_live_task()
-        cp = self.run_wk("stop", "--tasks", env=self.env)
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertFalse(flag.exists(), cp.stdout)
-        self.assertTrue(alive(pid), cp.stdout)
+        rc, said = self.stop(WK_STORE=self.env["WK_STORE"])
+        self.assertNotEqual(0, rc, said)
+        self.assertFalse(flag.exists(), said)
+        self.assertTrue(alive(pid), said)
 
     def test_a_dry_run_names_every_kill_and_runs_none(self):
         pid, flag = self.a_live_task()
-        cp = self.run_wk("stop", "--tasks", "--dry-run", env=self.env)
-        self.assertEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("would run", cp.stdout)
-        self.assertFalse(flag.exists(), cp.stdout)
-        self.assertTrue(alive(pid), cp.stdout)
+        rc, said = self.stop(WK_DRY_RUN="1", WK_STORE=self.env["WK_STORE"])
+        self.assertEqual(0, rc, said)
+        self.assertIn("would run", said)
+        self.assertFalse(flag.exists(), said)
+        self.assertTrue(alive(pid), said)
 
     def test_a_task_still_there_afterwards_is_the_exit_status(self):
         pid = self.spawn()
         self.make_task("build", "stubborn", "true", pid=pid)
-        cp = self.run_wk("stop", "--tasks", "--yes", env=self.env)
-        self.assertEqual(1, cp.returncode, cp.stdout)
-        self.assertIn("build stubborn", cp.stdout)
-        self.assertTrue(alive(pid), cp.stdout)
+        rc, said = self.stop(WK_YES="1", WK_STORE=self.env["WK_STORE"])
+        self.assertEqual(1, rc, said)
+        self.assertIn("build stubborn", said)
+        self.assertTrue(alive(pid), said)
 
     def test_a_record_that_ended_is_left_alone(self):
         flag = self.tmp / "ended.killed"
-        self.make_task("build", "done1", "touch %s" % shlex.quote(str(flag)),
-                       pid=os.getpid(), ended=0)
-        cp = self.run_wk("stop", "--tasks", "--yes", env=self.env)
-        self.assertEqual(0, cp.returncode, cp.stdout)
-        self.assertFalse(flag.exists(), cp.stdout)
+        self.make_task("build", "done1", "touch %s" % shlex.quote(str(flag)), pid=os.getpid(), ended=0)
+        rc, said = self.stop(WK_YES="1", WK_STORE=self.env["WK_STORE"])
+        self.assertEqual(0, rc, said)
+        self.assertFalse(flag.exists(), said)
 
     def test_the_machine_flag_is_refused_with_it(self):
-        cp = self.run_wk("stop", "--tasks", "--keep-vm", "--yes", env=self.env)
-        self.assertNotEqual(0, cp.returncode, cp.stdout)
-        self.assertIn("--keep-vm", cp.stdout)
+        rc, said = self.stop("--keep-vm", WK_YES="1", WK_STORE=self.env["WK_STORE"])
+        self.assertNotEqual(0, rc, said)
+        self.assertIn("--keep-vm", said)
 
 
 class TestEveryMachine(unittest.TestCase):

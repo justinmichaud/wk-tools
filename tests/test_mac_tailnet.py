@@ -9,11 +9,10 @@ import plistlib
 import re
 import subprocess
 import sys
-import types
 import unittest
 from unittest import mock
 
-from tests.killpoints import converges
+from tests import fakes
 from tests.support import REPO, requires_machine, requires_tool, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -49,11 +48,11 @@ def blob(data):
     return data if isinstance(data, bytes) else data.encode()
 
 
-class FakeMac(Fake):
+class FakeMac(fakes.World):
     """A Mac: `downloads` is what each URL serves, `volumes` the diskutil names attached, and `sudo` runs the rest."""
 
     def __init__(self):
-        super().__init__("mac")
+        super().__init__(name="mac")
         self.downloads = {"https://go.dev/dl/go%s.darwin-arm64.tar.gz" % GO["version"]: b"go-tarball",
                           "https://proxy.golang.org/tailscale.com/@v/v%s.zip" % TS_VERSION: b"ts-zip"}
         self.volumes = {"WK Bench"}
@@ -299,24 +298,6 @@ class TheTailnetHalf(unittest.TestCase):
         self.assertIn("wk key set tailnet", err)
         self.assertEqual(mac.runs("curl") + mac.runs("install"), [])
         self.assertIn("bench_ssh", self.stage(FakeMac(), machine="no-such-machine")[1])
-
-    def test_a_dry_run_changes_nothing_and_a_killed_stage_converges(self):
-        mac = built(FakeMac())
-        mac.dirs.add("/vol")
-        before = dict(mac.files)
-        with clean_env(WK_DRY_RUN="1"):
-            self.assertIn("would run", quiet(tailnet(mac).stage, "/vol", "mbp")[1])
-        self.assertEqual(mac.files, before)
-
-        def world():
-            m = built(FakeMac())
-            m.dirs.add("/vol")
-            return types.SimpleNamespace(fake=m)
-
-        def once(w):
-            with clean_env():
-                quiet(tailnet(w.fake).stage, "/vol", "mbp")
-        converges(self, world, once, lambda w: {p: v for p, v in w.fake.files.items() if p.startswith("/vol/")}, max_effects=80)
 
     def test_the_install_half_needs_a_runnable_collected_payload_and_nothing_else(self):
         """Root and nothing else: the bench install runs it against itself, with no network and no credentials."""

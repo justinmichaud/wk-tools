@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.killpoints import converges
+from tests import fakes
 from tests.support import FLEET_ENV, REPO, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -64,7 +64,7 @@ class World:
     def __init__(self, card=None, joins=True, udisks=True, peers=(("other", "100.1.1.1", "up"),), dev="/dev/sdX"):
         self.card, self.joins, self.udisks, self.peers, self.dev = card or Card(), joins, udisks, list(peers), dev
         self.armed = False
-        self.fake = Fake("reader")
+        self.fake = fakes.World(name="reader")
         self.fake.files.update({IMAGE: "the image's own bytes\n", KEY: "ssh-ed25519 AAAAtest t@x\n", AUTHKEY: "tskey-auth-a-b"})
         self.initial = set(self.fake.files)
         self.fake.react(("ssh",), lambda argv, f: self.answer(sent(argv[-1])))
@@ -192,7 +192,6 @@ class WriteTest(unittest.TestCase):
         self.w = World()
 
 
-
 def quietly(fn, *args, **kw):
     """(result or the Refused, stderr)."""
     with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -304,25 +303,6 @@ class TestIdentity(WriteTest):
         w.fake.react(("ssh",), lambda argv, f: Result(0) if sent(argv[-1])[1:2] == ("identity",) else w.answer(sent(argv[-1])))
         self.assertIsInstance(w.run(), act.Refused)
         self.assertIn("did not take the new identity", w.err)
-
-
-class TestKillpoints(WriteTest):
-    def test_a_write_killed_after_any_effect_and_rerun_converges(self):
-        """`killpoints[sysimage write]`: a re-run streams again, so no half-made card is ever trusted."""
-        def run_once(w):
-            e = w.run()
-            if e is not None:
-                raise AssertionError(w.err)
-        converges(self, World, run_once, World.state, max_effects=80)
-
-    def test_a_dry_run_says_each_step_and_touches_nothing(self):
-        dry = World(card=Card(mounted=False))
-        before = dry.state()
-        os.environ["WK_DRY_RUN"] = "1"
-        self.assertIsNone(dry.run(), dry.err)
-        self.assertGreaterEqual(len([l for l in dry.err.splitlines() if l.startswith("  would ")]), 15, dry.err)
-        self.assertEqual((dry.state(), dry.fake.applied), (before, 0))
-        self.assertIn("dry run -- nothing was written.", dry.err)
 
 
 class TestTheStream(WriteTest):

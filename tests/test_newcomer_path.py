@@ -37,24 +37,6 @@ class NewcomerTest(WkTest):
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=60)
 
 
-class TestTheRemedyCheckIsStrict(NewcomerTest):
-    def failed(self, step, out):
-        return subprocess.CompletedProcess([], 1, stdout=out)
-
-    def test_a_command_echoing_its_own_name_names_no_remedy(self):
-        for out in ("error: wk new failed", "==> wk new bug-1\nerror: nope", "error: 'wk new bug-1' failed"):
-            with self.assertRaises(AssertionError):
-                self.assert_names_a_remedy("wk new bug-1", self.failed("new", out))
-
-    def test_another_command_on_its_own_line_after_an_arrow_or_quoted_is_one(self):
-        for out in ("error: x\n    wk sync", "error: x -> wk sync", "error: x; 'wk sync' first", "error: run ./setup first"):
-            self.assert_names_a_remedy("wk new bug-1", self.failed("new", out))
-
-    def test_a_command_named_mid_sentence_is_not_one(self):
-        with self.assertRaises(AssertionError):
-            self.assert_names_a_remedy("wk new bug-1", self.failed("new", "error: the wk sync mirror is old"))
-
-
 class TestTheFirstCommands(NewcomerTest):
     def test_bare_wk_names_wk_help(self):
         cp = run()
@@ -65,7 +47,6 @@ class TestTheFirstCommands(NewcomerTest):
 
 
 class TestSetupRefusals(NewcomerTest):
-
     def test_an_unknown_stage_is_refused_not_reported_as_no_changes(self):
         cp = self.setup_script("--stage", "no-such-stage")
         self.assertNotEqual(cp.returncode, 0)
@@ -76,7 +57,6 @@ class TestSetupRefusals(NewcomerTest):
 
 
 class TestAWorkspaceFromNothing(NewcomerTest):
-
     def walk(self, runner):
         for step in WORKSPACE_STEPS:
             with self.subTest(step=" ".join(step)):

@@ -5,14 +5,12 @@ import io
 import json
 import os
 import shlex
-import subprocess
 import sys
-import tempfile
 import threading
 import unittest
-from pathlib import Path
 from unittest import mock
 
+from tests import fakes
 from tests.fakes import FakeRegistry
 from tests.support import REPO, WkTest, as_dispatched, bash, clean_env, load_cmd
 from tests.test_push_service import Proc
@@ -81,20 +79,19 @@ ENSURE_BRIDGE = "container/proxy/ensure-bridge.sh"
 CONMON, ENTRY, EXEC, BRIDGE_PID = 400, 500, 600, 601
 
 
-class _Wall(unittest.TestCase):
+class _Wall(fakes.FlowTest):
     """The workspace's process table is a fake /proc: conmon, a person's entry under it, and this process -- `me`, the wk
     command a check inside a workspace runs in -- under that. Each exec's bridge is added to it as ensure-bridge.sh starts one."""
     kind = "container"
     me = ["python3", "/opt/wk-tools/wk", "ai", "claude"]
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-wall-"))
-        self.addCleanup(os.system, "rm -rf %s" % self.tmp)
+        super().setUp()
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_VM_STORE": str(self.tmp / "vmstore"),
                     "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1", "WK_MARKER": str(self.tmp / "marker"),
                     "PATH": os.environ.get("PATH", "")}
         (self.tmp / "marker").write_text("name=demo\nsrc=/src/WebKit\n")
-        self.fake = Fake()
+        self.fake = fakes.World()
         self.answers = dict(HEALTHY)
         self.asked = []
         self.asked_as = []

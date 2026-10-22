@@ -65,7 +65,6 @@ class TestTheConfig(WkTest):
 
 
 class TestTheThreePhases(WkTest):
-
     @classmethod
     def setUpClass(cls):
         with scratch_dir() as tmp:
@@ -236,7 +235,6 @@ class TestTheCollection(WkTest):
 
 
 class TestItRefusesAThrottledCollection(WkTest):
-
     def test_it_names_every_reason_rather_than_the_first(self):
         faults = mac_pgo.PgoCollect(REPO, fake_guest(console="root", screen=1, blocker="Setup Assistant:Welcome"), {}, "/src").faults()
         self.assertEqual(len(faults), 3, faults)
@@ -257,7 +255,6 @@ class TestItRefusesAThrottledCollection(WkTest):
 
 
 class TestItIsThePolicyAndNotAnOption(WkTest):
-
     @unittest.skipUnless(os.path.exists("/usr/bin/python3"), "the collection's python is the Mac's /usr/bin/python3")
     def test_the_collection_runs_wk_tools_whatever_the_working_directory_holds(self):
         """The build sources this in the checkout, whose files an agent writes; a wk/ there must not be imported."""

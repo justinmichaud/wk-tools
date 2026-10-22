@@ -198,7 +198,6 @@ class TestWarmupCheck(WkTest):
 
 
 class TestWarmupEvidenceIsPerBoard(WkTest):
-
     def test_each_board_reads_back_its_own_evidence(self):
         d = self.tmp
         (d / "warmup").mkdir()
@@ -239,7 +238,6 @@ class TestWarmupNeverEntersTheStatistics(WkTest):
 
 
 class TestSubtestExclusions(WkTest):
-
     def test_an_excluded_run_says_so_in_the_report(self):
         ex = {"subtests_excluded": "argon2-wasm,dotnet-aot-wasm"}
         self.assertIn("note: 2 subtest(s) excluded from both arms", "\n".join(report.axis_check_lines(ex, dict(ex))))
@@ -269,7 +267,6 @@ class TestRunOrderAndSettling(WkTest):
 
 
 class TestScoreAgainstItsOwnSubtests(WkTest):
-
     def rows(self, score_a, score_b, time_a, time_b, n=12):
         rows = [{"name": "Speedometer-2",
                  "Score": {"a_mean": score_a, "b_mean": score_b},
@@ -296,7 +293,6 @@ class TestScoreAgainstItsOwnSubtests(WkTest):
 
 
 class TestProfilerChoice(WkTest):
-
     def test_aarch64_and_x86_64_use_samply_and_armv7_the_images_sysprof(self):
         for arch, sysprof, tool in (("aarch64", False, "samply"), ("x86_64", False, "samply"), ("armv7l", True, "sysprof")):
             with self.subTest(arch=arch):
@@ -310,7 +306,6 @@ class TestProfilerChoice(WkTest):
 
 
 class TestSamplyFetchUnderADryRun(unittest.TestCase):
-
     def setUp(self):
         os.environ["WK_DRY_RUN"] = "1"
         self.addCleanup(os.environ.pop, "WK_DRY_RUN", None)

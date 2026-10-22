@@ -2,7 +2,6 @@
 import contextlib
 import io
 import os
-import shutil
 import signal
 import subprocess
 import sys
@@ -11,8 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import FakeProc, JobWorld
-from tests.killpoints import converges
+from tests.fakes import FakeProc, FlowTest, JobWorld
 from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -33,18 +31,11 @@ class World(JobWorld):
         return [(t.field("kind"), t.field("exit")) for t in self.recs().list()]
 
 
-class TestTest(unittest.TestCase):
+class TestTest(FlowTest):
+    UNSET = FlowTest.UNSET + ("WK_NAME", "WK_PRESET")
+
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-test-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), True)
-        osenv = mock.patch.dict(os.environ, {}, clear=False)
-        osenv.start()
-        self.addCleanup(osenv.stop)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_NAME", "WK_PRESET"):
-            os.environ.pop(v, None)
-        p = mock.patch.object(record, "host_name", return_value="here")
-        p.start()
-        self.addCleanup(p.stop)
+        super().setUp()
         self.w = World(self.tmp)
 
     def run_(self, w=None, *argv):
@@ -197,7 +188,6 @@ class TestInterrupted(TestTest):
 
 
 class TestLayoutPathCheck(unittest.TestCase):
-
     def missing(self, paths, present=(), rc=None):
         with tempfile.TemporaryDirectory() as src:
             for rel in present:
@@ -218,15 +208,6 @@ class TestLayoutPathCheck(unittest.TestCase):
     def test_no_paths_or_a_runner_that_cannot_answer_names_none(self):
         self.assertEqual(self.missing([]), [])
         self.assertEqual(self.missing(["fast/gone.html"], rc=1), [])
-
-
-class TestKillPoints(TestTest):
-    def test_a_run_killed_after_any_effect_and_rerun_converges(self):
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                os.environ["WK_NAME"] = "ws"
-                CMD.main(as_dispatched("test", []), None, w.reg, w.clock)
-        converges(self, lambda: World(self.tmp), run_once, World.state)
 
 
 if __name__ == "__main__":

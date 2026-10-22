@@ -60,7 +60,6 @@ class Here:
 
 
 class Wired(unittest.TestCase):
-
     def setUp(self):
         self.dir = self.enterContext(scratch_dir(prefix="wk-test-upstream-"))
         self.mirror = self.dir / "mirror.git"
@@ -109,7 +108,6 @@ class TestLsRemote(Wired):
 
 
 class TestBranchRepos(unittest.TestCase):
-
     def ask(self, **sha_by_repo):
         here = Fake()
 
@@ -131,7 +129,6 @@ class TestBranchRepos(unittest.TestCase):
 
 
 class TestTheDirectSpellingEscapesEveryWiredRewrite(unittest.TestCase):
-
     def setUp(self):
         self.dir = self.enterContext(scratch_dir(prefix="wk-test-direct-"))
         self.mirror = self.dir / "WebKit.git"
@@ -159,7 +156,6 @@ class TestTheDirectSpellingEscapesEveryWiredRewrite(unittest.TestCase):
 
 
 class Checkout(Wired):
-
     def run_checkout(self, spec, found=None, remotes=None, force=False):
         driver = Here(self.src)
         rows = found if found is not None else [("WebKit", str(self.fork), git_("rev-parse", "topic", cwd=self.fork))]
@@ -204,7 +200,6 @@ class Pushable(Checkout):
 
 
 class TestThePrBranchIsLeftPushable(Pushable):
-
     def assert_bare_push_goes_to_own_name(self, name):
         cp = self.push()
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
@@ -342,7 +337,6 @@ class TestThePrBranchIsLeftPushable(Pushable):
 
 
 class TestTheMergeRefFollowsTheRemotesRefspec(Pushable):
-
     def test_a_heads_refspec_fork_is_not_flagged_and_not_rewritten(self):
         git_("config", "--replace-all", "remote.fork.fetch", "+refs/heads/*:refs/remotes/fork/*", cwd=self.src)
         git_("fetch", "-q", "--no-prune", str(self.dir / "fork"), "refs/heads/topic:refs/remotes/fork/topic", cwd=self.src)

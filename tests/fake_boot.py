@@ -18,6 +18,7 @@ from wk.boot.mac import HELPER, MacGuest
 from tests.fakes import FakeClock
 from wk.kv import kv
 from wk.machine import Result
+from tests import fakes
 from tests.fakes import Fake, Killed
 
 BTIME = ["sed", "-n", "s/^btime //p", "/proc/stat"]
@@ -80,11 +81,11 @@ def board(kind, ids=("sys-a",), env=None):
     return fake, fake.driver()
 
 
-class Side(Fake):
+class Side(fakes.World):
     """One system as the Channel reaches it: its world answers, and every effect is the world's too."""
 
     def __init__(self, world, name):
-        super().__init__(name)
+        super().__init__(name=name)
         self.world = world
 
     def run(self, argv, input=None, timeout=None, stream=False):
@@ -109,7 +110,8 @@ class Side(Fake):
             self.world.landed(None, path, text.encode())
 
 
-class World:
+class Board:
+    """What a machine under `wk boot` holds and does beyond its two Sides: its record, its boots, every effect in order."""
     stop_after, applied = None, 0
 
     def setup(self, conf, env, clock):
@@ -145,7 +147,7 @@ class World:
         return Result(127, "", "%s: no answer here" % cmd)
 
 
-class FakeBoard(World, Channel):
+class FakeBoard(Board, Channel):
     def __init__(self, conf, clock=None, env=None):
         self.setup(conf, env, clock)
         Channel.__init__(self, REPO, self.conf, env=self.env, via=Fake("here"),
@@ -355,7 +357,7 @@ class FakeBoard(World, Channel):
         return Result(0)
 
 
-class FakeMac(World, Channel):
+class FakeMac(Board, Channel):
     """A Mac in host mode: `said` answers a helper verb as given; `helper_is` "current", "old" or None."""
 
     def __init__(self, conf, env=None, clock=None):
@@ -473,7 +475,7 @@ class FakeMac(World, Channel):
         return Result(2, "wk-boot-priv: usage\n")
 
 
-class FakeGuest(World):
+class FakeGuest(Board):
     """The vm place holding one Tart guest: absent, stopped or running, carrying the marker or not; `stuck` starts it
     with no marker."""
 

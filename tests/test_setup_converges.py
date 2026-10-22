@@ -7,21 +7,21 @@ import subprocess
 import sys
 from unittest import mock
 
-from tests.support import REPO, WkTest
+from tests import fakes
+from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import dispatch, setupstate  # noqa: E402
 from wk.decl import Command  # noqa: E402
 from wk.machine import Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
-class Here(Fake):
+class Here(fakes.World):
     """git and the tree's files are this machine's; the record, sysctl and launchctl are the fake's."""
 
     def __init__(self):
-        super().__init__()
+        super().__init__(name="fake")
         self.react(["git"], lambda argv, f: Result(*(lambda cp: (cp.returncode, cp.stdout, cp.stderr))(
             subprocess.run(argv, capture_output=True, text=True))))
 
@@ -36,7 +36,7 @@ class Here(Fake):
             return f.read()
 
 
-class SetupTest(WkTest):
+class SetupTest(fakes.FlowTest):
     def setUp(self):
         super().setUp()
         self.root = self.tmp / "tree"

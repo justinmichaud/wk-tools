@@ -1,26 +1,27 @@
-"""lib/wk/record.py against a scratch record directory and a fake clock: the record's shape and its verdicts."""
+"""lib/wk/record.py against a scratch record directory and a fake clock: the record's shape and its verdicts, and
+what a build's record may claim once it has gone quiet (the verdict reads the pid and the log, and the record carries
+the deadline the watchdog is armed with)."""
 import io
 import os
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
-from pathlib import Path
 
-from tests.support import REPO
+from tests.fakes import Fake, FakeClock, FlowTest
+from tests.support import REPO, rand_suffix
 
 sys.path.insert(0, str(REPO / "lib"))
-from tests.fakes import FakeClock  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
-from wk.store import Store  # noqa: E402
 from wk import record, status, statusview  # noqa: E402
 from wk.act import Refused  # noqa: E402
+from wk.store import Store  # noqa: E402
 
 
-class RecordTest(unittest.TestCase):
+class RecordTest(FlowTest):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-record-"))
+        super().setUp()
         self.clock = FakeClock()
         self.log = self.tmp / "build.log"
         self.log.write_text("started\n")
@@ -29,9 +30,6 @@ class RecordTest(unittest.TestCase):
         self.records = record.Records(self.tmp / "store", clock=self.clock,
                                       ask_place=lambda name, pid, cap: self.answers.get((name, pid)),
                                       env={"WK_STORE": str(self.tmp / "store")})
-
-    def tearDown(self):
-        shutil.rmtree(self.tmp, True)
 
     def begin(self, **kw):
         args = dict(kind="build", where="here", name="ws", kill="wk build ws --kill",
@@ -396,10 +394,6 @@ class TestWatchdogSettings(unittest.TestCase):
         self.assertEqual(env, {"WK_STALL_SECONDS": "60", "WK_ABORT_SECONDS": "5400"})
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestTheWorkspacesLog(RecordTest):
     """`wk status <ws> --log` shows the newest log anything wrote for the workspace."""
 
@@ -428,3 +422,64 @@ class TestTheWorkspacesLog(RecordTest):
         with self.assertRaises(Refused), unittest.mock.patch("sys.stderr", err):
             record.workspace_log(self.driver(), "ws")
         self.assertIn("'wk new', 'wk build', 'wk sysimage build'", err.getvalue())
+
+
+DEAD_PID = 4194304
+
+
+def write_task(store, kind="build", name="ws1", pid=None, log=None,
+               plan=("compile jsc-release with -j4",), end=None,
+               abort_after=1800, preset="jsc-release", kill=None):
+    t = record.Records(store, env={"WK_ABORT_SECONDS": str(abort_after)}).begin(
+        kind, "here", name, kill or "wk %s %s --kill" % (kind, name), str(log or "/dev/null"), list(plan),
+        pid=os.getpid() if pid is None else pid)
+    t.step(1)
+    t.set("preset", preset)
+    if end is not None:
+        t.end(end)
+    return t
+
+
+def age_log(path, seconds):
+    past = time.time() - seconds
+    os.utime(path, (past, past))
+
+
+class TestTheVerdictReadsThePidAndTheLogAndNotTheProcessTable(FlowTest):
+    def _verdict(self, pid=None, log_age=0, end=None, stall=None):
+        logf = self.tmp / f"build-{rand_suffix()}.log"
+        logf.write_text("[1/4200] cc\n")
+        age_log(logf, log_age)
+        return write_task(self.tmp / "store", pid=pid, log=logf, end=end).verdict(stall_seconds=stall)
+
+    def test_a_fresh_log_is_running(self):
+        self.assertEqual(self._verdict(), "running")
+
+    def test_a_stale_log_is_silent_even_with_three_compilers_running(self):
+        self.assertEqual(self._verdict(log_age=4000), "silent")
+
+    def test_a_pid_that_is_gone_died(self):
+        self.assertEqual(self._verdict(pid=DEAD_PID), "died")
+
+    def test_an_ended_record_is_its_own_outcome(self):
+        self.assertEqual(self._verdict(end=0), "ok")
+        self.assertEqual(self._verdict(end=1), "failed")
+        self.assertEqual(self._verdict(end="cancelled"), "cancelled")
+
+    def test_the_silence_threshold_is_wk_stall_seconds(self):
+        self.assertEqual(self._verdict(log_age=2, stall=1),
+                         "silent")
+        self.assertEqual(self._verdict(log_age=2), "running")
+
+
+class TestTheRecordCarriesTheDeadlineTheWatchdogIsArmedWith(FlowTest):
+    def test_the_record_and_the_watchdog_read_one_variable(self):
+        records = record.Records(self.tmp / "s", env={"WK_ABORT_SECONDS": "77"})
+        t = records.begin("build", "here", "ws", "k", "/l", ["one"])
+        self.assertEqual("77", t.field("abort_after"))
+
+
+class TestTheViewCallsSilenceBusy(unittest.TestCase):
+    def test_severity_of_silent_is_busy(self):
+        from wk import statusview
+        self.assertEqual((statusview.severity("silent"), statusview.severity("stalled")), ("busy", "bad"))

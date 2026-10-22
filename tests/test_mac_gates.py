@@ -157,7 +157,6 @@ class TestTheProfileGate(WkTest):
 
 
 class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
-
     def test_only_the_pgo_config_turns_it_off(self):
         for preset, off in (("mac-release-pgo", True), ("mac-release", False)):
             with self.subTest(preset):
@@ -166,7 +165,6 @@ class TestAProfileGuidedBuildDoesNotCacheCompilations(WkTest):
 
 
 class TestNothingMayDrawOverAMeasuredRun(WkTest):
-
     WITH_A_DIALOG = ("Control Center:25:42x30@837,0;Window Server:24:1024x30@0,0;"
                      "Dock:20:1024x768@0,0;UserNotificationCenter:8:260x364@382,119;"
                      "Terminal:0:877x499@40,51;")
@@ -216,7 +214,6 @@ class TestNothingMayDrawOverAMeasuredRun(WkTest):
 
 
 class TestPyobjcIsProvisionedNotAssumed(WkTest):
-
     def test_the_probe_wants_the_pinned_version_of_the_running_interpreter(self):
         for said, want in (("11.1", "HAVE"), ("9.0", "MISSING")):
             with self.subTest(version=said), scratch_dir() as tmp:

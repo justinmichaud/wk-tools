@@ -7,9 +7,11 @@ import json
 import os
 import sys
 import unittest
+from unittest import mock
 
 from tests.fakes import FakeRegistry, FakeDriver
-from tests.support import REPO, WkTest, clean_env, load_cmd, run
+from tests.support import REPO, WkTest, clean_env, load_cmd
+from tests.test_ab_precision import wk
 from tests.test_bench_report import in_process
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -95,7 +97,6 @@ def bench(store_dir, drivers=(), env=None):
 
 
 class TestTaskState(WkTest):
-
     def test_a_fresh_task_is_incomplete_with_nothing_run(self):
         st = status(make_task(self.tmp))
         self.assertEqual((st["state"], st["planned"], st["ended"]), ("incomplete", "6", "0"))
@@ -137,7 +138,6 @@ class TestTaskState(WkTest):
 
 
 class TestOneRecord(WkTest):
-
     FIELDS = ["plan=jetstream3", "workspace=w", "preset=jsc-release", "class=cpu", "runner=jsc",
               "arch=native", "bench_host=container", "webkit_sha=0123456789abcdef", "count=4",
               "host.kernel=6.8.0", "host.kernel_arch=x86_64", "host.cores=16",
@@ -203,7 +203,6 @@ class TestATaskIsMadeOnce(WkTest):
 
 
 class TestTaskReport(WkTest):
-
     def test_partial_task_reports_usable_rounds_and_names_the_missing(self):
         d = make_task(self.tmp, rounds=5)
         add_run(d, "base", 1, "a", "ok", (100.0, 101.0, 99.0))
@@ -247,7 +246,6 @@ class TestTaskReport(WkTest):
 
 
 class TestLs(WkTest):
-
     def test_lists_tasks_with_run_paths_and_states(self):
         d = make_task(self.tmp)
         a = add_run(d, "base", 1, "a", "ok")
@@ -270,7 +268,6 @@ class TestLs(WkTest):
 
 
 class TestTheVerbs(WkTest):
-
     def store(self):
         return paired_task(self.tmp)
 
@@ -364,7 +361,6 @@ def where(reg, *words):
 
 
 class TestWhere(WkTest):
-
     def test_each_verb_answers_where_it_runs(self):
         reg = registry(self.tmp)
         self.assertEqual(where(reg, "ls"), "local")
@@ -385,21 +381,19 @@ class TestWhere(WkTest):
 
 
 class TestThroughWk(WkTest):
-
     def test_bench_ls_and_report_read_a_task_in_a_workspace(self):
         paired_task(self.tmp)
         env = {"WK_STORE": str(self.tmp), "WK_LOCK_DIR": str(self.tmp / "locks"), "WK_PLACE": "local"}
-        ls = run("bench", "ls", env=env, timeout=60)
+        with mock.patch.dict(os.environ, env):
+            ls, rep = wk("bench", "ls"), wk("bench", "report", TASK, "--text")
         self.assertEqual(ls.returncode, 0, ls.stdout)
         self.assertIn(TASK, ls.stdout)
         self.assertNotIn("starting podman machine", ls.stdout)
-        rep = run("bench", "report", TASK, "--text", env=env, timeout=60)
         self.assertEqual(rep.returncode, 0, rep.stdout)
         self.assertIn("rounds: 1 usable of 1 attempted (3 planned)", rep.stdout)
 
 
 class TestArtifactsLandWhereTheMachineCanReadThem(WkTest):
-
     def _ask(self, env):
         st = Store(clean_env(env))
         return {"RECORD": st.records_dir(), "ARTIFACT": st.cache_dir(),

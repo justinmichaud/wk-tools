@@ -91,7 +91,6 @@ class TestTheGrantIsNarrow(WkTest):
 
 
 class TestStatusReportsWhatThisMachineCanDo(unittest.TestCase):
-
     def _status(self, have=(), systemd=False):
         stubs = {name: "#!/bin/sh\nexit 0\n" for name in have}
         with stub_path(stubs) as binp:

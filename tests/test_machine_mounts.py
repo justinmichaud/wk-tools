@@ -1,14 +1,17 @@
-"""host/macos/machine.sh: the podman machine's four mounts (tools, secrets, mirror read-only; agent-rw writable),
-driven against a stub podman whose `machine init` writes the config the verify reads back."""
+"""host/macos/machine.sh, driven against a stub podman: the podman machine's four mounts (tools, secrets, mirror
+read-only; agent-rw writable) read back from the config `machine init` writes, its disk grown to the declared size,
+and the machine a tailnet node of its own."""
 import os
 import subprocess
 import sys
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, WkTest, container_side, requires_container_place, stub_path
+from tests.support import bash, container_side, REPO, requires_container_place, stub_path, WkTest
+
 
 MACHINE_SH = REPO / "host" / "macos" / "machine.sh"
+
 
 MACOS_HOST = r"""
 is_macos() { return 0; }
@@ -22,6 +25,7 @@ with mock.patch.object(os, "uname", return_value=mock.Mock(sysname="Darwin")):
     sys.exit(store.main(sys.argv[1:]))' "$@"
 }
 """
+
 
 FAKE_PODMAN = r'''#!/bin/sh
 printf '%s\n' "$*" >> "$WK_TEST_PODMAN_LOG"
@@ -262,14 +266,13 @@ class TestAFreshMachineThatCameUpWithoutAMount(_Stage):
         self.assertRan("machine rm", ran=False)
 
 
-# `machine init` records each source canonicalised: WK_TEST_CANON=real resolves it, =slash adds a trailing slash.
 FAKE_PODMAN_CANON = FAKE_PODMAN.replace(
     'spec = argv[i + 1].split(":")',
     "spec = argv[i + 1].split(\":\")\n        import os\n        how = os.environ.get(\"WK_TEST_CANON\", \"\")\n       "
     " if how == \"real\":\n            spec[0] = os.path.realpath(spec[0])\n        if how == \"slash\":\n            "
     "spec[1] = spec[1] + \"/\"")
 
-# `machine init` adds a mount of its own to what it was asked for.
+
 FAKE_PODMAN_ADDS_A_MOUNT = FAKE_PODMAN.replace(
     'json.dump({"Name": "wk", "Mounts": mounts}, open(cfg, "w"))',
     "mounts.append({\"Type\": \"virtiofs\", \"Source\": \"/Users\",\n               \"Target\": \"/Users\", "
@@ -465,5 +468,164 @@ class TestReportLossesStripsTheContainerPrefix(unittest.TestCase):
         self.assertNotIn("wk-other", cp.stdout)
 
 
-if __name__ == "__main__":
-    unittest.main()
+DISK_PODMAN = """#!/bin/sh
+printf '%s\\n' "$*" >> "$WK_TEST_PODMAN_LOG"
+case "$*" in
+    "machine inspect wk")
+        printf '[{"State":"stopped","Resources":{"CPUs":%s,"Memory":%s,"DiskSize":%s}}]\\n' \\
+            "$WK_TEST_CPUS" "$WK_TEST_MEM" "$WK_TEST_DISK" ;;
+    *"df -Pk /var"*)
+        # Bigger once the grow has been asked for, which is what `changed` reports on.
+        if grep -q growpart "$WK_TEST_PODMAN_LOG"; then
+            printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/vda4 524288000 0 0 0%% /var\\n'
+        else
+            printf 'Filesystem 1024-blocks Used Available Capacity Mounted\\n/dev/vda4 209715200 0 0 0%% /var\\n'
+        fi ;;
+esac
+exit 0
+"""
+
+
+def reconcile_block():
+    """From `_cur_cpus=` to the end of the `if` that sets the resources."""
+    text = MACHINE_SH.read_text()
+    start = text.index("wk_eval wk.places podman-vm _cur_cpus=")
+    end = text.index("\nfi\n", text.index("podman machine set", start)) + 4
+    return text[start:end]
+
+
+class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
+    def _run(self, cur_disk, dry=False):
+        cpus, mem = "9", "20480"
+        block = reconcile_block()
+        log = self.tmp / "podman.log"
+        log.write_text("")
+        with stub_path({"podman": DISK_PODMAN}) as binp:
+            cp = subprocess.run(
+                ["bash", "-c",
+                 f'. "{REPO}/lib/common.sh"\n'
+                 f'WK_MACHINE=wk; export WK_MACHINE; _cores={cpus}; _mem={mem}; _disk=500\n'
+                 + ("WK_DRY_RUN=1\n" if dry else "")
+                 + 'WK_RESERVE_CORES=1; WK_RESERVE_MB=1024\n'
+                 + block + "\ntrue\n"],
+                capture_output=True, text=True, timeout=60,
+                env={"PATH": f"{binp}:/usr/bin:/bin", "HOME": str(self.tmp),
+                     "WK_DEBUG": "1",
+                     "WK_TEST_PODMAN_LOG": str(log), "WK_TEST_CPUS": cpus,
+                     "WK_TEST_MEM": mem, "WK_TEST_DISK": cur_disk})
+        return cp, log.read_text()
+
+    def test_a_smaller_disk_is_grown_and_the_guest_filesystem_with_it(self):
+        cp, sent = self._run(cur_disk="200")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertRegex(sent, r"machine set wk .*--disk-size 500", f"the disk was not grown: {sent!r}")
+        self.assertIn("growpart", sent, "the partition was never grown")
+        self.assertIn("xfs_growfs", sent, "the filesystem was never grown")
+        self.assertRegex(cp.stdout + cp.stderr, r"filesystem grew to \d+ GiB")
+
+    def test_a_disk_already_the_right_size_is_left_alone_and_its_filesystem_still_checked(self):
+        cp, sent = self._run(cur_disk="500")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("machine set", sent, f"an unchanged machine was set: {sent!r}")
+        self.assertIn("500", cp.stdout + cp.stderr, "the size it kept is not reported")
+        self.assertIn("growpart", sent, "a machine at its size is never checked")
+
+    def test_a_bigger_disk_is_reported_not_shrunk(self):
+        """podman refuses to shrink one, and nothing here silently degrades."""
+        cp, sent = self._run(cur_disk="800")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("--disk-size", sent, "it tried to shrink a disk")
+        out = cp.stdout + cp.stderr
+        self.assertIn("800", out)
+        self.assertIn("only grows", out, "the refusal does not say why")
+
+    def test_a_dry_run_changes_nothing(self):
+        cp, sent = self._run(cur_disk="200", dry=True)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        for word in ("machine set", "machine stop", "growpart"):
+            self.assertNotIn(word, sent, f"a dry run ran '{word}'")
+        self.assertIn("dry run", cp.stdout + cp.stderr)
+
+
+TAILNET_PODMAN = """#!/bin/sh
+printf '%s\\n' "$*" >> "$WK_TEST_PODMAN_LOG"
+case "$*" in
+    "machine inspect wk")        printf '[{"State":"%s"}]\\n' "${WK_TEST_STATE:-running}" ;;
+    *"command -v tailscale"*)    [ -n "$WK_TEST_NO_TS" ] && exit 1 ;;
+    *"tailscale status --json"*) printf '%s' "$WK_TEST_TS_JSON" ;;
+    *"tailscale up"*)            exit "${WK_TEST_UP_RC:-0}" ;;
+esac
+exit 0
+"""
+
+
+LOGGED_OUT = '{"BackendState": "NeedsLogin", "Self": {"TailscaleIPs": []}}'
+
+
+RUNNING = '{"BackendState": "Running", "Self": {"TailscaleIPs": ["100.1.2.3"]}}'
+
+
+def tailnet_block():
+    """From the comment that opens it to the `unset` that closes it."""
+    text = MACHINE_SH.read_text()
+    start = text.index("# The machine holds this workstation's image workspaces")
+    end = text.index("unset -f _ts _ts_state", start) + len("unset -f _ts _ts_state")
+    return text[start:end]
+
+
+class TailnetStage(WkTest):
+    def run_block(self, env=None, key="tskey-auth-kAAAAAA-secret"):
+        log = self.tmp / "podman.log"
+        keyfile = self.tmp / "authkey"
+        keyfile.write_text(key + "\n")
+        with stub_path({"podman": TAILNET_PODMAN}) as binp:
+            cp = bash(
+                f'. "{REPO}/lib/common.sh"\n'
+                'WK_MACHINE=wk; export WK_MACHINE\n'
+                'wk_machine_name() { echo probehost; }\n'
+                + ("" if key else 'wk_tailscale_authkey() { return 1; }\n')
+                + tailnet_block() + "\n",
+                env={"PATH": f"{binp}:/usr/bin:/bin:/usr/sbin:/sbin",
+                     "WK_TEST_PODMAN_LOG": str(log),
+                     "WK_TS_AUTHKEY": str(keyfile),
+                     "WK_TEST_TS_JSON": LOGGED_OUT,
+                     **(env or {})})
+        self.log = log.read_text() if log.exists() else ""
+        return cp
+
+
+class TestAMachineAlreadyOnTheTailnetIsLeftAlone(TailnetStage):
+    def test_it_reports_the_node_and_joins_nothing(self):
+        cp = self.run_block({"WK_TEST_TS_JSON": RUNNING, "WK_DEBUG": "1"})
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)
+        self.assertIn("probehost-vm", out)
+        self.assertIn("100.1.2.3", out)
+        self.assertNotIn("tailscale up", self.log, "it re-joined a node already on the tailnet")
+
+
+class TestALoggedOutMachineJoins(TailnetStage):
+    def test_it_brings_the_node_up_under_a_derived_name_and_the_key_never_reaches_argv(self):
+        self.run_block()
+        for word in ("tailscale up", "--hostname=probehost-vm", "--advertise-tags=tag:wk",
+                     "--auth-key=file:/var/lib/tailscale/wk-authkey", "rm -f /var/lib/tailscale/wk-authkey"):
+            self.assertIn(word, self.log)
+        self.assertNotIn("tskey-auth-kAAAAAA-secret", self.log)
+
+    def test_a_join_that_did_not_take_says_what_fails_and_still_removes_the_spent_key(self):
+        cp = self.run_block({"WK_TEST_UP_RC": "1"})
+        out = cp.stdout + cp.stderr
+        self.assertEqual(cp.returncode, 0, out)   # a stage reports; it does not abort setup
+        self.assertIn("did not reach Running", out)
+        self.assertIn("rm -f /var/lib/tailscale/wk-authkey", self.log)
+
+
+class TestWhatItWillNotDo(TailnetStage):
+    def test_each_reason_not_to_join_is_reported_and_nothing_joins_or_starts(self):
+        for env, key, says in (({}, "", "wk key set tailnet"), ({"WK_TEST_STATE": "stopped"}, None, "not running"),
+                               ({"WK_TEST_NO_TS": "1"}, None, "cannot be deployed"), ({"WK_DRY_RUN": "1"}, None, "dry run")):
+            with self.subTest(says):
+                cp = self.run_block(env, **({} if key is None else {"key": key}))
+                self.assertIn(says, cp.stdout + cp.stderr)
+                self.assertNotIn("tailscale up", self.log)
+                self.assertNotIn("machine start", self.log)

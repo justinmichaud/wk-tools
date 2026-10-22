@@ -78,11 +78,14 @@ class TestNoTerminalAsksForNone(unittest.TestCase):
 
 
 class TestNoSuchWorkspace(WkTest):
-    def test_refuses_by_name_without_landing_anywhere(self):
+    def test_refuses_by_name_without_landing_anywhere_with_or_without_dash_dash(self):
         # WK_PLACE=vm: an absent name otherwise resolves to the container place, which a macOS host forwards to podman.
-        cp = run("enter", "no-such-workspace-abcxyz", "true", env={"WK_PLACE": "vm"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("no such workspace", cp.stdout)
+        for rest in (["true"], ["--", "true"]):
+            with self.subTest(rest=rest):
+                cp = run("enter", "no-such-workspace-abcxyz", *rest, env={"WK_PLACE": "vm"})
+                self.assertNotEqual(cp.returncode, 0)
+                self.assertIn("no such workspace", cp.stdout)
+                self.assertNotIn("--: command not found", cp.stdout)
 
 
 if __name__ == "__main__":

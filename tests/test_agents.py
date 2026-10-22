@@ -8,9 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from tests.fakes import WsDriver
@@ -21,7 +19,7 @@ import credcheck  # noqa: E402
 from wk import agents  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from tests.fakes import Fake, FlowTest  # noqa: E402
 
 LINK = 'mkdir -p "$HOME/.local/bin" && ln -s "$OK_BIN" "$HOME/.local/bin/%s"'
 CLAUDE_INSTALLER = ('v="$1"; mkdir -p "$HOME/.local/share/claude/versions" "$HOME/.local/bin" && cp "$OK_BIN" "$HOME/.local/share/claude/versions/$v" '
@@ -35,11 +33,9 @@ STUBS = {
 }
 
 
-class TestTheScript(unittest.TestCase):
-
+class TestTheScript(FlowTest):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-agents-"))
-        self.addCleanup(shutil.rmtree, self.tmp, True)
+        super().setUp()
         self.home, self.bin, self.sys = self.tmp / "home", self.tmp / "bin", self.tmp / "sys"
         for d in (self.home, self.bin, self.sys):
             d.mkdir()

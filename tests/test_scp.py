@@ -1,11 +1,8 @@
 """`wk scp` -- one file or one directory in or out of a workspace."""
 import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from tests.support import REPO, WkTest, fake_workspace, requires_tool, run, stub_path
@@ -15,7 +12,7 @@ from wk import places  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.machine import Local  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from tests.test_wk_places import DriversTest  # noqa: E402
 
 def _tart(kind="absent"):
     """`tart`: one running guest whose `exec` logs its argv and answers t_path_kind's one question with <kind>."""
@@ -213,7 +210,6 @@ class TestRefusals(ScpTest):
 
 @unittest.skipUnless(os.uname().sysname == "Darwin", "the vm place exists only on a macOS host")
 class TestTheWholeCommandOnAGuest(WkTest):
-
     def _run(self, tart_body, *args):
         log = self.tmp / "net.log"
         log.write_text("")
@@ -248,25 +244,7 @@ class TestTheWholeCommandOnAGuest(WkTest):
         self.assertNotIn("no such file", cp.stdout)
 
 
-class DriverCopyTest(unittest.TestCase):
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-scp-drivers-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
-                    "WK_MACHINES_DIR": str(self.tmp / "hosts"), "WK_IN_VM": "1",
-                    "PATH": os.environ.get("PATH", "")}
-        (self.tmp / "home").mkdir()
-        (self.tmp / "hosts").mkdir()
-        self.fake = Fake("here")
-        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
-
-    def conf(self, name, text):
-        kind = "" if "kind=build" in text else "kind=%s\n" % ("peer" if "peer=1" in text else "build")
-        (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text.replace("peer=1\n", ""))
-
-
-class TestContainerCopy(DriverCopyTest):
+class TestContainerCopy(DriversTest):
     """`podman cp`: a shell wrapper (wkdev-enter) corrupts a binary pipe -- 1396 bytes arrived as 1399."""
 
     def setUp(self):
@@ -301,7 +279,7 @@ class TestContainerCopy(DriverCopyTest):
         self.assertEqual(self.t.path_kind("demo", "/src/WebKit/tree"), "dir")
 
 
-class TestVmCopy(DriverCopyTest):
+class TestVmCopy(DriversTest):
     def setUp(self):
         super().setUp()
         del self.env["WK_IN_VM"]
@@ -336,7 +314,7 @@ class TestVmCopy(DriverCopyTest):
             self.t.pull("gone", "/x", "/y")
 
 
-class TestRemoteCopy(DriverCopyTest):
+class TestRemoteCopy(DriversTest):
     """A build machine reached over ssh: the one pipe, through the same ssh argv `exec` uses."""
 
     def setUp(self):
@@ -359,8 +337,7 @@ class TestRemoteCopy(DriverCopyTest):
         self.assertEqual(self.t.path_kind("demo", "/wk/ws/demo/WebKit/tree"), "dir")
 
 
-class TestRemoteLocalCopy(DriverCopyTest):
-
+class TestRemoteLocalCopy(DriversTest):
     def setUp(self):
         super().setUp()
         del self.env["WK_IN_VM"]

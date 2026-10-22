@@ -82,7 +82,6 @@ class TestWhatEachKindOfFailureDoes(_Inside):
 
 
 class TestTheFunctionDoesNotShadowTheRealCli(WkTest):
-
     def _what_claude_is(self, interactive, workspace=True):
         home = self.tmp / f"home-{interactive}-{workspace}"
         (home / ".local" / "bin").mkdir(parents=True, exist_ok=True)

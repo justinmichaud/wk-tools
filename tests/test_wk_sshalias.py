@@ -7,10 +7,10 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr
-from unittest import mock
 
 from tests.support import REPO
 from tests import fakes
+from tests.fakes import FlowTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import machine, sshalias  # noqa: E402
@@ -30,10 +30,7 @@ CASES = (
 )
 
 
-class TestOnDisk(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-sshalias-")
-        self.addCleanup(machine.Local().remove, self.tmp)
+class TestOnDisk(FlowTest):
 
     def test_every_block_is_the_one_ssh_reads_byte_for_byte_in_a_private_directory(self):
         local = machine.Local()
@@ -53,16 +50,13 @@ class TestOnDisk(unittest.TestCase):
         self.assertEqual("0o700", oct(os.stat(d).st_mode & 0o777))
 
 
-class TestOnTheFake(unittest.TestCase):
+class TestOnTheFake(FlowTest):
     def setUp(self):
+        super().setUp()
         self.fake = fakes.Fake("box")
         self.fake.answer(["chmod"])
         self.env = {"HOME": "/home/u"}
         self.conf = sshalias.alias_path(self.env)
-        self.flags = mock.patch.dict(os.environ, {}, clear=False)
-        self.flags.start()
-        self.addCleanup(self.flags.stop)
-        os.environ.pop("WK_DRY_RUN", None)
 
     def stderr(self, fn):
         buf = io.StringIO()

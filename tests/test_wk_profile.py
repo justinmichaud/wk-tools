@@ -3,11 +3,8 @@ import contextlib
 import io
 import os
 import re
-import shutil
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from tests.fakes import FakeRegistry, WsDriver
@@ -17,30 +14,23 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import ldpath, profile  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from tests import fakes  # noqa: E402
 
 
 
-class World(Fake):
+class World(fakes.World):
     def __init__(self, tmp):
-        super().__init__("here")
-        self.tmp = Path(tmp)
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_NAME": "ws", "WK_IN_VM": "1"}
+        super().__init__(tmp, WK_NAME="ws", WK_IN_VM="1")
         self.answer(["exec", "ws", "test", "-x"], rc=0)   # the binary is built
         self.place_os = "linux"
         self.reg = FakeRegistry(self.env, self, lambda n, e: WsDriver("box", str(REPO), e, self, os=self.place_os), ws_place=lambda ws: "box")
 
 
-class ProfileTest(unittest.TestCase):
+class ProfileTest(fakes.FlowTest):
+    UNSET = fakes.FlowTest.UNSET + ("WK_PRESET",)
+
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-profile-")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        osenv = mock.patch.dict(os.environ, {}, clear=False)
-        osenv.start()
-        self.addCleanup(osenv.stop)
-        for v in ("WK_DRY_RUN", "WK_NAME", "WK_PRESET"):
-            os.environ.pop(v, None)
+        super().setUp()
         os.environ["WK_NAME"] = "ws"
         self.w = World(self.tmp)
 

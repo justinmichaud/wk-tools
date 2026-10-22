@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests import test_sync, test_wk_workspace
+from tests import test_sync
 from tests.support import REPO, bash, git_commit, git_run, scratch_dir
 from tests.test_wk_workspace import WK, World, WorkspaceTest
 
@@ -51,10 +51,6 @@ class ToolsWorld(World):
 
     def mark(self, name="ws", repo=TOOLS):
         self.files[repos.marker_in(self.ws_dir(name))] = "name=%s\nrepo=%s\n" % (name, repo)
-
-
-class ToolsRecording(test_wk_workspace.Recording, ToolsWorld):
-    pass
 
 
 class TestTheTable(unittest.TestCase):
@@ -210,9 +206,6 @@ class TestCreation(WorkspaceTest):
         self.assertTrue(configs)
         self.assertTrue(all(c.endswith(" /src/wk-tools") for c in configs), configs)
 
-    def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        self.dry_as_wet(lambda: ToolsRecording(self.tmp), lambda w: self.detached(w, repo=tools()))
-
 
 class TestFreshen(WorkspaceTest):
     def test_a_cloned_repo_is_reported_and_not_fetched(self):
@@ -316,7 +309,6 @@ class TestSync(test_sync.SyncTest):
         self.assertIn(("exec", "container", "tools", "git", "-C", "/src/wk-tools", "remote", "set-url", "origin", ORIGIN), runs)
         self.assertIn(("exec", "container", "tools", "git", "-C", "/src/wk-tools", "remote", "set-url", "--push", "origin", PUSH), runs)
         self.assertFalse([s for s in self.w.steps if s.startswith(("WIRING", "GITWEBKIT"))])
-
 
     def test_inside_it_no_mirror_refresh_is_asked_for(self):
         with open(self.w.env["WK_MARKER"], "w") as f:

@@ -1,4 +1,4 @@
-"""Audit: "Prompts guard destructive actions only" (CLAUDE.md): one confirm(), no competing raw read."""
+"""lib/common.sh's confirm(), the one prompt in bash (tests/test_lint.py one_prompt): No by default, and no terminal declines."""
 
 import os
 import pty
@@ -8,75 +8,7 @@ import unittest
 from tests.support import REPO
 
 
-def _target_files():
-    files = [p for p in sorted((REPO / "cmd").iterdir()) if p.is_file()]
-    files += [p for p in sorted((REPO / "admin").iterdir()) if p.is_file()]
-    for d in ("lib", "boot", "bench", "image"):
-        files += sorted((REPO / d).glob("*.sh"))
-    return [p.relative_to(REPO) for p in files]
-
-
-def _grep(pattern, files):
-    if not files:
-        return []
-    cp = subprocess.run(
-        ["grep", "-n", "-E", pattern, *[str(p) for p in files]],
-        cwd=str(REPO),
-        capture_output=True,
-        text=True,
-    )
-    out = []
-    for line in cp.stdout.splitlines():
-        path, lineno, content = line.split(":", 2)
-        out.append((path, int(lineno), content))
-    return out
-
-
-def _raw_read_sites():
-    files = [f for f in _target_files() if f.name != "common.sh"]
-    out = {}
-    for path, lineno, content in _grep(r"read -r|read -p", files):
-        if "while" in content:
-            continue
-        out[(path, content.strip())] = lineno
-    return out
-
-
-EXPECTED_SAFE_RAW_READS = {
-    ("admin/wk-card-priv", 'read -r type tran <<EOF'):
-        "reads two fields from a heredoc, not a terminal",
-}
-
-
-class TestOnePromptHelper(unittest.TestCase):
-
-    def test_confirm_is_defined_exactly_once(self):
-        sites = _grep(r"^confirm\(\)", _target_files())
-        self.assertEqual(
-            [(path, content) for path, _, content in sites],
-            [("lib/common.sh", "confirm() {")],
-            f"expected exactly one confirm() definition, found: {sites}",
-        )
-
-    def test_no_competing_raw_read_prompt(self):
-        found = _raw_read_sites()
-        expected = set(EXPECTED_SAFE_RAW_READS)
-        unexpected = set(found) - expected
-        self.assertEqual(
-            unexpected, set(),
-            "raw read(s) outside confirm() not accounted for -- audit each "
-            f"(current line, if still there): "
-            f"{[(f, c, found[(f, c)]) for f, c in unexpected]}",
-        )
-        missing = expected - set(found)
-        self.assertEqual(
-            missing, set(),
-            f"expected safe read site(s) not found -- audit is stale: {sorted(missing)}",
-        )
-
-
 class TestConfirmDefaultsToNoAndDeclinesWithoutATerminal(unittest.TestCase):
-
     SCRIPT = (
         ". lib/common.sh\n"
         "rc=0\n"

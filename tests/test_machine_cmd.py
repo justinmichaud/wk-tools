@@ -3,7 +3,6 @@ import contextlib
 import io
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -12,14 +11,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.killpoints import converges
+from tests import fakes
 from tests.support import REAL_MACHINES, REPO, live_selected, machine_reachable, owed
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, machine_cmd, places, reach, tools  # noqa: E402
 from wk.machine_cmd import build, deps  # noqa: E402
 from wk.machine import Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
 
 HOME = "/home/me"
 SHA = "a" * 40
@@ -57,7 +55,7 @@ class World:
     """One Fake for both ends: its effects are the flow's effects, wherever they land."""
 
     def __init__(self, tmp, conf=None, deps=DEPS_PROBE, answers=True, ws=()):
-        self.fake = Fake("both")
+        self.fake = fakes.World(name="both")
         self.tmp = Path(tmp)
         self.fleet = self.tmp / "machines"
         shutil.rmtree(self.fleet, ignore_errors=True)
@@ -119,23 +117,22 @@ class World:
         return sorted((k, str(v)) for k, v in self.fake.files.items()), sorted(self.fake.dirs)
 
 
-class MachineTest(unittest.TestCase):
+class MachineTest(fakes.FlowTest):
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-machine-")
-        self.env_patch = mock.patch.dict(os.environ, {"WK_YES": "1"})
-        self.env_patch.start()
-        for v in ("WK_DRY_RUN", "WK_CONFIRMED", "WK_DESTRUCTIVE", "WK_FORCE"):
-            os.environ.pop(v, None)
-        self.stdin = mock.patch.object(sys, "stdin", io.StringIO())
-        self.stdin.start()
-
-    def tearDown(self):
-        self.stdin.stop()
-        self.env_patch.stop()
-        shutil.rmtree(self.tmp, ignore_errors=True)
+        super().setUp()
+        os.environ["WK_YES"] = "1"
+        for p in (mock.patch.object(sys, "stdin", io.StringIO()),):
+            p.start()
+            self.addCleanup(p.stop)
 
     def world(self, **kw):
         return World(self.tmp, **kw)
+
+    def deployed(self):
+        w = self.world(conf=BUILD)
+        w.fake.files[HOME + "/.wk-remote"] = "place=box\n"
+        w.fake.files[HOME + "/.zshrc"] = "keep\n# wk-tools shared shell configuration\n. %s/wk/tools/shell/bashrc\n" % HOME
+        return w
 
     def quiet(self, fn, *args):
         err = io.StringIO()
@@ -156,12 +153,6 @@ class MachineTest(unittest.TestCase):
             rc, err = self.quiet(getattr(w.machines(), verb), *args)
         self.assertEqual(rc, want, err)
         return w, err
-
-    def converges(self, world, verb, *args):
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                getattr(w.machines(), verb)(*args)
-        converges(self, world, run_once, World.state)
 
 
 class TestSharedHomeProvisioning(unittest.TestCase):
@@ -297,21 +288,6 @@ class TestSetup(MachineTest):
         self.assertIn("hots is not a key a build machine's conf takes", err)
         self.assertEqual(self.runs(w), [])
 
-    def test_a_setup_killed_after_any_effect_and_rerun_converges(self):
-        self.converges(self.world, "setup", "box", "build")
-
-    def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        wet, _ = self.verb(0, "setup", "box", "build")
-        acted = [r for r in self.runs(wet) if r[0] in ("env", "rm") or (r[:2] == ("sh", "-c") and r[2].startswith(("umask", "rm -f")))]
-        self.assertGreaterEqual(len(acted), 4)
-        dry = self.world()
-        before = dry.state()
-        _, err = self.verb(0, "setup", "box", "build", w=dry, env=DRY)
-        self.assertEqual(dry.state(), before)
-        for r in acted:
-            self.assertIn("would run on both: " + " ".join(shlex.quote(a) for a in r), err)
-        self.assertIn(("write", str(dry.fleet / "box.conf")), dry.fake.effects)
-
     def test_a_peer_is_asked_for_its_own_wk_and_not_provisioned(self):
         w, _ = self.verb(0, "setup", "box", conf="kind=peer\ndriver=remote\ntools=Development/wk-tools\n")
         self.assertIn(("sh", "-c", "test -x %s/Development/wk-tools/wk" % HOME), self.runs(w))
@@ -319,12 +295,6 @@ class TestSetup(MachineTest):
 
 
 class TestRm(MachineTest):
-    def deployed(self):
-        w = self.world(conf=BUILD)
-        w.fake.files[HOME + "/.wk-remote"] = "place=box\n"
-        w.fake.files[HOME + "/.zshrc"] = "keep\n# wk-tools shared shell configuration\n. %s/wk/tools/shell/bashrc\n" % HOME
-        return w
-
     def test_a_machine_with_workspaces_is_refused_by_name(self):
         w, err = self.verb(1, "rm", "box", conf=BUILD, ws=("big",))
         self.assertIn("big", err)
@@ -345,9 +315,6 @@ class TestRm(MachineTest):
                 self.assertIn("Connection refused", err)
                 self.assertEqual([e for e in w.fake.effects if e[0] == "remove"], [("remove", str(w.fleet / "box.conf"))])
 
-    def test_an_rm_killed_after_any_effect_and_rerun_converges(self):
-        self.converges(self.deployed, "rm", "box")
-
 
 class TestBoard(MachineTest):
     HELPERS = ("/usr/local/libexec/wk-card-priv", "/usr/local/libexec/wk-check-boot-files.py")
@@ -362,15 +329,6 @@ class TestBoard(MachineTest):
         w, err = self.verb(1, "setup", "box", conf=BOARD, answers=False)
         self.assertIn("Connection refused", err)
         self.assertEqual([e for e in w.fake.effects if e[0] in ("copy_in", "write", "remove")], [])
-
-    def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        dry = self.world(conf=BOARD)
-        before = dry.state()
-        self.assertIn("wk-card-priv", self.verb(0, "setup", "box", w=dry, env=DRY)[1])
-        self.assertEqual(dry.state(), before)
-
-    def test_a_setup_killed_after_any_effect_and_rerun_converges(self):
-        self.converges(lambda: self.world(conf=BOARD), "setup", "box")
 
     def test_an_unreachable_board_or_mac_still_prints_the_plan_under_dry_run(self):
         for conf, plan in ((BOARD, "wk-card-priv"), ("kind=mac\nssh=box\n", "would push")):

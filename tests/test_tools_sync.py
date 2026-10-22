@@ -6,9 +6,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from tests.support import REPO
@@ -16,7 +14,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, tools  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from tests.fakes import Fake, FlowTest  # noqa: E402
 
 SHA = "a" * 40
 
@@ -40,12 +38,11 @@ class NoGit(Local):
         return super().run(["env", "PATH=%s" % self.path] + list(argv), input=input, timeout=timeout)
 
 
-class ToolsPushCase(unittest.TestCase):
+class ToolsPushCase(FlowTest):
     """A scratch source tree (committed), and a far directory to converge."""
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-tools-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        super().setUp()
         self.src = self.tmp / "src"
         self.far = self.tmp / "far" / "tools"
         self.src.mkdir()
@@ -222,12 +219,11 @@ class TestDryRun(ToolsPushCase):
         self.assertFalse(self.far.exists())
 
 
-class EachKind(unittest.TestCase):
+class EachKind(FlowTest):
     """Each driver's `sync_tools` over a Fake host: the push goes to where that place runs wk-tools from."""
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-tools-kind-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        super().setUp()
         (self.tmp / "hosts").mkdir()
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_MACHINES_DIR": str(self.tmp / "hosts"),
                     "XDG_STATE_HOME": str(self.tmp / "state"), "PATH": os.environ.get("PATH", "")}

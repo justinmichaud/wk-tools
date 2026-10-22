@@ -3,14 +3,12 @@ import contextlib
 import io
 import json
 import os
-import shutil
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, requires_container_place, run
+from tests.fakes import FlowTest
+from tests.support import REPO, WkTest, as_dispatched, load_cmd, requires_container_place, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, record  # noqa: E402
@@ -53,26 +51,17 @@ class TestListingsAgree(WkTest):
 
         self.assertEqual(names_ls, names_status)
 
-    def test_status_one_machine_each(self):
-        cp = run("status", "--json")
-        try:
-            doc = json.loads(cp.stdout)
-        except json.JSONDecodeError:
-            self.skipTest(f"'wk status --json' did not print JSON: {cp.stdout[:500]}")
 
-        names = [m["name"] for m in doc.get("machines", [])]
+
+class TestStatusNamesEachMachineOnce(FlowTest):
+    def test_status_one_machine_each(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            load_cmd("status").main(as_dispatched("status", ["--json"], os.environ), None)
+        names = [m["name"] for m in json.loads(out.getvalue()).get("machines", [])]
         self.assertTrue(names)
         self.assertEqual(len(names), len(set(names)), names)
         self.assertFalse({"container", "vm", "local", "remote", "localhost"} & set(names), names)
-
-
-class TestZedRefusesInsideAWorkspace(WkTest):
-    def test_zed_refuses_inside_a_workspace(self):
-        marker = self.tmp / "ws-marker"
-        marker.write_text("name=selftest-ws\nsrc=/src/WebKit\n")
-        cp = run("zed", "something", env={"WK_MARKER": str(marker)})
-        self.assertNotEqual(cp.returncode, 0, "opened an editor from inside a workspace")
-        self.assertIn("wk zed selftest-ws", cp.stdout, cp.stdout)
 
 
 class Scripted(places.Driver):
@@ -89,18 +78,14 @@ class Scripted(places.Driver):
         return self.marker
 
 
-class StateTest(unittest.TestCase):
+class StateTest(FlowTest):
+    UNSET = FlowTest.UNSET + ("WK_READY_WAIT",)
+
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-state-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        super().setUp()
         self.store = str(self.tmp / "store")
         self.fake = Fake("here")
         self.clock = FakeClock()
-        env = mock.patch.dict(os.environ, {}, clear=False)
-        env.start()
-        self.addCleanup(env.stop)
-        for v in ("WK_FORCE", "WK_DRY_RUN", "WK_READY_WAIT", "WK_QUIET"):
-            os.environ.pop(v, None)
 
     def driver(self, **kw):
         return Scripted(self.store, self.fake, **kw)
@@ -218,7 +203,7 @@ class TestReadyMeansTheCreationIsFinished(StateTest):
         self.assertEqual([e for e in self.fake.effects if e[0] == "run" and "wkdev-enter" in " ".join(e[1])], [])
 
 
-class TestARecordIsAClaimAndThePidIsTheFact(WkTest):
+class TestARecordIsAClaimAndThePidIsTheFact(FlowTest):
     def records(self):
         return record.Records(root=str(self.tmp / "store"), env={})
 
@@ -229,14 +214,12 @@ class TestARecordIsAClaimAndThePidIsTheFact(WkTest):
         self.assertFalse(t.alive(), "garbage read as alive")
 
 
-class TestVmDriverWithoutTart(unittest.TestCase):
-
+class TestVmDriverWithoutTart(FlowTest):
     def test_no_tart_means_every_guest_is_absent(self):
         mac = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
         mac.start()
         self.addCleanup(mac.stop)
-        tmp = tempfile.mkdtemp(prefix="wk-test-state-")
-        self.addCleanup(shutil.rmtree, tmp, True)
+        tmp = str(self.tmp)
         fake = Fake("here")
         reg = places.Registry(REPO, env={"HOME": tmp, "WK_STORE": tmp + "/s", "WK_VM_STORE": tmp + "/v"}, machine=fake)
         t = reg.load("vm")

@@ -1,27 +1,36 @@
-"""The boot-driver core (lib/wk/boot): machine.conformance[<driver>] over every driver against its machine in memory
-(tests/fake_boot.py), boot.arming_exact, the Channel, which system an arming boots, the armed barrier and the on-board
-files."""
+"""The boot drivers (lib/wk/boot) against their machines in memory (tests/fake_boot.py): machine.conformance[<driver>]
+over every driver, boot.arming_exact, the Channel, which system an arming boots, the armed barrier, the on-board files,
+and each driver's own behaviour beyond the contract (pi-sd, pi-tryboot, rpi5-usb with its pair select and CMA rewrite,
+mac-volume, mac-guest); `wk boot --status`'s quiet siblings and a buildroot image's pinned kernel."""
 import contextlib
 import io
 import json
+import os
+import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
+import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, real_confs, scratch_dir
+from tests.fake_boot import SLOTS_OF, board, conf_for, said
+from tests.fakes import Fake
+from tests.support import REPO, bash, real_confs, requires_machine, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
-
 from wk import act  # noqa: E402
-from wk.boot import driver_class, drivers, open_driver  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.boot import cli, driver_class, drivers, open_driver  # noqa: E402
 from wk.boot.cli import load_conf  # noqa: E402
 from wk.boot.driver import BOOT_PRIV, CARD_PRIV, Channel, Driver, Onboard, disk_of, part, partno  # noqa: E402
-from wk.boot.mac import MacVolume  # noqa: E402
-from tests.fake_boot import SLOTS_OF, board, conf_for, said  # noqa: E402
-from wk.machine import Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from wk.boot.mac import HELPER, MacVolume  # noqa: E402
+from wk.machine import Result, here  # noqa: E402
+from wk.sysimage import buildroot  # noqa: E402
+
 
 ONBOARD = REPO / "boot" / "onboard"
 
@@ -549,5 +558,585 @@ class TestOnboard(unittest.TestCase):
                 self.assertFalse(at.exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
+def volume(**kw):
+    return board("mac-volume", **kw)
+
+
+class TestProbe(unittest.TestCase):
+    """Host mode first, and asked for the marker too; a bench node answering without one is some other computer."""
+
+    def test_a_marker_on_the_host_side_is_bench_mode_there(self):
+        fake, d = volume()
+        fake.roots["host"]["id"] = "perf-macos-tolken-2026-08"
+        self.assertEqual((d.probe(), d.ch.side), ("bench perf-macos-tolken-2026-08", "host"))
+        self.assertFalse([a for a in fake.asked if a[0] == "bench"])
+
+    def test_a_bench_node_without_the_marker_or_a_machine_declaring_none_is_unreachable(self):
+        fake, d = volume()
+        fake.enter_bench()
+        fake.roots["bench"]["id"] = ""
+        self.assertEqual((d.probe(), d.ch.side), ("unreachable", "none"))
+        fake.conf["bench_ssh"] = ""
+        fake.asked.clear()
+        self.assertEqual(d.probe(), "unreachable")
+        self.assertFalse([a for a in fake.asked if a[0] == "bench"])
+
+    def test_the_boot_id_is_the_boottime_seconds_and_not_usec(self):
+        fake, d = volume()
+        d.probe()
+        self.assertEqual((d.boot_id(), d.booted_at()), (str(fake.booted), fake.clock.iso()))
+
+
+class TestArm(unittest.TestCase):
+    """--setBoot is sticky and Apple Silicon has no one-shot form, so the return is proven before the trip out."""
+
+    def arm(self, **fake_state):
+        fake, d = volume()
+        for k, v in fake_state.items():
+            setattr(fake, k, v)
+        d.probe()
+        steps = d.arm_sequence(*d.choose(""))
+        got, err = quiet(lambda: [step() for _, step in steps[:-1]] and 0)
+        return fake, got, err, fake.priv_asked()
+
+    def test_it_arms_and_asserts_the_firmware_afterwards(self):
+        fake, got, err, verbs = self.arm()
+        self.assertEqual(got, 0, err)
+        self.assertIn("the firmware will boot 'WK Bench' next", err)
+        self.assertLess(verbs.index("boot-host"), verbs.index("boot-volume"))
+        self.assertEqual(fake.firmware, "bench")
+        self.assertEqual({a[0] for a in fake.asked if a[1:4] == ("sudo", "-n", HELPER)}, {"host"})
+
+    def test_each_refusal_reports_what_the_mac_said_and_arms_nothing_past_it(self):
+        for state, words, blessed in (
+                ({"said": {"boot-host": (1, "wk-boot-priv: bless said: Error -60005: cannot sign\n")}}, "Error -60005: cannot sign", False),
+                ({"said": {"boot-volume": (1, "wk-boot-priv: bless exited 1, so the firmware was not told\n")}}, "nothing was changed", True),
+                ({"firmware": "bench", "said": {"boot-host": (0, "wk-boot-priv: blessed /\n")}}, "Nothing was armed", False),
+                ({"stuck": True}, "mbp's firmware still names", True)):
+            with self.subTest(words=words):
+                fake, got, err, verbs = self.arm(**state)
+                self.assertIs(got, act.Refused)
+                self.assertIn(words, err)
+                self.assertEqual("boot-volume" in verbs, blessed)
+
+    def test_an_absent_volume_or_helper_is_refused_before_anything_is_asked(self):
+        for state, words in (({"attached": False}, "is not attached to mbp"), ({"helper_is": None}, "boot helper is not installed")):
+            with self.subTest(state=state):
+                fake, got, err, verbs = self.arm(**state)
+                self.assertIs(got, act.Refused)
+                self.assertIn(words, err)
+                self.assertEqual(verbs, [])
+
+
+class TestReturn(unittest.TestCase):
+    def test_a_reboot_from_the_bench_side_is_refused_with_the_reason(self):
+        fake, d = volume()
+        fake.enter_bench()
+        d.probe()
+        got, err = quiet(d.reboot)
+        self.assertIs(got, act.Refused)
+        self.assertIn("carries no boot helper", err)
+        self.assertEqual(fake.priv_asked(), [])
+
+    def test_a_disarm_that_cannot_bless_back_is_refused(self):
+        fake, d = volume()
+        fake.said = {"boot-host": (1, "wk-boot-priv: bless exited 1\n")}
+        d.probe()
+        got, err = quiet(d.disarm)
+        self.assertIs(got, act.Refused)
+        for remedy in ("wk machine setup mbp", "wk boot mbp --disarm"):
+            self.assertIn(remedy, err)
+
+
+class TestReports(unittest.TestCase):
+    def test_a_bench_answer_reports_the_medium_as_that_installs_own_root(self):
+        fake, d = volume()
+        fake.enter_bench()
+        d.probe()
+        self.assertIn("tolken-bench is running from it", d.media())
+
+    def test_silence_on_both_nodes_names_both_of_them(self):
+        fake, d = volume()
+        fake.up = False
+        d.probe()
+        self.assertIn("neither tolken nor tolken-bench answers", d.media())
+        for want in ("booted_volume=unknown", "firmware_default=unknown", "bench_display=builtin 1280x832"):
+            self.assertIn(want, d.evidence())
+
+    def test_evidence_reads_the_facts_with_the_trees_own_reader(self):
+        fake, d = volume()
+        fake.firmware = "bench"
+        d.probe()
+        ev = d.evidence()
+        for want in ("booted_volume=Macintosh HD", "attached at /Volumes/WK Bench", "a plain reboot is expected to enter bench mode"):
+            self.assertIn(want, ev)
+        self.assertTrue(fake.fact_input.startswith("#!/usr/bin/env python3"), "lib/wk/mac.py travels on stdin")
+
+    def test_the_bench_system_is_the_volumes_marker(self):
+        fake, d = volume()
+        d.probe()
+        self.assertEqual(d.systems(), [("/Volumes/WK Bench", "sys-a")])
+        fake.attached = False
+        self.assertEqual(d.systems(), [])
+        fake.up = False
+        self.assertIsNone(d.systems())
+
+
+class TestOnTheMac(unittest.TestCase):
+    @requires_machine("tolken")
+    def test_what_an_arming_proves_first_reads_true_on_mbp(self):
+        """`live boot.arm[mbp]`, read-only as `requires_machine` is: host mode, the volume attached, and a firmware
+        default naming one of its installs. The bless round trip itself is the owed half."""
+        d = open_driver(REPO, conf_for("mac-volume"))
+        if d.probe() != "host":
+            self.skipTest("mbp answers as %s, and an arming starts from host mode" % d.mode)
+        self.assertTrue(d.volume_present(), d.media())
+        fw = d.firmware_default()
+        self.assertTrue("the host install" in fw or "'WK Bench'" in fw, fw)
+
+
+def guest(env=None, **state):
+    fake, d = board("mac-guest", env=env)
+    for k, v in state.items():
+        setattr(fake, k, v)
+    return fake, d
+
+
+class TestTheRehearsalIsNotAMeasurement(unittest.TestCase):
+    def test_it_says_it_measures_nothing(self):
+        _, d = guest()
+        self.assertFalse(d.measures)
+        self.assertIn("measurement=refused", d.evidence())
+
+
+class TestArming(unittest.TestCase):
+    """Arming a guest is starting it, and what makes it a benchmark install is its marker."""
+
+    def test_a_stopped_guest_is_started_and_an_absent_or_unmarked_one_is_refused(self):
+        fake, d = guest()
+        self.assertIsNone(quiet(d.arm)[0])
+        self.assertEqual(fake.effects, [("start",)])
+        for state, says in (({"st": "absent"}, "wk new wk-bench --on vm"),
+                            ({"st": "running", "marked": False}, "carries no /etc/wk-image")):
+            with self.subTest(says):
+                fake, d = guest(**state)
+                got, err = quiet(d.arm)
+                self.assertIs(got, act.Refused)
+                self.assertIn(says, err)
+                self.assertEqual(fake.effects, [])
+
+    def test_leaving_the_role_is_stopping_the_guest(self):
+        fake, d = guest(st="running")
+        self.assertEqual(d.probe(), "bench sys-a")
+        quiet(d.reboot)
+        self.assertEqual(fake.effects, [("stop",)])
+        self.assertEqual(d.probe(), "unreachable")
+
+    def test_a_dry_run_starts_nothing(self):
+        fake, d = guest()
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+            quiet(d.arm)
+        self.assertEqual(fake.effects, [])
+
+
+class TestWhatItReports(unittest.TestCase):
+    def test_the_declared_display_is_the_mode_the_guest_is_built_with(self):
+        self.assertEqual(guest()[1].display(), "external 1280x800")
+        self.assertEqual(guest(env={"WK_VM_DISPLAY": "1920x1200"})[1].display(), "external 1920x1200")
+
+    def test_the_guest_is_named_by_wk_bench_guest(self):
+        self.assertEqual(guest(env={"WK_BENCH_GUEST": "my-custom-guest"})[1].guest(), "my-custom-guest")
+
+    def test_without_tart_it_is_not_probeable_and_says_where_it_is_managed(self):
+        _, d = guest(has_tart=False)
+        with mock.patch("wk.boot.mac.is_macos", return_value=True):
+            self.assertFalse(d.probeable())
+            self.assertIn("managed on the macOS host", d.media())
+
+
+class TestStagingRuns(unittest.TestCase):
+    """boot/onboard/tryboot.sh run against a fixture, with mount, umount, sync and /proc/mounts shimmed."""
+
+    ZIMAGE_MAGIC = (36, bytes((0x18, 0x28, 0x6F, 0x01)))
+    ARM64_MAGIC = (56, b"ARM\x64")
+
+    def write_kernel(self, path, magic):
+        off, word = magic
+        blob = bytearray(1024)
+        blob[off:off + 4] = word
+        path.write_bytes(bytes(blob))
+
+    def stage(self, config, kernels, cmdline="root=PARTUUID=aa-02 rootwait\n"):
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        medium, sd, shim = tmp / "medium", tmp / "sd", tmp / "bin"
+        for d in (medium, sd, shim):
+            d.mkdir()
+        (medium / "config.txt").write_text(config)
+        (medium / "cmdline.txt").write_text(cmdline)
+        (medium / "bcm2711-rpi-4-b.dtb").write_bytes(b"dtb")
+        (medium / "overlays").mkdir()
+        (medium / "overlays" / "vc4-kms-v3d.dtbo").write_bytes(b"ovl")
+        for name, magic in kernels.items():
+            self.write_kernel(medium / name, magic)
+        for f in ("start4.elf", "fixup4.dat"):
+            (sd / f).write_bytes(b"fw")
+        real_grep = shutil.which("grep")
+        (shim / "grep").write_text('#!/bin/sh\nfor a; do l=$a; done\n[ "$l" = /proc/mounts ] && { echo "/dev/fake1 %s vfat rw 0 0"; exit 0; }\n'
+                                   'exec %s "$@"\n' % (sd, real_grep))
+        (shim / "mount").write_text('#!/bin/sh\nfor a in "$@"; do t=$a; done\ncp -a "%s"/. "$t"\n' % medium)
+        (shim / "umount").write_text('#!/bin/sh\nfor a in "$@"; do t=$a; done\nfind "$t" -mindepth 1 -delete\n')
+        (shim / "sync").write_text("#!/bin/sh\nexit 0\n")
+        for f in shim.iterdir():
+            f.chmod(0o755)
+        text = Onboard(REPO, "tryboot.sh", WK_DO="stage", WK_SD="/dev/fake1", WK_SRC="/dev/sda1", WK_DTB="bcm2711-rpi-4-b.dtb").text()
+        cp = subprocess.run(["sh", "-c", text], capture_output=True, text=True,
+                            env={"PATH": "%s:/usr/bin:/bin" % shim})
+        return cp, sd
+
+    def test_a_kernel_line_names_the_kernel_and_states_32_bit(self):
+        cp, sd = self.stage("kernel=zImage\ndtparam=audio=on\n", {"zImage": self.ZIMAGE_MAGIC})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        for f in ("zImage", "bcm2711-rpi-4-b.dtb", "start4.elf", "fixup4.dat"):
+            self.assertTrue((sd / "second" / f).exists(), f"{f} was not staged")
+        self.assertTrue((sd / "second" / "overlays" / "vc4-kms-v3d.dtbo").exists())
+        txt = (sd / "tryboot.txt").read_text()
+        self.assertIn("os_prefix=second/", txt)
+        self.assertIn("arm_64bit=0", txt)
+        self.assertIn("panic=10", (sd / "second" / "cmdline.txt").read_text())
+
+    def test_a_cmdline_that_chose_a_panic_keeps_its_own(self):
+        cp, sd = self.stage("kernel=zImage\n", {"zImage": self.ZIMAGE_MAGIC}, cmdline="root=PARTUUID=aa-02 panic=5\n")
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertEqual((sd / "second" / "cmdline.txt").read_text().split(), ["root=PARTUUID=aa-02", "panic=5"])
+
+    def test_the_prefix_leads_the_staged_config(self):
+        """the firmware resolves each filename as it reads the directive asking for it."""
+        cp, sd = self.stage("dtoverlay=vc4-kms-v3d\n[pi4]\ndtparam=audio=on\n", {"kernel8.img": self.ARM64_MAGIC})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        lines = [l for l in (sd / "tryboot.txt").read_text().splitlines() if l.strip()]
+        self.assertEqual(lines[0], "os_prefix=second/")
+        self.assertLess(lines.index("arm_64bit=1"), lines.index("dtoverlay=vc4-kms-v3d"))
+
+    def test_a_kernel_of_neither_bitness_states_none(self):
+        cp, sd = self.stage("kernel=zImage\n", {"zImage": (0, b"\x00\x00\x00\x00")})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertNotIn("arm_64bit", (sd / "tryboot.txt").read_text())
+
+    def test_no_kernel_line_resolves_the_one_default_name_there_is(self):
+        cp, sd = self.stage('#kernel=""\ndtoverlay=vc4-kms-v3d\n', {"kernel8.img": self.ARM64_MAGIC})
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        self.assertTrue((sd / "second" / "kernel8.img").exists())
+
+    def test_two_default_names_and_no_kernel_line_refuses(self):
+        cp, sd = self.stage("dtparam=audio=on\n", {"kernel8.img": self.ARM64_MAGIC, "kernel7l.img": self.ZIMAGE_MAGIC})
+        self.assertNotEqual(cp.returncode, 0)
+        for want in ("kernel8.img", "kernel7l.img", "config.txt.append"):
+            self.assertIn(want, cp.stderr)
+        self.assertFalse((sd / "second").exists(), "nothing is staged on a refusal")
+
+    def test_no_kernel_at_all_refuses(self):
+        cp, sd = self.stage("dtparam=audio=on\n", {})
+        self.assertNotEqual(cp.returncode, 0)
+        self.assertIn("holds none of", cp.stderr)
+        self.assertFalse((sd / "second").exists())
+
+
+CARD_HELPER = REPO / "admin" / "wk-card-priv"
+
+
+class TestTheHelperTakesAPair(unittest.TestCase):
+    def _run(self, args):
+        body = subprocess.run(
+            ["sed", "-n", "/^_autoboot_write()/,/^}/p;/^v_autoboot()/,/^}/p", str(CARD_HELPER)],
+            capture_output=True, text=True).stdout
+        script = (
+            'say() { echo "$*"; }\n'
+            'deny() { echo "REFUSED: $*" >&2; exit 3; }\n'
+            'fail() { echo "$*" >&2; exit 1; }\n'
+            'gate() { GATED_DEV="$1"; }\n'
+            'part() { echo "$1$2"; }\n'
+            'with_mount() { local m=/tmp/wk-ab-$$; mkdir -p "$m"; shift; "$@" "$m"; }\n'
+            + body.replace('with_mount "$(part "$dev" 1)" _autoboot_write "$pair"',
+                           'mkdir -p /tmp/wk-ab-$$; _autoboot_write /tmp/wk-ab-$$ "$pair"; cat /tmp/wk-ab-$$/autoboot.txt')
+            + f"\nv_autoboot {args}\n")
+        return bash(script)
+
+    def test_pair_three_is_written_and_pair_one_is_the_default(self):
+        for args, pair in (("/dev/sdX 3", "3"), ("/dev/sdX", "1")):
+            with self.subTest(args=args):
+                cp = self._run(args)
+                self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
+                self.assertIn("boot_partition=" + pair, cp.stdout)
+
+    def test_any_other_pair_is_refused(self):
+        for bad in ("2", "4", "0", "1;rm -rf /"):
+            with self.subTest(pair=bad):
+                cp = self._run(f"/dev/sdX '{bad}'")
+                self.assertEqual(3, cp.returncode, cp.stdout + cp.stderr)
+                self.assertIn("REFUSED", cp.stderr)
+
+
+SCRIPT = REPO / "host" / "linux" / "rpi5" / "rpi5-setup.sh"
+
+
+# The sizes vc4-kms-v3d-pi5.dtbo defines an override for.
+OVERLAY_SIZES = {64, 96, 128, 192, 256, 320, 384, 448, 512}
+
+
+# The stock Ubuntu/RPi config.txt, reduced to the lines the rewrite must reason
+# about: two [all] sections, and the other boards' own cma- lines.
+STOCK = """\
+[all]
+os_check=0
+os_prefix=current/
+
+[tryboot]
+os_prefix=new/
+
+[all]
+arm_64bit=1
+dtparam=audio=on
+dtoverlay=vc4-kms-v3d
+disable_fw_kms_setup=1
+dtoverlay=dwc2
+
+[pi4]
+max_framebuffers=2
+
+[pi3+]
+dtoverlay=vc4-kms-v3d,cma-128
+
+[pi02]
+dtoverlay=vc4-kms-v3d,cma-128
+
+[all]
+
+[pi5]
+dtparam=pciex1_gen=3
+arm_freq=2800
+[all]
+"""
+
+
+def awk_program():
+    src = SCRIPT.read_text()
+    m = re.search(r"""awk -v want="\$CMA_MB" '(.*?)' "\$CFG" > "\$_cma_tmp\"""",
+                  src, re.S)
+    assert m, "the CMA rewrite is no longer an awk program in " + str(SCRIPT)
+    return m.group(1)
+
+
+def rewrite(text, want=512):
+    cp = subprocess.run(["awk", "-v", f"want={want}", awk_program()],
+                        input=text, capture_output=True, text=True, check=True)
+    return cp.stdout
+
+
+def overlay_lines(text):
+    return [l for l in text.splitlines() if l.startswith("dtoverlay=vc4-kms-v3d")]
+
+
+class SizeVocabulary(unittest.TestCase):
+    def test_default_is_a_size_the_overlay_defines(self):
+        m = re.search(r'^CMA_MB="\$\{CMA_MB:-(\d+)\}"', SCRIPT.read_text(), re.M)
+        self.assertIsNotNone(m, "rpi5-setup.sh no longer defaults CMA_MB")
+        self.assertIn(int(m.group(1)), OVERLAY_SIZES)
+
+
+class Rewrite(unittest.TestCase):
+    def test_the_all_line_gains_the_size(self):
+        self.assertIn("dtoverlay=vc4-kms-v3d,cma-512", rewrite(STOCK).splitlines())
+
+    def test_exactly_one_line_changes_and_other_boards_keep_their_own_size(self):
+        before, after = STOCK.splitlines(), rewrite(STOCK).splitlines()
+        self.assertEqual(len(before), len(after))
+        self.assertEqual([i for i, (a, b) in enumerate(zip(before, after)) if a != b],
+                         [before.index("dtoverlay=vc4-kms-v3d")])
+
+    def test_an_existing_size_is_replaced_not_appended(self):
+        got = rewrite(STOCK.replace("dtoverlay=vc4-kms-v3d\n",
+                                    "dtoverlay=vc4-kms-v3d,cma-256\n", 1))
+        self.assertIn("dtoverlay=vc4-kms-v3d,cma-512", overlay_lines(got))
+        self.assertNotIn("cma-256", got)
+
+    def test_other_overlay_parameters_survive(self):
+        got = rewrite(STOCK.replace("dtoverlay=vc4-kms-v3d\n",
+                                    "dtoverlay=vc4-kms-v3d,noaudio\n", 1))
+        self.assertIn("dtoverlay=vc4-kms-v3d,cma-512,noaudio", overlay_lines(got))
+
+    def test_rerunning_changes_nothing(self):
+        once = rewrite(STOCK)
+        self.assertEqual(rewrite(once), once)
+
+
+REPO = Path(__file__).resolve().parent.parent
+
+
+class TestQuietSiblings(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="wk-test-quiet-"))
+        self.addCleanup(shutil.rmtree, str(self.dir), True)
+
+    def _machine(self, name, net="wifi", bench=True):
+        (self.dir / f"{name}.conf").write_text(
+            f'ssh="{name}-rescue"\n'
+            + (f'bench_ssh="{name}-bench"\n' if bench else "")
+            + f'net={net}\n'
+            'kind=board\ndriver=pi-sd\ndevice=/dev/mmcblk0\nroot=/dev/mmcblk0p2\n'
+            f'note="{name}, a test fixture"\n'
+        )
+
+    def _run(self, me, peers):
+        """peers: (name, up?) as the tailnet reports them."""
+        env = {"WK_MACHINES_DIR": str(self.dir), "HOME": "/nonexistent"}
+        rows = [(n, "100.0.0.1", "up" if u else "down") for n, u in peers]
+        b = cli.Boot(REPO, cli.load_conf(REPO, me, env), None, env=env, peers=types.SimpleNamespace(peers=lambda: rows))
+        return b.quiet_siblings()
+
+    def test_the_quiet_siblings_are_counted_of_all_of_them(self):
+        for n in ("rpi3", "rpi4", "rpi5"):
+            self._machine(n)
+        for rpi5_up, want in ((False, (2, 2)), (True, (1, 2))):
+            with self.subTest(rpi5_up=rpi5_up):
+                got = self._run("rpi4", [("rpi3-rescue", False), ("rpi3-bench", False), ("rpi5-rescue", rpi5_up), ("rpi5-bench", False)])
+                self.assertEqual(got, want)
+
+    def test_either_of_a_boards_two_names_counts_as_up(self):
+        self._machine("rpi3")
+        self._machine("rpi4")
+        self.assertEqual(self._run("rpi4", [("rpi3-bench", True)]), (0, 1))
+
+    def test_only_devices_on_the_same_network_are_siblings(self):
+        self._machine("rpi3", net="wifi")
+        self._machine("rpi4", net="wifi")
+        self._machine("moose", net="cable")
+        got = self._run("rpi4", [("rpi3-rescue", False), ("rpi3-bench", False), ("moose-rescue", False)])
+        self.assertEqual(got, (1, 1))
+
+    def test_no_tailnet_view_claims_nothing(self):
+        self._machine("rpi3")
+        self._machine("rpi4")
+        self.assertEqual(self._run("rpi4", []), (0, 0))
+
+
+def run(deb, release, out, machine=None):
+    """kernel_pin as a process would report it: the tarball on stdout, the refusal on stderr."""
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        try:
+            got = buildroot.kernel_pin(machine or here(), str(deb), release, str(out))
+        except Refused as e:
+            return subprocess.CompletedProcess(None, e.status, "", err.getvalue())
+    return subprocess.CompletedProcess(None, 0, got, err.getvalue())
+
+
+class TestPrepare(unittest.TestCase):
+    """Against a synthetic .deb, so this needs no network and no kernel."""
+
+    RELEASE = "9.9.9+rpt-rpi-v7l"
+
+    def setUp(self):
+        if not shutil.which("dpkg-deb") or not shutil.which("depmod"):
+            self.skipTest("needs dpkg-deb and depmod (the machine that prepares a pinned kernel has both)")
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-kpin-"))
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", str(self.tmp)]))
+        self.out = self.tmp / "out"
+
+    def _deb(self):
+        root = self.tmp / "pkg"
+        shutil.rmtree(root, ignore_errors=True)
+        (root / "DEBIAN").mkdir(parents=True)
+        (root / "DEBIAN" / "control").write_text(
+            f"Package: linux-image-test\nVersion: 1\nArchitecture: armhf\n"
+            f"Maintainer: t <t@t>\nDescription: test\n")
+        (root / "boot").mkdir(parents=True)
+        # A 32-bit ARM zImage is recognised by its magic at offset 36.
+        blob = bytearray(b"\0" * 64)
+        blob[36:40] = (0x016f2818).to_bytes(4, "little")
+        (root / "boot" / f"vmlinuz-{self.RELEASE}").write_bytes(bytes(blob))
+        md = root / "lib" / "modules" / self.RELEASE / "kernel" / "drivers" / "net"
+        md.mkdir(parents=True)
+        ko = md / "brcmfmac.ko"
+        ko.write_bytes(b"\x7fELF" + b"\0" * 64)
+        subprocess.run(["xz", str(ko)], check=True)
+        for f in ("modules.order", "modules.builtin"):
+            (root / "lib" / "modules" / self.RELEASE / f).write_text("")
+        dd = root / "usr" / "lib" / f"linux-image-{self.RELEASE}"
+        (dd / "overlays").mkdir(parents=True)
+        (dd / "bcm2711-rpi-4-b.dtb").write_bytes(b"\xd0\x0d\xfe\xed")
+        (dd / "overlays" / "vc4-kms-v3d-pi4.dtbo").write_bytes(b"\xd0\x0d\xfe\xed")
+        deb = self.tmp / "k.deb"
+        subprocess.run(["dpkg-deb", "--build", "--nocheck", str(root), str(deb)],
+                       check=True, capture_output=True)
+        return deb
+
+    def test_the_prepared_tree_carries_all_four_halves_with_modules_decompressed(self):
+        cp = run(self._deb(), self.RELEASE, self.out)
+        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+        names = subprocess.run(["tar", "-tf", cp.stdout.strip()], capture_output=True, text=True).stdout
+        for want in ("./boot/zImage",
+                     f"./lib/modules/{self.RELEASE}/modules.dep",
+                     "./dtb/bcm2711-rpi-4-b.dtb",
+                     "./dtb/overlays/vc4-kms-v3d-pi4.dtbo"):
+            self.assertIn(want, names, f"the prepared tree is missing {want}")
+        self.assertIn("brcmfmac.ko", names)
+        self.assertNotIn("brcmfmac.ko.xz", names, "a module was left compressed")
+        dep = subprocess.run(["tar", "-xOf", cp.stdout.strip(),
+                              f"./lib/modules/{self.RELEASE}/modules.dep"],
+                             capture_output=True, text=True).stdout
+        self.assertIn("brcmfmac.ko", dep)
+        self.assertNotIn(".ko.xz", dep, "modules.dep still names the compressed paths")
+
+
+class TestPrepareOnTheFake(unittest.TestCase):
+    """The refusals and the reuse, on any host: the Fake answers as dpkg-deb, depmod and od would."""
+
+    R = "9.9.9"
+    DEB, OUT = "/cache/k.deb", "/cache/dl"
+    TAR = OUT + "/wk-kernel-9.9.9.tar"
+
+    def world(self, magic="016f2818", modules=True, dep="kernel/brcmfmac.ko:\n"):
+        w = Fake("here")
+        x = self.TAR + ".work/x"
+        tree = self.TAR + ".work/tree"
+        w.answer(["sh", "-c"], out="")
+        w.answer(["sha256sum", self.DEB], out="ab  k.deb\n")
+        w.answer(["od"], out=" %s\n" % magic)
+        for p in (["cp"], ["find"], ["tar"], ["mv"]):
+            w.answer(p)
+
+        def unpack(argv, f):
+            f._set_file(x + "/boot/vmlinuz-" + self.R, "")
+            f._set_file(x + "/usr/lib/linux-image-%s/bcm2711-rpi-4-b.dtb" % self.R, "")
+            if modules:
+                f.dirs.add(x + "/lib/modules/" + self.R)
+            return Result(0)
+        w.react(["dpkg-deb", "-x"], unpack)
+        w.react(["depmod"], lambda a, f: (f._set_file(tree + "/lib/modules/%s/modules.dep" % self.R, dep), Result(0))[-1])
+        return w
+
+    def test_a_prepared_tree_is_packed_and_stamped(self):
+        w = self.world()
+        cp = run(self.DEB, self.R, self.OUT, w)
+        self.assertEqual((cp.returncode, cp.stdout), (0, self.TAR), cp.stderr)
+        self.assertEqual(w.files[self.TAR + ".from"], "ab")
+        self.assertNotIn(self.TAR + ".work", w.dirs)
+
+    def test_an_unchanged_package_is_not_prepared_again(self):
+        w = self.world()
+        w.files.update({self.TAR: "", self.TAR + ".from": "ab"})
+        cp = run(self.DEB, self.R, self.OUT, w)
+        self.assertEqual(cp.stdout, self.TAR)
+        self.assertFalse([e for e in w.effects if e[0] == "run" and e[1][0] == "dpkg-deb"])
+
+    def test_each_refusal_names_what_is_wrong(self):
+        tool_missing = self.world()
+        tool_missing.answer(["sh", "-c"], out="depmod\n")
+        for world, why in ((self.world(magic="00000000"), "not a 32-bit ARM zImage"),
+                           (self.world(modules=False), "no modules"),
+                           (self.world(dep="kernel/brcmfmac.ko.xz:\n"), "still names .xz"),
+                           (tool_missing, "depmod")):
+            with self.subTest(why=why):
+                cp = run(self.DEB, self.R, self.OUT, world)
+                self.assertNotEqual(cp.returncode, 0)
+                self.assertIn(why, cp.stderr)

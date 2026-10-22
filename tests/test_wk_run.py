@@ -46,6 +46,7 @@ class TestFindsBinaryOnEveryPort(unittest.TestCase):
     """The library path variable differs by port, and the prelude prepends to whatever the shell already carries."""
 
     def test_each_port_prepends_to_its_own_search_path(self):
+        """`unit run.finds_binary[<port>]`"""
         for name, os_name, kind, var, jsc in (("jsc-release", "linux", "container", "LD_LIBRARY_PATH", "/bin/jsc"),
                                               ("gtk-release", "linux", "container", "LD_LIBRARY_PATH", "/bin/jsc"),
                                               ("wpe-release", "linux", "container", "LD_LIBRARY_PATH", "/bin/jsc"),

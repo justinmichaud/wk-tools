@@ -5,19 +5,16 @@ import io
 import os
 import subprocess
 import sys
-import types
 import unittest
 from unittest import mock
 
-from tests.killpoints import converges
 from tests.support import REPO, WkTest, as_dispatched, load_cmd, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, fleet, quiet, session  # noqa: E402
+from wk import fleet, quiet, session  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
 from wk.machine import HAVE, Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from tests import fakes  # noqa: E402
 
 ROOT = str(REPO)
 PRIV = quiet.PRIV
@@ -27,12 +24,11 @@ DRM = session.SYS_DRM
 MODE_FILE = "/run/wk-session-mode"
 
 
-class World(Fake):
+class World(fakes.World):
     """moose: card0 the GPU (DP-1, lit), card1 the ast (VGA-1); nobody logged in."""
 
     def __init__(self, passwordless=True):
-        super().__init__("moose")
-        self.clock = FakeClock()
+        super().__init__(name="moose")
         self.env = {"XDG_RUNTIME_DIR": RUN}
         self.files[PRIV] = ""
         self.card("card0", "nvidia", {"DP-1": ("connected", "enabled", "On")})
@@ -105,17 +101,6 @@ class World(Fake):
     def state(self):
         return (self.files.get(MODE_FILE), SOCKET in self.files, self.unit, tuple(self.sessions),
                 self.files[DRM + "/card0-DP-1/dpms"])
-
-
-class Recording(World):
-    def act_run(self, argv, **kw):
-        self.effects.append(("act", tuple(argv)))
-        if act.dry_run():
-            return Result(0)
-        return super().act_run(argv, **kw)
-
-    def mutations(self):
-        return [e for e in self.effects if e[0] == "act"]
 
 
 class SessionTest(unittest.TestCase):
@@ -255,29 +240,6 @@ class TestStatus(SessionTest):
             self.assertIn(row, out.getvalue())
         self.assertEqual(before, w.state())
         self.assertEqual([], [e for e in w.effects if e[0] != "run"])
-
-
-class TestCrashOnly(SessionTest):
-    CASES = (("on gpu from bmc", lambda s: s.on(False), "bmc"), ("gdm", lambda s: s.gdm(False), None),
-             ("off", lambda s: s.off(), "gpu"))
-
-    def test_each_verb_killed_after_any_effect_and_rerun_converges(self):
-        for what, verb, start in self.CASES:
-            with self.subTest(verb=what):
-                converges(self, lambda: types.SimpleNamespace(fake=self.world(start)),
-                          lambda w: self.go(verb, w.fake.s()), lambda w: w.fake.state())
-
-    def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        for what, verb, start in self.CASES:
-            with self.subTest(verb=what):
-                wet, dry = self.world(start, Recording), self.world(start, Recording)
-                self.go(verb, wet.s())
-                before = dry.state()
-                with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-                    self.go(verb, dry.s())
-                self.assertEqual(wet.mutations(), dry.mutations())
-                self.assertTrue(dry.mutations())
-                self.assertEqual(before, dry.state())
 
 
 class TestTheCommand(SessionTest):

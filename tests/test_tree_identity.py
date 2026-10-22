@@ -3,14 +3,12 @@
 import contextlib
 import io
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
+from tests.fakes import FlowTest
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -42,12 +40,11 @@ def version(root):
     return kv(tools.identity_text(tools.identity(str(root), Local())))
 
 
-class TwoClonesCase(unittest.TestCase):
+class TwoClonesCase(FlowTest):
     """Two clones of one commit: a workstation (`a`) and a peer (`b`) after `wk sync --tools`."""
 
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-treeid-"))
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        super().setUp()
         origin = self.tmp / "origin"
         origin.mkdir()
         git(origin, "init", "-q", ".")
@@ -81,7 +78,6 @@ class TwoClonesCase(unittest.TestCase):
 
 
 class TestMachineLocalFilesDoNotDiffer(TwoClonesCase):
-
     def setUp(self):
         super().setUp()
         (self.a / ".DS_Store").write_bytes(b"\x00\x01")

@@ -9,22 +9,20 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import types
 import unittest
 from pathlib import Path
 
-from tests.fakes import FakeRegistry
-from tests.killpoints import converges
+from tests import fakes
+from tests.fakes import FakeRegistry, FlowTest
 from tests.support import REPO
+from tests.test_bench_pipeline import BenchTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, images, job, pgo, record as progress, sched  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import ab, change, record  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
+from wk.bench import ab, change, record, report  # noqa: E402
 from wk.machine import Result, Ssh  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
 
 
 def kv(fields, bools=()):
@@ -65,7 +63,7 @@ class Inline:
         return False
 
 
-class Far(Fake):
+class Far(fakes.World):
     """This host, whose podman machine and build boxes run their shell on the scratch tree the store paths name; a
     peer's shell runs in `peer_env`, the environment its own wk has."""
 
@@ -106,17 +104,17 @@ def opts(**kw):
     return o
 
 
-class World:
+class World(Far):
     """This host with a mirror holding HEAD, BASE and the branch tip TIP, the boards of `boards` booted into their images."""
 
     def __init__(self, tmp, boards=None, ahead=1, pr_base="", repos=("WebKit",)):
+        super().__init__()
         self.tmp, self.boards_ = Path(tmp), dict(boards or {"rpi3": R38})
         self.env = {"WK_STORE": str(self.tmp / "store"), "XDG_STATE_HOME": str(self.tmp / "state"), "HOME": str(self.tmp),
                     "XDG_CONFIG_HOME": str(self.tmp / "config"), "WK_MACHINES_DIR": str(self.tmp / "machines")}
         (self.tmp / "machines").mkdir(parents=True, exist_ok=True)
         for name in self.boards_:
             (self.tmp / "machines" / (name + ".conf")).write_text("kind=board\nssh=%s-rescue\n" % name)
-        self.fake, self.clock = Far("here"), FakeClock()
         self.reg = Reg(self.env, self.fake, ws_place=lambda ws: "container", in_workspace=lambda: False)
         self.mirror = self.reg.store.mirror_dir()
         self.fake.dirs.add(self.mirror)
@@ -206,16 +204,12 @@ class World:
         return sorted(k for k in self.fake.files if k.startswith(("/state/", "/measured/")))
 
 
-class ABTest(unittest.TestCase):
+class ABTest(FlowTest):
+    HOST = "tolken"
+
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-ab-")
-        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        saved = dict(os.environ)
-        for v in ("WK_DRY_RUN", "WK_FORCE", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_DEVICE_HELD"):
-            os.environ.pop(v, None)
+        super().setUp()
         os.environ["WK_YES"] = "1"
-        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(saved)))
-        self.addCleanup(act._forced.clear)
         self.n = 0
 
     def world(self, **kw):
@@ -243,7 +237,6 @@ class ABTest(unittest.TestCase):
 
 
 class TestTheRefusals(ABTest):
-
     def test_a_board_machines_does_not_name_is_refused_not_called_unreachable(self):
         rc, err = self.quiet(self.world().ab(devices="ghost").board_state, "ghost")
         self.assertIsInstance(rc, Refused, err)
@@ -346,7 +339,6 @@ class TestTheImages(ABTest):
 
 
 class TestTheGraph(ABTest):
-
     ws = "buildroot-" + R38
 
     def test_the_steps_declare_what_they_need_and_what_they_hold(self):
@@ -530,25 +522,8 @@ class TestARun(ABTest):
         self.assertIn("jetstream3", argv)
         self.assertEqual(w.state(), [])
 
-    def test_a_run_killed_after_any_effect_and_run_again_converges(self):
-        base = os.path.join(self.tmp, "kill")
-
-        def make():
-            self.n += 1
-            return World(os.path.join(base, str(self.n)))
-
-        def once(w):
-            tasks = record.tasks(w.home())
-            a = w.ab(task=tasks[0] if tasks else None)
-            err = io.StringIO()
-            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(a.go(), 0, err.getvalue())
-
-        converges(self, make, once, lambda w: w.state(), max_effects=80)
-
 
 class TestTheCost(ABTest):
-
     def leg(self, w, task, run, secs, count="", machine="rpi3", plan="speedometer3", ok=True, home=None):
         d = os.path.join(home or w.home(), task, "runs", run)
         os.makedirs(d)
@@ -610,7 +585,6 @@ class TestTheCost(ABTest):
 
 
 class TestThePairing(unittest.TestCase):
-
     def run_(self, state="ok", runner="r1", copy="/p"):
         return {"state": state, "dir": "/runs/%s-%s" % (runner, state), "env": {"runner_sha": runner, "local_copy": copy}}
 
@@ -633,7 +607,6 @@ class TestThePairing(unittest.TestCase):
 
 
 class TestTheArmsMayDifferByOneCommit(ABTest):
-
     def test_one_commit_apart_or_none_is_allowed(self):
         for ahead in (0, 1):
             with self.subTest(ahead=ahead):
@@ -672,7 +645,6 @@ class TestTheTaskBase(ABTest):
 
 
 class TestTheKill(ABTest):
-
     def record(self, w, pid):
         recs = progress.Records(w.reg.store.records_dir(), clock=w.clock, env=w.env, machine=w.fake)
         return recs.begin("ab", "here", "t1", "wk bench ab t1 --kill", "/x/ab.log", ["wk sysimage build"], pid=pid)
@@ -712,6 +684,77 @@ class TestTheKill(ABTest):
         rc, err = self.kill(w)
         self.assertIsInstance(rc, Refused)
         self.assertEqual(w.fake.pids, {4000, os.getpid()})
+
+
+class TestOptionsAB(BenchTest):
+    def jsc_scripts(self):
+        return [a[-1] for a in self.w.watched if "cli.js" in a[-1]]
+
+    def test_rounds_alternate_the_lead_and_each_arm_runs_its_jsc_options(self):
+        start = self.w.start
+        self.w.start = lambda *a, **kw: (self.w.clock.sleep(60), start(*a, **kw))[1]   # a leg takes a minute
+        rc, err = self.run_(None, "run", "jetstream3", "--preset", "jsc-release", "--a-args", "--useFoo=0",
+                            "--b-args", "--useFoo=1 --useBar=2", "--rounds", "2")
+        self.assertEqual(rc, 0, err)
+        arms = ["A" if "--useFoo=0 cli.js" in s else "B" if "--useFoo=1 --useBar=2 cli.js" in s else "?" for s in self.jsc_scripts()]
+        self.assertEqual(arms, ["A", "B", "B", "A"])
+        task = str(self.w.bench_dir() / self.w.tasks()[-1])
+        doc = record.task_doc(task)
+        self.assertEqual(doc["subject"], {"kind": "options", "a": "--useFoo=0", "b": "--useFoo=1 --useBar=2"})
+        self.assertEqual(record.task_arms(doc), (["--useFoo=0", "--useFoo=1 --useBar=2"], "options"))
+        self.assertIn("--a-args --useFoo=0 --b-args '--useFoo=1 --useBar=2' --rounds 2", doc["restart"])
+        st = record.task_state(task, False)
+        self.assertEqual((st["state"], st["ok"]), ("complete", 4))
+        a, b, dropped = record.paired(record.task_rounds(doc, st["runs"])[("ws", "jetstream3")], ["A", "B"])
+        self.assertEqual((len(a), len(b), dropped), (2, 2, []))
+        out = io.StringIO()
+        report.task_report(task, False, text=True, out=out)
+        self.assertIn("A = options --useFoo=0, B = options --useFoo=1 --useBar=2", out.getvalue())
+        self.assertNotIn("not counterbalanced", out.getvalue())
+
+    def test_a_restart_runs_only_the_rounds_the_task_lacks(self):
+        self.run_(None, "run", "jetstream3", "--preset", "jsc-release", "--a-args", "", "--b-args", "--useFoo=1", "--rounds", "1")
+        task = self.w.tasks()[-1]
+        self.w.watched.clear()
+        rc, err = self.run_(None, "run", "jetstream3", "--preset", "jsc-release", "--a-args", "", "--b-args", "--useFoo=1",
+                            "--rounds", "2", "--task", task)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("round 1/2 -- recorded already", err)
+        self.assertEqual(len(self.jsc_scripts()), 2)
+
+    def test_the_restart_measures_under_the_same_options(self):
+        rc, err = self.run_(None, "run", "jetstream3", "--preset", "jsc-release", "--a-args", "", "--b-args", "--useFoo=1",
+                            "--rounds", "1", "--count", "3", "--timeout", "90", "--subtests", "a b", "--cores", "0-1")
+        self.assertEqual(rc, 0, err)
+        restart = record.task_doc(str(self.w.bench_dir() / self.w.tasks()[-1]))["restart"]
+        for flag in ("--count 3", "--timeout 90", "--subtests 'a b'", "--cores 0-1"):
+            self.assertIn(flag, restart)
+
+    def test_a_browser_config_gives_each_arm_minibrowser_arguments(self):
+        rc, err = self.run_(None, "run", "speedometer3", "--preset", "wpe-release", "--a-args", "", "--b-args", "--bar",
+                            "--rounds", "1")
+        self.assertEqual(rc, 0, err)
+        scripts = [a[-1] for a in self.w.watched]
+        self.assertEqual(["--bar" in s for s in scripts], [False, True])
+
+    def test_a_dry_run_shows_the_first_round_and_writes_no_task(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        rc, err = self.run_(None, "run", "jetstream3", "--preset", "jsc-release", "--a-args", "", "--b-args", "--useFoo=1")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("round 1/5 -- options (none) (first)", err)
+        self.assertIn("round 1/5 -- options --useFoo=1", err)
+        self.assertEqual(self.w.tasks(), [])
+
+    def test_refusals(self):
+        for argv, said in (
+                (("--a-args", "--x", "--b-args", "--x"), "--a-args and --b-args are the same"),
+                (("--a-args", "", "--b-args", "--x", "--system", "rpi5"), "an A/B of one build in this workspace"),
+                (("--a-args", "", "--b-args", "--x", "--exclude-subtests", "t"), "--exclude-subtests belongs to an A/B on a board"),
+                (("--a-args", "", "--b-args", "--x", "--rounds", "0"), "--rounds takes a number of at least 1")):
+            with self.subTest(argv=argv):
+                self.assertIn(said, self.said("run", "jetstream3", "--preset", "jsc-release", *argv))
+        self.assertEqual(self.w.tasks(), [])
+        self.assertEqual(json.dumps(self.w.watched), "[]")
 
 
 if __name__ == "__main__":

@@ -1,11 +1,12 @@
-"""lib/wk/places.py: the registry and every driver over a fake machine."""
+"""lib/wk/places.py: the registry (a place's kind, a workspace's place, the default preset), every driver over a fake
+machine and its conformance, where tart is, a home mountpoint, and a clobbered workspace reading broken."""
 import contextlib
 import inspect
 import io
 import json
 import os
-import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -13,25 +14,30 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import WsDriver
-from tests.support import REPO
+from tests import fakes
+from tests.fakes import Fake, FakeClock, WsDriver
+from tests.support import rand_suffix, REPO, run, scratch_dir, stub_path, temp_store
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, git, machine, places, project, record, secrets  # noqa: E402
+from wk import act, git, machine, places, presets, project, record, secrets  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
-from wk.machine import TIMED_OUT, Result, lib_argv  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from wk.machine import lib_argv, Local, Result, TIMED_OUT  # noqa: E402
+from wk.record import Records  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.sysimage import guestbase  # noqa: E402
 
+
 IS_MACOS = os.uname().sysname == "Darwin"
+HOST_NAME = record.host_name
 LINUX_MEMINFO = "MemTotal:       32806140 kB\nMemFree:         1000000 kB\nMemAvailable:   20480000 kB\n"
 
 
-class DriversTest(unittest.TestCase):
+class DriversTest(fakes.FlowTest):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-places-"))
+        super().setUp()
+        p = mock.patch.object(record, "host_name", HOST_NAME)   # the fake machine answers this host's name
+        p.start()
+        self.addCleanup(p.stop)
         self.registry_dir = self.tmp / "hosts"
         self.registry_dir.mkdir()
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
@@ -39,9 +45,6 @@ class DriversTest(unittest.TestCase):
         (self.tmp / "home").mkdir()
         self.fake = Fake("here")
         self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
-
-    def tearDown(self):
-        os.system("rm -rf %s" % self.tmp)
 
     def conf(self, name, text):
         kind = "" if "kind=" in text.replace("driver=", "") else \
@@ -564,13 +567,6 @@ class TestTheContract(unittest.TestCase):
             for name in places.Driver.CONTRACT:
                 with self.subTest(driver=cls.__name__, method=name):
                     self.assertTrue(callable(getattr(cls, name, None)))
-
-    def test_a_command_asks_a_driver_nothing_outside_the_contract(self):
-        asked = set()
-        for path in (p for p in (REPO / "cmd").iterdir() if p.is_file()):
-            asked |= {a or b for a, b in re.findall(r"\bdriver\.([a-z_]+)|reg\.present\([^)]*\)\.([a-z_]+)",
-                                                    path.read_text(errors="replace"))}
-        self.assertEqual(sorted(asked - set(places.Driver.CONTRACT) - set(places.Driver.FIELDS)), [])
 
 
 class TestContainerConformance(DriversTest, DriverConformance):
@@ -1285,6 +1281,7 @@ class TestAMacHostReadsTheContainerStoreInThePodmanMachine(unittest.TestCase):
         self.assertIn("/opt/wk-tools/wk enter w -- git push", person[5], "a person's run is the podman machine's own wk enter")
         self.assertNotIn("WK_DRY_RUN", argv[5], "a read in a dry run is still a read; the far wk would refuse --dry-run")
 
+
 class TestThePodmanMachineRecord(DriversTest):
     def test_the_record_and_its_ssh(self):
         self.assertIsNone(places.podman_vm(self.fake, "wk"))
@@ -1327,5 +1324,220 @@ class TestThePodmanMachineRecord(DriversTest):
         self.assertEqual(out.getvalue(), "_cpus=9\n_disk=''\n")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class _Target:
+    def __init__(self, os_, store):
+        self._os = os_
+        self.store = Store({"WK_STORE": store})
+        self.env = {"WK_STORE": store}
+
+    def os(self):
+        return self._os
+
+
+class TestTheDefaultConfigIsDerived(unittest.TestCase):
+    """Registry.default_preset: the last build's preset, from its task record, else the place platform's."""
+
+    def _default(self, last_built, os_):
+        with tempfile.TemporaryDirectory(prefix="wk-test-default-preset-") as store:
+            if last_built:
+                t = Records(store, env={"WK_STORE": store}).begin("build", "here", "demo", "wk build demo --kill",
+                                                                   "/nolog", ["building"])
+                t.set("preset", last_built)
+            reg = places.Registry(REPO, env={"HOME": "/nonexistent"}, machine=Fake())
+            reg.ws_place = lambda name: "t"
+            reg.load = lambda name: _Target(os_, store)
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                return presets.default_preset(reg, "demo"), err.getvalue()
+
+    def test_the_last_build_wins(self):
+        self.assertEqual(self._default("mac-debug", "macos")[0], "mac-debug")
+
+    def test_with_no_build_the_platform_decides(self):
+        for os_, want in (("macos", "mac-release"), ("linux", "jsc-release")):
+            with self.subTest(os_):
+                self.assertEqual(self._default("", os_)[0], want)
+
+
+def plant(home, rel):
+    p = home / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("#!/bin/sh\nexit 0\n")
+    p.chmod(p.stat().st_mode | stat.S_IXUSR)
+    return p
+
+
+class TestThePythonLocator(fakes.FlowTest):
+    def setUp(self):
+        super().setUp()
+        self.home = self.tmp
+
+    def test_the_link_setup_makes_off_the_path_is_found_and_resolved_to_the_bundle(self):
+        real = plant(self.home, ".local/share/tart/tart.app/Contents/MacOS/tart")
+        link = self.home / ".local" / "bin" / "tart"
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(real)
+        self.assertEqual(places.tart_path({"HOME": str(self.home), "PATH": "/usr/bin:/bin"}), os.path.realpath(real))
+
+    def test_one_on_the_path_wins(self):
+        onpath = plant(self.home, "bin/tart")
+        plant(self.home, ".local/bin/tart")
+        self.assertEqual(places.tart_path({"HOME": str(self.home), "PATH": str(self.home / "bin")}), os.path.realpath(onpath))
+
+    def test_a_bundle_nothing_links_is_not_guessed_at_and_the_refusal_names_the_link(self):
+        plant(self.home, ".local/share/tart/tart.app/Contents/MacOS/tart")
+        env = {"HOME": str(self.home), "PATH": "/usr/bin:/bin"}
+        self.assertIsNone(places.tart_path(env))
+        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
+            places.Vm("vm", str(REPO), env, Fake()).tart_or_die()
+        self.assertIn("ln -sfn ~/.local/share/tart/tart.app/Contents/MacOS/tart ~/.local/bin/tart", err.getvalue())
+
+
+class Clobbered(fakes.FlowTest):
+    def state(self, kind, env, binp, name):
+        with mock.patch.dict(os.environ, {"PATH": "%s:%s" % (binp, os.environ["PATH"])}):
+            env = dict(env, HOME=str(self.tmp), PATH=os.environ["PATH"])
+            return places.Registry(REPO, env=env).load(kind).state(name)
+
+
+class TestPodmanRmByHand(Clobbered):
+    def test_a_container_removed_by_hand_reads_broken(self):
+        fake_podman = "case \"$*\" in *inspect*) exit 1 ;; *) exit 0 ;; esac\n"
+        with temp_store() as store, stub_path({"podman": fake_podman}) as binp:
+            name = f"demo-{rand_suffix()}"
+            ws = store["path"] / "ws" / name
+            (ws / "home").mkdir(parents=True)
+            (ws / "home" / places.READY_MARKER).write_text("")
+            (ws / "base-id").write_text("deadbeef\n")
+            st = self.state("container", {"WK_STORE": store["WK_STORE"], "WK_IN_VM": "1"}, binp, name)
+            self.assertEqual(st, "broken")
+
+
+class TestTartDeleteByHand(Clobbered):
+    def test_a_guest_deleted_by_hand_reads_broken(self):
+        fake_tart = 'case "$1" in list) echo "[]" ;; *) exit 1 ;; esac\n'
+        with temp_store() as store, stub_path({"tart": fake_tart}) as binp, \
+                mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True):
+            name = f"demo-{rand_suffix()}"
+            ws = store["path"] / "ws" / name
+            ws.mkdir(parents=True)
+            (ws / places.READY_MARKER).write_text("")
+            st = self.state("vm", {"WK_VM_STORE": store["WK_STORE"]}, binp, name)
+            self.assertEqual(st, "broken")
+
+
+def _ensure(ws, dest, user="wsuser"):
+    c = places.Container("container", str(REPO), dict(os.environ, WK_CONTAINER_USER=user), Local())
+    c._ensure_home_mountpoint(str(ws), str(dest))
+
+
+class TestTheMountpointsInsideTheHomeAreMadeHere(fakes.FlowTest):
+    HOME = "/home/wsuser"
+
+    def setUp(self):
+        super().setUp()
+        self.ws = self.tmp / "ws"
+        (self.ws / "home").mkdir(parents=True)
+
+    def test_a_destination_under_the_home_is_made_in_the_workspaces_home(self):
+        _ensure(self.ws, f"{self.HOME}/.local/share/wk/git")
+        made = self.ws / "home" / ".local" / "share" / "wk" / "git"
+        self.assertTrue(made.is_dir(), "podman is left to make the mountpoint, as root")
+        self.assertEqual((self.ws / "home" / ".local").owner(),
+                         (self.ws / "home").owner(),
+                         "the mountpoint's parents are not the home's owner's")
+
+    def test_a_destination_outside_the_home_or_the_home_itself_is_left_to_podman(self):
+        for dest in ("/var/lib/wk/git", "/ccache", "/opt/wk-tools", "/home/someone-else/git", self.HOME):
+            _ensure(self.ws, dest)
+        self.assertEqual([], list((self.ws / "home").iterdir()))
+
+
+class TestWorkspaceWithNoBaseIdIsStillCreating(unittest.TestCase):
+    def _state(self, needs_base, has_base_id):
+        fake = Fake()
+        t = WsDriver("stub", str(REPO), {"WK_STORE": "/store", "HOME": "/home/u"}, fake)
+        t.needs_base = needs_base
+        fake.mkdir(t.store.ws_dir("somews"))
+        if has_base_id:
+            fake.write(os.path.join(t.store.ws_dir("somews"), "base-id"), "some-snapshot-id\n")
+        return places.Driver.state(t, "somews")
+
+    def test_a_workspace_needing_a_base_with_none_recorded_is_creating(self):
+        self.assertEqual(self._state(needs_base=True, has_base_id=False), "creating")
+        self.assertEqual(self._state(needs_base=True, has_base_id=True), "present")
+        self.assertEqual(self._state(needs_base=False, has_base_id=False), "present")
+
+
+class TestOnePodmanWrapper(unittest.TestCase):
+    """`Container.podman()` names the machine's connection from a macOS host."""
+
+    def container(self, env, system):
+        with mock.patch("wk.places.os.uname", return_value=mock.Mock(sysname=system)):
+            return places.Container("container", str(REPO), env, Fake("here")).podman()
+
+    def test_a_macos_host_names_the_machines_connection_and_a_local_daemon_is_plain(self):
+        for env, system, want in (({}, "Darwin", ["podman", "-c", "wk"]),
+                                  ({"WK_MACHINE": "other"}, "Darwin", ["podman", "-c", "other"]),
+                                  ({"WK_IN_VM": "1"}, "Darwin", ["podman"]), ({}, "Linux", ["podman"])):
+            self.assertEqual(want, self.container(env, system), (env, system))
+
+
+class RegistryTest(fakes.FlowTest):
+    def setUp(self):
+        super().setUp()
+        self.machines = os.path.join(self.tmp, "machines")
+        os.makedirs(self.machines)
+
+    def registry(self, **env):
+        base = {"HOME": os.path.join(self.tmp, "home"), "XDG_STATE_HOME": os.path.join(self.tmp, "state"),
+                "WK_MACHINES_DIR": self.machines, "WK_STORE": os.path.join(self.tmp, "store"),
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+        base.update(env)
+        return places.Registry(REPO, env=base)
+
+
+class TestWsPlaceDerivesFromTheStore(RegistryTest):
+    def test_ws_target_resolves_an_unknown_name_to_container(self):
+        self.assertEqual(self.registry().ws_place(f"nowhere-{rand_suffix()}"), "container")
+
+    def _creating(self, name, pid):
+        store = os.path.join(self.tmp, "fakebox-store")
+        with open(os.path.join(self.machines, "fakebox.conf"), "w") as fh:
+            fh.write("kind=build\ndriver=remote\nlocal=1\n"
+                     "root=%s\nstore=%s\n" % (store, store))
+        Records(store, env={"WK_STORE": store}).begin("new", "here", name, "wk new %s --kill" % name, "/nolog",
+                                                      ["checking"], pid=pid)
+
+    def test_ws_target_resolves_a_live_creating_record_to_its_target(self):
+        name = f"creating-{rand_suffix()}"
+        self._creating(name, os.getpid())
+        self.assertEqual(self.registry().ws_place(name), "fakebox")
+
+    def test_ws_target_ignores_a_dead_creating_record(self):
+        name = f"dead-{rand_suffix()}"
+        self._creating(name, 4194304)
+        self.assertEqual(self.registry().ws_place(name), "container")
+
+
+class TestPlaceKind(unittest.TestCase):
+    def _kind(self, name, registry):
+        return places.Registry(REPO, env={"WK_MACHINES_DIR": str(registry), "HOME": "/nonexistent"}, machine=Fake()).kind(name)
+
+    def test_a_built_in_names_itself_a_conf_is_believed_and_nothing_is_guessed(self):
+        cases = [(k, None, k) for k in ("container", "vm", "remote", "local")]
+        cases += [("nosuchtarget", None, None), ("buildbox1", 'kind=build\ndriver="remote"\n', "remote"),
+                  ("plainbox", 'kind=build\nhost="plainbox"\n', "remote")]
+        for name, conf, want in cases:
+            with self.subTest(name=name), scratch_dir() as reg:
+                if conf:
+                    (reg / (name + ".conf")).write_text(conf)
+                self.assertEqual(self._kind(name, reg), want)
+
+
+class TestRemoteIsLocal(unittest.TestCase):
+    def test_local_exactly_when_the_remote_marker_says_this_is_the_machine(self):
+        for remote_local in (True, False):
+            with self.subTest(remote_local=remote_local), scratch_dir() as state:
+                env = {"HOME": "/nonexistent", "XDG_STATE_HOME": str(state), "WK_REMOTE_MARKER": "/nonexistent/.wk-remote",
+                       "WK_REMOTE_HOST": "buildbox1", **({"WK_REMOTE_LOCAL": "1"} if remote_local else {})}
+                self.assertEqual(places.Remote("buildbox1", str(REPO), env, Fake()).is_local, remote_local)

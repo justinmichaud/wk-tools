@@ -5,32 +5,26 @@ import json
 import os
 import shutil
 import sys
-import tempfile
 import types
 import unittest
-from pathlib import Path
 from unittest import mock
 
-from tests.killpoints import converges
+from tests import fakes
 from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, gc, places, pr, record, rubble  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
-from wk.machine import Local, Machine, Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
 from wk.store import Snapshots, Store  # noqa: E402
 
 WK = str(REPO / "wk")
-MUTATIONS = ("act", "write", "mkdir", "remove")
 
 
-class Host(Fake):
-
-    def __init__(self, name):
-        super().__init__(name)
+class Host(fakes.World):
+    def __init__(self, name, tmp=None, **env):
+        super().__init__(tmp, name, **env)
         self.answer(["du", "-sk"], out="4\tx\n")
         self.react(["ls", "-1A"], lambda a, f: Result(0, "".join(n + "\n" for n in f.listdir(a[-1]))) if a[-1] in f.dirs
                    else Result(2, "", "no such directory"))
@@ -43,25 +37,16 @@ class Host(Fake):
             self.dirs.add(path)
             path = os.path.dirname(path)
 
-    def act_run(self, argv, **kw):
-        self.effect(("act", tuple(argv)))
-        return Machine.act_run(self, argv, **kw)
-
     def acts(self):
         return [e[1] for e in self.effects if e[0] == "act"]
 
 
 class World(Host):
-
     def __init__(self, tmp):
-        super().__init__("here")
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
-        self.store_dir = str(self.tmp / "store")
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": self.store_dir, "WK_IN_VM": "1", "WK_ROOT": str(REPO),
-                    "WK_LOCK_DIR": str(self.tmp / "locks"), "XDG_STATE_HOME": str(self.tmp / "state")}
-        self.clock = FakeClock()
+        super().__init__("here", tmp, WK_IN_VM="1", WK_ROOT=str(REPO))
+        self.store_dir = self.env["WK_STORE"]
         self.store = Store(self.env)
-        self.dirs.update({self.env["WK_LOCK_DIR"], os.path.join(self.store_dir, "ws")})
+        self.dirs.add(os.path.join(self.store_dir, "ws"))
         self.containers, self.images, self.volumes = set(), [], []
         self.react(["podman", "ps"], lambda a, f: Result(0, "".join("wk-%s\tUp\n" % n for n in sorted(f.containers))))
         self.react(["podman", "inspect"], lambda a, f: Result(0, "running\n") if a[2][3:] in f.containers else Result(125))
@@ -80,10 +65,6 @@ class World(Host):
         self.board.react(["ls", "-1A"], lambda a, f: Result(0, "".join(n + "\n" for n in f.listdir(a[-1]))) if a[-1] in f.dirs
                          else Result(0))
         self.effects = []
-
-    @property
-    def fake(self):
-        return self
 
     def _keep_images(self, keep):
         self.images = [i for i in self.images if keep(i)]
@@ -165,7 +146,6 @@ class FakeGc(gc.Gc):
 
 
 class FakeVm(places.Vm):
-
     def __init__(self, w, guests):
         env = dict(w.env, TART_HOME="/tart", WK_VM_STORE=str(w.tmp / "vmstore"))
         super().__init__("vm", str(REPO), env, w)
@@ -181,14 +161,18 @@ class FakeVm(places.Vm):
         return Store(dict(self.env, WK_STORE=self.env["WK_VM_STORE"]))
 
 
-class GcTest(WkTest):
+def rubble_world(tmp):
+    """A store holding one of each kind of rubble a plain run takes."""
+    w = World(tmp)
+    for make in (_snapshot, _seed, _payload, _runner, lambda w: _board(w, "a.part"), _selftest):
+        make(w)
+    return w
+
+
+class GcTest(fakes.FlowTest):
     def setUp(self):
         super().setUp()
-        env = mock.patch.dict(os.environ, {"WK_YES": "1", "WK_DESTRUCTIVE": "1"})
-        env.start()
-        self.addCleanup(env.stop)
-        for k in ("WK_DRY_RUN", "WK_CONFIRMED"):
-            os.environ.pop(k, None)
+        os.environ.update(WK_YES="1", WK_DESTRUCTIVE="1")
         self.w = World(self.tmp)
 
     def run_gc(self, *flags, w=None):
@@ -399,7 +383,6 @@ class TestReclaimsOrNames(GcTest):
 
 
 class TestAMeasurementIsNeverRubble(GcTest):
-
     def task(self, *workspaces):
         d = os.path.join(self.w.store.records_dir(), "bench", "20260101T000000Z-rpi5-a")
         self.w.files[os.path.join(d, "task.json")] = "{}"
@@ -516,7 +499,6 @@ class TestOneQuestion(GcTest):
 
 
 class TestTheVmHalf(GcTest):
-
     def mac(self, rows, running=True):
         g = self.w.gc()
         g.store_half = False
@@ -554,40 +536,7 @@ class TestTheVmHalf(GcTest):
         self.assertEqual({r.kind: bool(r.why) for r in rows}, {"mirror": True, "store": True})
 
 
-class TestCrashOnly(GcTest):
-    def world(self):
-        w = World(self.tmp)
-        for make in (_snapshot, _seed, _payload, _runner, lambda w: _board(w, "a.part"), _selftest):
-            make(w)
-        return w
-
-    def test_a_run_killed_after_any_effect_and_rerun_converges(self):
-        def run_once(w):
-            os.environ.pop("WK_CONFIRMED", None)
-            with contextlib.redirect_stderr(io.StringIO()):
-                w.gc().run(())
-        converges(self, self.world, run_once, World.state)
-
-    def test_the_dry_run_records_the_wet_runs_effects_and_changes_nothing(self):
-        def mutations(w):
-            locks = w.env["WK_LOCK_DIR"]
-            return [tuple(str(x).replace(str(w.tmp), "") for x in e) for e in w.effects + w.board.effects
-                    if e[0] in MUTATIONS and not str(e[1]).startswith(locks)]
-        wet, dry = self.world(), self.world()
-        self.run_gc("--purge-builds", w=wet)
-        before = dry.state()
-        os.environ["WK_DRY_RUN"] = "1"
-        try:
-            self.run_gc("--purge-builds", w=dry)
-        finally:
-            del os.environ["WK_DRY_RUN"]
-        self.assertEqual(mutations(wet), mutations(dry))
-        self.assertGreaterEqual(len(mutations(wet)), 5)
-        self.assertEqual(dry.state(), before)
-
-
 class TestWhatGcKeepsWhenNothingVerifies(WkTest):
-
     def _bases(self, ids, complete=()):
         store = self.tmp / "store"
         for i in ids:
@@ -608,6 +557,47 @@ class TestWhatGcKeepsWhenNothingVerifies(WkTest):
     def test_an_unfinished_newest_one_protects_nothing_and_goes(self):
         store = self._bases(["20260101", "20260202"], complete=["20260101"])
         self.assertEqual(["20260202"], self._unreferenced(store))
+
+
+class TestTheCacheIsTrimmedToItsBudget(GcTest):
+    """tart's pulled-image cache is pruned to its budget (caches only), and the golden base is named with the command
+    that erases it."""
+
+    def prunes(self):
+        return [a for a in self.w.acts() if a[:2] == ("/bin/tart", "prune")]
+
+    def with_cache(self, **env):
+        self.w.env.update(env)
+        self.w.vm = FakeVm(self.w, [])
+        self.w.mkdirs("/tart/cache")
+
+    def test_it_prunes_to_the_declared_budget_or_the_default(self):
+        for env, budget in (({"WK_TART_CACHE_GB": "7"}, "7"), ({}, "20")):
+            with self.subTest(budget=budget):
+                self.setUp()
+                self.with_cache(**env)
+                rc, err = self.run_gc()
+                self.assertEqual((rc, self.prunes()), (0, [("/bin/tart", "prune", "--space-budget", budget)]), err)
+
+    def test_a_failing_tart_is_reported_and_the_rest_still_goes(self):
+        self.with_cache()
+        self.w.answer(["/bin/tart", "prune"], rc=1)
+        gone = _seed(self.w)
+        rc, err = self.run_gc()
+        self.assertEqual(rc, 1)
+        self.assertTrue(gone(), err)
+
+    def test_without_tart_there_is_nothing_to_trim(self):
+        self.w.vm = FakeVm(self.w, [])
+        self.w.vm.tart = lambda: None
+        self.w.mkdirs("/tart/cache")
+        self.assertEqual([r.kind for r in self.rows()], [])
+
+    def test_the_golden_base_is_named_never_taken(self):
+        self.w.vm = FakeVm(self.w, ["wk-base"])
+        (r,) = self.rows()
+        self.assertEqual((r.kind, r.flag, r.take), ("guest-base", "wk sysimage build macos-guest-base --rm", None))
+
 
 
 if __name__ == "__main__":

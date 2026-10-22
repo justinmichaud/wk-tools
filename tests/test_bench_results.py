@@ -11,7 +11,6 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes import FakeDriver
-from tests.killpoints import converges
 from tests.support import REPO, WkTest, run
 from tests.test_bench_report import in_process
 from tests.test_bench_task import TASK, add_run, make_task, refusal, registry
@@ -221,24 +220,6 @@ class TestAOneArmReportNamesRunsWhereTheTaskIs(ExportTest):
         self.assertNotIn("wk-export-", text)
 
 
-class TestExportKillPoints(ExportTest):
-    def test_an_export_killed_after_any_effect_and_rerun_converges(self):
-        d = complete_task(self.tmp / "store" / "ws" / "w" / "bench")
-        dest = str(self.tmp / "home" / "Downloads" / (TASK + ".zip"))
-        os.environ["WK_YES"] = "1"
-
-        def world():
-            return types.SimpleNamespace(fake=mirror_task(Fake("here"), d, str(d)))
-
-        def run_once(w):
-            self.export(self.bench(w.fake))
-
-        def final(w):
-            data = w.fake.files.get(dest)
-            return sorted(zipfile.ZipFile(io.BytesIO(data)).namelist()) if data else None
-        converges(self, world, run_once, final)
-
-
 class TestThroughWk(ExportTest):
     def test_export_is_declared_with_its_destination_and_its_dry_run(self):
         store = self.tmp / "store"
@@ -258,7 +239,6 @@ class FarBox(Fake, Ssh):
 
 
 class TestWhereALegRecords(WkTest):
-
     def reg(self, far):
         mirror_task(far, complete_task(Path(tempfile.mkdtemp(dir=str(self.tmp)))))
         far.dirs.add("/var/lib/wk/ws/w")
@@ -280,7 +260,6 @@ class TestWhereALegRecords(WkTest):
 
 
 class TestExportReachesATaskOnAnotherMachine(ExportTest):
-
     def far(self):
         return mirror_task(Fake("vm"), complete_task(self.tmp / "disk"))
 
@@ -329,7 +308,6 @@ SECRET = b"-----BEGIN OPENSSH PRIVATE KEY-----\n"
 
 
 class PlantedTest(ExportTest):
-
     def setUp(self):
         super().setUp()
         self.key = self.tmp / "push-keys" / "build_key_fork"

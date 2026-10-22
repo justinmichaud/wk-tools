@@ -1,12 +1,11 @@
 """`wk key sudo` (lib/wk/sudo.py, cmd/key) against Fake sudo and visudo answers."""
 
-import os
 import sys
 import unittest
 from unittest import mock
 
 from tests.fakes import FakeRegistry, FakeDriver
-from tests.killpoints import converges
+from tests import fakes
 from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -27,7 +26,7 @@ LISTING_UNSET = "User justinmichaud may run the following commands on tolken:\n 
 
 
 def _fake(free=False, listing=LISTING_UNSET, rc_l=0):
-    f = Fake("here")
+    f = fakes.World()
     f.answer(["id", "-un"], 0, "justinmichaud\n")
     f.answer(["hostname", "-s"], 0, "tolken\n")
     f.answer(["sudo", "-n", "true"], 0 if free else 1)
@@ -91,7 +90,7 @@ class TestVerdict(unittest.TestCase):
 
 def _setup_fake(free_before=True, install_ok=True, post_check_ok=True, property_holds=True):
     """Every command Sudo.setup() runs answers; the last `sudo -n true`, asked after `sudo -k`, is the property test."""
-    f = Fake("here")
+    f = fakes.World()
     f.answer(["id", "-un"], 0, "justinmichaud\n")
     f.answer(["hostname", "-s"], 0, "tolken\n")
     f.answer(HAVE + ("visudo",))
@@ -157,36 +156,6 @@ class TestSetup(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual([e for e in f.effects if e[0] != "run"], [], "no write, install or removal at all")
         self.assertFalse(any(e[0] == "run" and e[1][:2] == ("sudo", "install") for e in f.effects))
-
-
-class TestSetupConvergesAndDryRun(unittest.TestCase):
-    class World:
-        def __init__(self):
-            self.fake = _setup_fake(free_before=False, property_holds=True)
-            self.rc = None
-
-    @staticmethod
-    def _run_once(w):
-        w.rc = Sudo(w.fake, {}, linux=False).setup()
-
-    @staticmethod
-    def _state(w):
-        return w.rc
-
-    def test_killed_after_any_effect_and_rerun_converges(self):
-        converges(self, self.World, self._run_once, self._state)
-
-    def test_a_dry_run_touches_no_file_and_makes_no_real_effect(self):
-        wet = self.World()
-        self._run_once(wet)
-        self.assertEqual(wet.rc, 0)
-
-        dry = self.World()
-        before = dict(dry.fake.files)
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            self._run_once(dry)
-        self.assertEqual(dry.fake.files, before)
-        self.assertEqual([e for e in dry.fake.effects if e[0] == "run" and e[1][:2] == ("sudo", "install")], [])
 
 
 def registry(drivers=None, machine=None):

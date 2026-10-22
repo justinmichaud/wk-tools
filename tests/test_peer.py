@@ -138,7 +138,6 @@ class TestPeerResolution(PeerFixture):
 
 
 class TestPeerDelegation(PeerFixture):
-
     def test_destroying_one_is_asked_of_the_peer(self):
         cp = self._wk("rm", "peerws", extra_env={"WK_YES": "1"})
         self.assertEqual(cp.returncode, 0, cp.stdout)

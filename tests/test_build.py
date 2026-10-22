@@ -17,7 +17,6 @@ from tests.fakes import Fake  # noqa: E402
 
 
 class TestPlaceBuildArgsDefaults(unittest.TestCase):
-
     def test_load_target_reads_WK_BUILD_ARGS_from_conf(self):
         name = "wk-test-build-args-probe"
         # A registry of this one machine (WK_MACHINES_DIR): the real machines/ is left alone.
@@ -33,7 +32,6 @@ class TestPlaceBuildArgsDefaults(unittest.TestCase):
 
 
 class TestStaleLoadAverage(unittest.TestCase):
-
     def _jobs(self, cores, avail_mb, load):
         return resources.Budget(Fake(), {}).jobs(cores, avail_mb, 1536, load=load)
 
@@ -47,7 +45,6 @@ class TestStaleLoadAverage(unittest.TestCase):
 
 
 class TestARealHostConfReachesTheBuildFlags(WkTest):
-
     def _cmake(self, driver, preset="jsc-release"):
         env = dict(FLEET_ENV, WK_MACHINES_DIR=str(REAL_MACHINES), XDG_STATE_HOME=str(self.tmp / "state"))
         t = places.Registry(REPO, env, Fake()).load(driver)
@@ -74,7 +71,6 @@ SYSCTL = {"hw.ncpu": "12\n", "hw.memsize": "17179869184\n", "vm.loadavg": "{ 3.4
 
 
 class TestAReadingTheMachineWillNotGive(WkTest):
-
     def res(self, os_name, sysctl=None, files=None, env=None, nproc=None):
         m = Fake()
         for k, v in (sysctl or {}).items():
@@ -133,7 +129,6 @@ class TestAReadingTheMachineWillNotGive(WkTest):
 
 
 class TestSdkImageCarriesLibbacktrace(unittest.TestCase):
-
     @requires_container_place()
     def test_sdk_image_has_libbacktrace(self):
         img_cp = container_side(

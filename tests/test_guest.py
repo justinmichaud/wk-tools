@@ -1,26 +1,30 @@
-"""lib/wk/guest.py against a fake host: start and stop, the guests' daemons under launchd, the forwards and the credentials."""
+"""lib/wk/guest.py against a fake host: start and stop, the guests' daemons under launchd, the forwards, the
+credentials and the injector's CA a guest is given, its clock set from the host, and a build machine's provisioning hash."""
 import contextlib
 import io
 import json
 import os
 import plistlib
 import shlex
+import shutil
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from tests.killpoints import converges
-from tests.support import REPO, live_selected, owed
-from tests.test_wk_secrets import SECRETFILE, SecretsTest, World, quiet
+from tests.fakes import Fake, FakeClock
+from tests.support import REPO, WkTest, guest_step, live_selected, owed, stub_path
 from tests.test_wk_places import DriverConformance
+from tests.test_wk_secrets import SECRETFILE, SecretsTest, World, quiet
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import agents, daemons, doctor, guest, places, tools, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
-from wk.machine import Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from wk.machine_cmd import deps  # noqa: E402
 from wk.store import GUEST_BROKER_SOCKET, Store  # noqa: E402
+
 
 TART = "/fake/tart"
 IP = "192.168.2.5"
@@ -28,6 +32,8 @@ ADDR = "192.168.2.1"
 INSTALL_AGENTS = guest.Guest.install_agents   # GuestTest records the step; TestTheSteps runs it
 BASH_STEPS = [s[0] for s in guest.STEPS if s[0] in ("write_shell_rc", "write_lldbinit", "write_checkout", "install_agents",
                                                     "write_claude_config", "settle_desktop", "report_desktop")]
+
+
 SERVES = {"com.wk.proxy": "WK_PROXY_TCP", "com.wk.push": "WK_PUSH_SOCKET", "com.wk.github-inject": "WK_INJECT_SOCK"}
 
 
@@ -269,21 +275,6 @@ class TestBothArms(GuestTest):
         self.assertEqual("wk-demo", self.w.spawned(" run ")[0][-1])
         self.assertEqual([], [e for e in self.w.effects if e[0] == "run" and e[1][1:2] == ("ip",)])
         self.assertEqual([], self.steps)
-
-    def test_killpoints_guest_start(self):
-        def world():
-            w = GuestWorld(self.tmp)
-            w.state = "stopped"
-            w.effects.clear()
-            return type("W", (), {"fake": w, "vm": places.Registry(str(REPO), env=w.env, machine=w).load("vm")})
-
-        def run_once(w):
-            quiet(guest.start, w.vm, "demo", FakeClock())
-        def final(w):
-            files = {p: ("live" if int(t) in w.fake.pids else "dead") if p.endswith(".pid") else t
-                     for p, t in w.fake.files.items()}
-            return files, sorted(w.fake.loaded), sorted(w.fake.serving)
-        converges(self, world, run_once, final, max_effects=80)
 
 
 class TestTheSteps(GuestTest):
@@ -627,5 +618,273 @@ class TestTheLiveWayIn(_LiveGuest):
         self.assertTrue(r.ok, r.out + r.err)
 
 
-if __name__ == "__main__":
-    unittest.main()
+# Pins `date -u +%s` to FAKE_EPOCH, so the skew is arithmetic rather than two reads of a moving clock.
+FAKE_DATE = """#!/bin/sh
+if [ "$1" = "-u" ] && [ "$2" = "+%s" ]; then echo "$FAKE_EPOCH"; exit 0; fi
+exec /bin/date "$@"
+"""
+
+
+HOST_EPOCH = 1788900000
+
+
+# `printf`, not `echo`: the first argument is `-n`.
+FAKE_SUDO = """#!/bin/sh
+printf '%s\\n' "$*" >> "$SUDO_LOG"
+exit ${SUDO_RC:-0}
+"""
+
+
+class TestGuestClock(WkTest):
+    def _drive(self, skew, sudo_rc=0, tolerance=None):
+        """Set the clock of a guest whose clock is `skew` seconds behind the host's (negative for ahead).
+        Returns (rc=<0|1> and what was said, sudo log text)."""
+        datebin = self.tmp / "date-bin"
+        sudobin = self.tmp / "sudo-bin"
+        for d, name, body in ((datebin, "date", FAKE_DATE),
+                              (sudobin, "sudo", FAKE_SUDO)):
+            d.mkdir(exist_ok=True)
+            (d / name).write_text(body)
+            (d / name).chmod(0o755)
+        log = self.tmp / "sudo.log"
+        log.write_text("")
+        env = {"HOME": str(self.tmp), "WK_VM_STORE": str(self.tmp / "vmstore"), "WK_STORE": str(self.tmp / "store")}
+        if tolerance:
+            env["WK_VM_CLOCK_SKEW"] = tolerance
+        guest_env = {"PATH": "%s:%s:%s" % (datebin, sudobin, os.environ["PATH"]), "FAKE_EPOCH": str(HOST_EPOCH - skew),
+                     "SUDO_LOG": str(log), "SUDO_RC": str(sudo_rc)}
+        err = io.StringIO()
+        with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True), \
+                mock.patch.dict(os.environ, guest_env), contextlib.redirect_stderr(err):
+            vm = places.Registry(str(REPO), env=env).load("vm")
+            g = guest.Guest(guest.Host(vm, FakeClock(HOST_EPOCH)), "testguest", Local())
+            rc = 0 if g.set_guest_clock() else 1
+        return "rc=%d\n%s" % (rc, err.getvalue()), log.read_text()
+
+    def test_a_guest_behind_or_ahead_of_the_host_is_set_from_it(self):
+        for skew, said in ((11 * 86400, "950400s"), (-3600, "3600s")):
+            with self.subTest(skew=skew):
+                out, sudolog = self._drive(skew)
+                self.assertIn("rc=0", out, out)
+                self.assertIn("clock was", out, out)
+                self.assertIn(said, out, out)
+                self.assertIn("-n date -u ", sudolog, sudolog)
+
+    def test_a_guest_already_in_time_is_left_alone(self):
+        out, sudolog = self._drive(0)
+        self.assertIn("rc=0", out, out)
+        self.assertNotIn("clock was", out, out)
+        self.assertEqual("", sudolog.strip(), sudolog)
+
+    def test_a_guest_that_refuses_the_write_fails(self):
+        out, _ = self._drive(86400, sudo_rc=1)
+        self.assertIn("rc=1", out, out)
+
+    def test_wk_vm_clock_skew_sets_the_tolerance(self):
+        out, sudolog = self._drive(300, tolerance="600")
+        self.assertEqual("", sudolog.strip(), out)
+        out, sudolog = self._drive(300)
+        self.assertIn("-n date -u ", sudolog, out)
+
+
+# `tart`: one running guest called wk-demo, and the guest itself as a directory. `tart exec` hands the guest's
+# command as the last argument for a login shell, and everything it writes it writes under $HOME, so running that command with HOME
+# pointed at a scratch directory exercises the real umask, mkdir, redirect and rm -- not a transcript of them.
+# /Users/admin is rewritten to that directory for the same reason. `tart list` mixes local VMs with cached OCI images, so
+# Source matters. Every invocation is appended to $WK_TEST_LOG.
+FAKE_TART = '''
+case "$1" in
+list) echo '[{"Name":"wk-demo","State":"running","Source":"local"}]' ;;
+ip)   echo 1.2.3.4 ;;
+exec)
+    printf '%s\\n' "$*" >> "$WK_TEST_LOG"
+    for a in "$@"; do last="$a"; done
+    cmd=$(printf '%s' "$last" | sed "s|/Users/admin|$WK_TEST_GUEST|g")
+    HOME="$WK_TEST_GUEST" SHELL=$(command -v bash) bash -lc "$cmd"; rc=$?
+    [ -t 0 ] || cat >/dev/null
+    exit $rc ;;
+*)    exit 1 ;;
+esac
+'''
+
+
+def _guest(tmp, name="demo"):
+    """A scratch guest home, and the ready marker without which Vm.info says `creating`."""
+    home = tmp / "guest-home"
+    home.mkdir(parents=True, exist_ok=True)
+    vmstore = tmp / "vmstore"
+    ws = vmstore / "ws" / name
+    ws.mkdir(parents=True, exist_ok=True)
+    (ws / ".wk-ready").write_text("")
+    return home, vmstore
+
+
+def _stub_env(binp, home, log, store, vmstore, **extra):
+    return {"PATH": f"{binp}:{os.environ['PATH']}", "WK_TEST_GUEST": str(home), "WK_TEST_LOG": str(log),
+            "WK_STORE": str(store), "WK_HOST_SECRETS": str(store / "secrets"), "WK_VM_STORE": str(vmstore),
+            "WK_VM_PROXY_ADDR": "192.0.2.1", **extra}
+
+
+class TestTheGuestGetsTheInjectorsCa(WkTest):
+    def _egress(self, home, vmstore, ca_text=None, bugzilla=None, **extra):
+        log = self.tmp / "guest.log"
+        log.write_text("")
+        vmdir = vmstore / "vm"
+        vmdir.mkdir(parents=True, exist_ok=True)
+        if ca_text is not None:
+            (vmdir / "wk-github-ca.pem").write_text(ca_text)
+        with stub_path({"tart": FAKE_TART}) as binp:
+            env = _stub_env(binp, home, log, self.tmp / "store", vmstore, XDG_STATE_HOME=str(self.tmp / "state"), **extra)
+            return guest_step(env, "set_guest_egress", secrets={"bugzilla_user": lambda s: bugzilla})
+
+    def test_the_bugzilla_placeholder_goes_in_with_the_login_and_not_without(self):
+        home, vmstore = _guest(self.tmp)
+        ca = "-----BEGIN CERTIFICATE-----\nx\n-----END CERTIFICATE-----\n"
+        self._egress(home, vmstore, ca_text=ca)
+        self.assertNotIn("BUGS_WEBKIT_ORG", (home / ".wk-egress").read_text())
+        self._egress(home, vmstore, ca_text=ca, bugzilla="me@example.test")
+        rc = (home / ".wk-egress").read_text()
+        self.assertIn("export BUGS_WEBKIT_ORG_USERNAME=me@example.test\n", rc)
+        self.assertIn("export BUGS_WEBKIT_ORG_PASSWORD=wk-injects-this\n", rc)
+
+    def test_the_ca_and_the_placeholder_go_in_with_the_proxy(self):
+        home, vmstore = _guest(self.tmp)
+        self._egress(home, vmstore, ca_text="-----BEGIN CERTIFICATE-----\nx\n"
+                                            "-----END CERTIFICATE-----\n")
+        rc = (home / ".wk-egress").read_text()
+        self.assertIn("http_proxy=http://192.0.2.1:3128", rc)
+        self.assertIn("GITHUB_COM_TOKEN=wk-injects-this", rc)
+        self.assertIn("GITHUB_COM_USERNAME=justinmichaud", rc)
+        self.assertIn("PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring", rc)
+        self.assertIn("REQUESTS_CA_BUNDLE=", rc)
+        self.assertIn("CURL_CA_BUNDLE=", rc)
+        self.assertIn("GIT_SSL_CAINFO=", rc)
+        self.assertIn("BEGIN CERTIFICATE", (home / ".wk-github-ca.pem").read_text())
+
+    def test_an_unfiltered_guest_gets_neither(self):
+        home, vmstore = _guest(self.tmp)
+        (home / ".wk-github-ca.pem").write_text("stale\n")
+        self._egress(home, vmstore, ca_text="x\n", WK_VM_UNFILTERED="1")
+        self.assertFalse((home / ".wk-github-ca.pem").exists())
+        self.assertFalse((home / ".wk-ca-bundle.pem").exists())
+
+
+def _host(case, **env):
+    """A Host over this machine and a scratch vm store, as a macOS host has one."""
+    mac = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
+    mac.start()
+    case.addCleanup(mac.stop)
+    base = {"HOME": str(case.tmp / "home"), "PATH": os.environ["PATH"], "WK_STORE": str(case.tmp / "store"),
+            "WK_HOST_SECRETS": str(case.tmp / "store" / "secrets"), "WK_VM_STORE": str(case.tmp / "vmstore"),
+            "WK_LOCK_DIR": str(case.tmp / "locks"), "XDG_STATE_HOME": str(case.tmp / "state")}
+    base.update(env)
+    return guest.Host(places.Registry(str(REPO), env=base).load("vm"))
+
+
+def _quiet(fn, *args):
+    with contextlib.redirect_stderr(io.StringIO()) as err:
+        result = fn(*args)
+    return result, err.getvalue()
+
+
+class TestTheGuestsInjectorGetsTheStandingCredentials(WkTest):
+    def _start_inject(self, vmstore, pat=None, bz=None):
+        store = self.tmp / "store"
+        held = store / "push-keys"
+        held.mkdir(parents=True, exist_ok=True)
+        (store / "secrets").mkdir(parents=True, exist_ok=True)
+        for name, value in (("github-pat", pat), ("bugzilla-api-key", bz)):
+            if value is None:
+                (held / name).unlink(missing_ok=True)
+            else:
+                (held / name).write_text(value)
+        host = _host(self, WK_VM_STORE=str(vmstore))
+        with mock.patch.object(daemons, "answers", lambda m, sock: True):
+            return _quiet(host.start_inject)
+
+    def files(self, vmstore):
+        return {n: (vmstore / "vm" / n) for n in ("read-github-pat", "push-github-pat", "push-bugzilla-api-key")}
+
+    def test_a_start_writes_them_from_what_this_host_holds(self):
+        _, vmstore = _guest(self.tmp)
+        ok, err = self._start_inject(vmstore, pat="ghp-not-a-real-token\n", bz="bz-not-a-real-key\n")
+        self.assertTrue(ok, err)
+        got = self.files(vmstore)
+        self.assertEqual("ghp-not-a-real-token\n", got["read-github-pat"].read_text())
+        self.assertEqual("ghp-not-a-real-token\n", got["push-github-pat"].read_text())
+        self.assertEqual("bz-not-a-real-key\n", got["push-bugzilla-api-key"].read_text())
+        self.assertEqual([0o600] * 3, [p.stat().st_mode & 0o777 for p in got.values()])
+
+    def test_one_withdrawn_on_this_host_is_gone_at_the_next_start(self):
+        _, vmstore = _guest(self.tmp)
+        self._start_inject(vmstore, pat="ghp-not-a-real-token\n", bz="bz\n")
+        self._start_inject(vmstore, pat=None, bz=None)
+        self.assertEqual([False] * 3, [p.exists() for p in self.files(vmstore).values()])
+
+
+class TestEveryGuestStartConvergesTheCredentials(WkTest):
+    def test_a_start_that_finds_the_proxy_up_still_delivers_the_token(self):
+        _, vmstore = _guest(self.tmp)
+        store = self.tmp / "store"
+        (store / "push-keys").mkdir(parents=True, exist_ok=True)
+        (store / "secrets").mkdir(parents=True, exist_ok=True)
+        (store / "push-keys" / "github-pat").write_text("ghp-todays\n")
+        read_pat = vmstore / "vm" / "read-github-pat"
+        (vmstore / "vm").mkdir(parents=True, exist_ok=True)
+        read_pat.write_text("ghp-yesterdays\n")
+        host = _host(self, WK_VM_PROXY_ADDR="192.0.2.1")
+        with mock.patch.object(host, "ensure", lambda word: True), mock.patch.object(daemons, "answers", lambda m, sock: True), \
+                mock.patch.object(host.clock, "wait_until", lambda *a: True):
+            ok, err = _quiet(host.start_proxy)
+        self.assertTrue(ok, err)
+        self.assertEqual("ghp-todays\n", read_pat.read_text())
+
+
+class TestTheBuildMachineRecord(unittest.TestCase):
+    def _stale(self, marker_text):
+        far = Fake("box")
+        far.answer(["sh", "-c"], out=marker_text)
+        t = places.Remote("box", str(REPO), {"HOME": "/tmp/wk-test-unused", "XDG_STATE_HOME": "/tmp/wk-test-unused/state"}, far)
+        t.machine = far
+        return deps.stale(t, REPO)
+
+    def test_a_machine_provisioned_from_these_inputs_reads_fresh(self):
+        self.assertIsNone(self._stale("place=otherbox\nroot=/home/x/wk\ninputs=%s\n" % deps.inputs_hash(REPO)))
+
+    def test_a_machine_provisioned_before_the_record_or_not_at_all_says_so(self):
+        for marker in ("place=otherbox\nroot=/home/x/wk\n", ""):
+            with self.subTest(marker=marker):
+                self.assertTrue(self._stale(marker))
+
+    def test_a_changed_provisioning_script_makes_it_stale(self):
+        self.assertIn("remote/provision.sh", self._stale("place=otherbox\nroot=/home/x/wk\ninputs=0000000000000000\n"))
+
+    def _copy(self, edit=None):
+        root = Path(tempfile.mkdtemp(prefix="wk-test-inputs-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / "remote").mkdir()
+        for f in ("provision.sh", "probe.sh", "deps.sh"):
+            text = (REPO / "remote" / f).read_text()
+            (root / "remote" / f).write_text(edit(f, text) if edit else text)
+        return deps.inputs_hash(root)
+
+    def test_what_the_box_runs_is_in_it(self):
+        for f in ("deps.sh", "probe.sh", "provision.sh"):
+            with self.subTest(f=f):
+                self.assertNotEqual(self._copy(lambda g, t: t + "\n" if g == f else t), deps.inputs_hash(REPO))
+
+
+class TestDoctorReportsIt(unittest.TestCase):
+    def test_doctor_reports_the_machine_through_that_one_function(self):
+        from tests.test_doctor import MISS, OK, build_doctor, deps
+        asked = []
+
+        def stale(driver, root):
+            asked.append(driver.name)
+            return "provisioned before this record existed" if driver.name == "old" else None
+        with deps(probe=lambda t, root: "family=debian\n", stale=stale):
+            doc = build_doctor()
+            (old,), (fresh,) = list(doc.build_machine("old")), list(doc.build_machine("fresh"))
+        self.assertEqual((old[0], old[2]), (MISS, "wk machine setup old"))
+        self.assertEqual(fresh[0], OK)
+        self.assertEqual(["old", "fresh"], asked)

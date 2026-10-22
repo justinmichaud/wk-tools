@@ -21,6 +21,7 @@ API_VARS = {"GITHUB_API": "WK_GITHUB_API", "BUGZILLA_API": "WK_BUGZILLA_API", "A
 
 sys.path.insert(0, str(REPO / "lib"))
 import credcheck   # noqa: E402
+from tests.fakes import FlowTest  # noqa: E402
 from tests.support import live_selected, owed, requires   # noqa: E402
 
 FORKS = "wkuser/WebKit wkuser/WPEWebKit"
@@ -114,7 +115,7 @@ class FakeGitHub(JsonHandler):
 FakeGitHub.reset()
 
 
-class _Rules(unittest.TestCase):
+class _Rules(FlowTest):
     @classmethod
     def setUpClass(cls):
         cls.base = serve(FakeGitHub, cls.addClassCleanup)
@@ -122,8 +123,7 @@ class _Rules(unittest.TestCase):
     def setUp(self):
         FakeGitHub.reset(pulls=dict.fromkeys(FORKS.split() + list(PROJECTS.values()), 422), repos=FORKS.split(),
                          parents=dict(PROJECTS), repo_message=POLICY)
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-credcheck-"))
-        self.addCleanup(shutil.rmtree, self.tmp, True)
+        super().setUp()
 
     def check(self, name, value=None, repos=FORKS, path=None, evidence=(), api=None, env=None):
         """credcheck.verdict in process, each API constant pointed at its loopback stub."""

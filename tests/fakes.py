@@ -1,18 +1,24 @@
 """The fakes the suite shares, one per seam: a detached child, a registry over a fake machine, and a place that
 answers a probe and its own wk."""
 
+import contextlib
 import fnmatch
 import functools
+import io
 import os
 import shlex
 import shutil
 import signal
 import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
 
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, job, places  # noqa: E402
+from wk import act, job, places, record  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import LOGIN, Local, Machine, Planted, Result, matches  # noqa: E402
 
@@ -345,6 +351,79 @@ class Fake(Machine):
                 f.write(data if isinstance(data, bytes) else data.encode())
 
 
+class World(Fake):
+    """The one fake world a module builds its answers on: a Fake host with a FakeClock and `env`; given `tmp`, a
+    scratch directory under it holds HOME, the store, the lock directory and XDG state. Every act_run is recorded as
+    ("act", argv), dry or wet, so a dry run's plan holds against a wet run's (`mutations`)."""
+
+    MUTATING = ("act", "write", "mkdir", "remove", "kill", "spawn", "copy_in", "copy_out", "copy_tree_in", "copy_tree_out", "forward")
+
+    def __init__(self, tmp=None, name="here", **env):
+        super().__init__(name)
+        self.fake, self.clock = self, FakeClock()
+        self.tmp, self.env = None, {}
+        if tmp is not None:
+            self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
+            self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
+                        "WK_LOCK_DIR": str(self.tmp / "locks"), "XDG_STATE_HOME": str(self.tmp / "state")}
+            self.dirs.add(self.env["WK_LOCK_DIR"])
+        self.env.update(env)
+        self.answer(["hostname"], out=name + "\n")
+
+    def act_run(self, argv, **kw):
+        self.effects.append(("act", tuple(argv)))
+        return super().act_run(argv, **kw)
+
+    def rel(self, value):
+        """A path or effect with the scratch directory taken out, so two worlds compare."""
+        if isinstance(value, tuple):
+            return tuple(self.rel(v) for v in value)
+        return value.replace(str(self.tmp), "") if self.tmp and isinstance(value, str) else value
+
+    def work(self):
+        """The effects that are the command's work: a lock's are process coordination, not state."""
+        locks = self.env.get("WK_LOCK_DIR")
+        return [e for e in self.effects if not (locks and len(e) > 1 and isinstance(e[1], str) and e[1].startswith(locks))]
+
+    def mutations(self):
+        return [self.rel(e) for e in self.work() if e[0] in self.MUTATING]
+
+    def state(self):
+        return sorted(self.rel(p) for p in self.files), sorted(self.rel(d) for d in self.dirs)
+
+
+class FlowTest(unittest.TestCase):
+    """A scratch directory `tmp`, os.environ restored after with wk's mode variables and the bench knobs unset, and
+    this host named HOST."""
+    HOST = "here"
+    UNSET = ("WK_DRY_RUN", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_CMD", "WK_DEBUG", "WK_FORCE",
+             "WK_DEVICE_HELD", "WK_BENCH_ASLR", "WK_BENCH_PATH_PAD", "WK_BENCH_ENV_PAD")
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-flow-"))
+        self.addCleanup(shutil.rmtree, str(self.tmp), True)
+        for p in (mock.patch.dict(os.environ), mock.patch.object(record, "host_name", return_value=self.HOST)):
+            p.start()
+            self.addCleanup(p.stop)
+        for v in self.UNSET:
+            os.environ.pop(v, None)
+
+    def stderr(self, fn):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            result = fn()
+        return result, err.getvalue()
+
+    def refused(self, fn, status=1):
+        with self.assertRaises(act.Refused) as cm:
+            with contextlib.redirect_stderr(io.StringIO()) as err:
+                fn()
+        self.assertEqual(cm.exception.status, status, err.getvalue())
+        return err.getvalue()
+
+    def dry_run(self):
+        os.environ["WK_DRY_RUN"] = "1"
+
+
 class FakeProc:
     """A detached child: it raises job.Interrupted(`interrupt`) on its first poll, runs for `polls` polls (for ever when
     None) calling `grow` on each, then exits `rc`; a wait on one still running kills it (-9)."""
@@ -444,11 +523,11 @@ def bench_lib(argv):
     return Local().run(list(argv))
 
 
-class BenchHere(Fake):
+class BenchHere(World):
     """This host: the bench libraries (`bash -c`) run for real, and nothing else answers."""
 
     def __init__(self, name="here"):
-        super().__init__(name)
+        super().__init__(name=name)
         self.react(["bash", "-c"], lambda a, f: bench_lib(tuple(a)))
 
 
@@ -499,25 +578,16 @@ class JobDriver(WsDriver):
         return self.machine.place_os
 
 
-class JobWorld(Fake):
+class JobWorld(World):
     """This host running a job in workspace `ws` on place `box` (a JobDriver of `kind`): the job writes `out` to its
     log and exits `rc`, or runs for ever (`hang`), or is interrupted (`interrupt`)."""
 
     def __init__(self, tmp, kind="container", out=b""):
-        import os
-        import tempfile
-        from pathlib import Path
-        super().__init__("here")
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "WK_PLACE": "box", "WK_NAME": "ws", "WK_IN_VM": "1",
-                    "WK_AVAIL_MB": "65536", "WK_JOB_PID_TRIES": "0", "WK_KILL_WAIT": "2"}
+        super().__init__(tmp, WK_PLACE="box", WK_NAME="ws", WK_IN_VM="1", WK_AVAIL_MB="65536", WK_JOB_PID_TRIES="0",
+                         WK_KILL_WAIT="2")
         self.conf, self.kind, self.in_ws, self.place_os = {}, kind, False, "linux"
         self.size = (8, 32768, 2 if kind == "remote" else None)
-        self.clock = FakeClock()
-        self.dirs.add(self.env["WK_LOCK_DIR"])
         self.out, self.rc, self.hang, self.interrupt = out, 0, False, None
-        self.answer(["hostname"], out="here\n")
         self.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 209715200 1% /\n")
         self.react(["exec", "ws", "kill", "-0"], lambda a, f: Result(0 if int(a[-1]) in f.pids else 1))
         self.answer(["sync-tools"])
@@ -525,10 +595,6 @@ class JobWorld(Fake):
                                 ws_place=lambda ws: "box", in_workspace=lambda: self.in_ws)
         self.ws_dir = os.path.join(self.env["WK_STORE"], "ws", "ws")
         os.makedirs(self.ws_dir)
-
-    @property
-    def fake(self):
-        return self
 
     def start(self, argv, out, cwd=None):
         self.effect(("watch", tuple(argv)))

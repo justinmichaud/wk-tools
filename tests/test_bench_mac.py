@@ -15,20 +15,19 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes import FakeProc, WsDriver
-from tests.killpoints import converges
-from tests.support import REPO
+from tests.support import REPO, requires_machine, run
 from tests.test_bench_report import in_process
-from tests.test_bench_pipeline import Acting, CleanTest, StubWatch  # noqa: F401 -- tests/test_mac_pgo.py takes StubWatch from here
+from tests import fakes
+from tests.test_bench_pipeline import CleanTest, StubWatch, SystemConformance  # noqa: F401 -- tests/test_mac_pgo.py takes StubWatch from here
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, places, project, samply as wksamply, screen  # noqa: E402
+from wk import places, project, samply as wksamply, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk import presets  # noqa: E402
 from wk.bench import cli, mac, plans, record as brecord, report  # noqa: E402
 from wk.bench.pipeline import Run  # noqa: E402
 from wk.boot import open_driver  # noqa: E402
 from tests.fake_boot import board, conf_for  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 from wk.machine import lib_argv  # noqa: E402
 from wk.quiet import PRIV  # noqa: E402
@@ -51,22 +50,19 @@ def on_screen(fake, uninvited="", reading="MiniBrowser:Speedometer"):
     fake.answer(UNEXPECTED, out=uninvited)
 
 
-class World(Acting, Fake):
+class World(fakes.World):
     """A Mac with its two installs' confs, one stage on its volume, and run-benchmark writing its --output-file."""
 
     def __init__(self, tmp, machine="mbp", bench=True):
-        super().__init__("here")
-        self.fake, self.rc, self.watched = self, 0, []
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
+        super().__init__(tmp)
+        self.rc, self.watched = 0, []
         self.home = str(self.tmp / "var-wk")
         machines = self.tmp / "machines"
         machines.mkdir()
         for name, text in CONFS.items():
             (machines / (name + ".conf")).write_text(text)
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "XDG_STATE_HOME": str(self.tmp / "state"), "XDG_CONFIG_HOME": str(self.tmp / "config"),
-                    "WK_MACHINES_DIR": str(machines), "WK_BENCH_ROOT": self.home, "WK_BENCH_PYTHON": "/py", "WK_POLL_SECONDS": "1"}
-        self.clock = FakeClock()
+        self.env.update({"XDG_CONFIG_HOME": str(self.tmp / "config"), "WK_MACHINES_DIR": str(machines), "WK_BENCH_ROOT": self.home,
+                         "WK_BENCH_PYTHON": "/py", "WK_POLL_SECONDS": "1"})
         self.reg = places.Registry(REPO, env=self.env, machine=self)
         self.machine = machine
         if bench:
@@ -136,11 +132,25 @@ class MacTest(CleanTest):
         return err
 
 
+class TestTheMacVolumeSystem(SystemConformance, MacTest):
+    PLAN, OUTCOME = "speedometer3", 1
+    KILL_RC, KILL_SAYS = 1, "is stopped where it runs: ^C there, or its autorun's watchdog"
+
+    def bench(self):
+        return self.staged()
+
+    def outcome(self):
+        return len(self.w.results())
+
+    def kill(self):
+        cp = in_process(cli.run, REPO, self.w.reg, ["ws"], {"system": self.w.machine, "slot": STAGE_ID}, True, self.w.clock)
+        return cp.returncode, cp.stderr
+
+
 class TestConformance(MacTest):
-    def test_the_staged_run_is_the_one_pipeline_into_the_one_record(self):
+    def test_the_staged_run_lands_with_its_stage_as_its_subject(self):
         rc, err = self.staged()
         self.assertEqual(rc, 0, err)
-        self.assertIn("BENCH OK  speedometer3", err)
         (run,) = self.w.results()
         self.assertTrue(run.endswith("-speedometer3-" + STAGE_ID), run)
         self.assertEqual(Path(self.w.home, "results", run, "result.json").read_text(), RESULT)
@@ -158,10 +168,6 @@ class TestConformance(MacTest):
         w = World(self.tmp)
         cp = in_process(cli.run, REPO, w.reg, ["other", "speedometer3"], {"system": "mbp", "slot": STAGE_ID}, False, w.clock)
         self.assertIn("is staged from workspace 'ws', not 'other'", cp.stderr)
-
-    def test_the_run_is_bracketed_by_the_screen_watch(self):
-        self.staged()
-        self.assertEqual([e for e in self.w.effects if e[0] == "watch"], [("watch", "start", 0), ("watch", "stop", 1)])
 
 
 class TestTheRecord(MacTest):
@@ -480,22 +486,6 @@ class TestDeploy(MacTest):
         self.assertFalse([e for e in w.effects if e[0] == "put_file"])
         self.assertIn(("remove", os.path.join(w.reg.store.state_dir(), "bench-stage", "a")), w.effects)
 
-    def test_the_dry_run_is_the_deploys_mutations(self):
-        for local in (True, False):
-            with self.subTest(local=local):
-                _, dry = self.same_plan(lambda: StageWorld(self.tmp, local), lambda w: w.stage_("speedometer3"),
-                                        lambda w: [e for e in w.effects if e[0] != "run"])
-                self.assertEqual(dry.stages(), [])
-
-    def test_a_deploy_killed_after_any_effect_and_rerun_converges(self):
-        def run_once(w):
-            w.clock.t += 1
-            with contextlib.redirect_stderr(io.StringIO()):
-                w.stage_("speedometer3")
-        for local in (True, False):
-            with self.subTest(local=local):
-                converges(self, lambda: StageWorld(self.tmp, local), run_once, StageWorld.stages)
-
 
 class TestTheStagingSide(unittest.TestCase):
     """What staging and a plant reach a Mac's bench install through (mac.Side), over FakeMac and FakeGuest."""
@@ -576,6 +566,13 @@ class TestTheStagingSide(unittest.TestCase):
         self.assertTrue(s.local(), "a deploy to that Mac standing on it sends nothing")
         self.assertIs(s.manager(), via)
         self.assertEqual(s.tools(via), "Development/wk-tools")
+
+
+class TestBenchReachesTheRealMbp(unittest.TestCase):
+    @requires_machine("tolken")
+    def test_wk_boot_reaches_mbp(self):
+        cp = run("boot", "mbp", "--status")
+        self.assertIn(cp.returncode, (0, 2, 3), cp.stdout)
 
 
 if __name__ == "__main__":

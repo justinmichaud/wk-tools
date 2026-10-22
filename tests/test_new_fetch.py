@@ -142,7 +142,6 @@ class WorkspaceFixture(MirrorFixture):
 
 
 class TestWsFetchScript(WorkspaceFixture):
-
     def test_it_reads_the_mirror_although_the_remotes_name_github(self):
         sha2 = self.advance_upstream()
         cp = self.run_fetch()

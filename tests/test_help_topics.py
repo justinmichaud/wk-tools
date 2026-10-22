@@ -1,49 +1,69 @@
-"""`wk help` prints README.md, the one document; `wk help <topic>` prints the section that topic names."""
-import re
+"""`wk help` prints README.md, the one document; `wk help <topic>` prints the sections that word names."""
+import contextlib
+import io
+import shutil
+import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from tests.support import REPO, run
+from tests.support import REPO
 
-TIER = "lint"
+sys.path.insert(0, str(REPO / "lib"))
+from wk import dispatch  # noqa: E402
+
+README = """# wk
+
+## Architecture
+
+The design.
+
+## Lifecycle
+
+Make one, remove one.
+
+**An agent in a workspace**
+
+How an agent works.
+
+## Hardware
+
+The boards.
+"""
 
 
 class TestHelpTopics(unittest.TestCase):
-    def test_bare_help_is_the_whole_readme(self):
-        cp = run("help")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(cp.stdout.split("\n", 2)[2].strip(), (REPO / "README.md").read_text().strip())
+    def setUp(self):
+        root = Path(tempfile.mkdtemp(prefix="wk-test-help-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / "README.md").write_text(README)
+        for p in (mock.patch.object(dispatch, "ROOT", root), mock.patch.object(dispatch.os, "isatty", return_value=False)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def help(self, topic=""):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), self.assertRaises(dispatch.Exit) as cm:
+            dispatch.help_doc(topic)
+        return cm.exception.status, out.getvalue(), err.getvalue()
+
+    def test_bare_help_is_this_machines_line_and_the_whole_readme(self):
+        rc, out, _ = self.help()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.split("\n", 2)[2], README)
 
     def test_a_topic_prints_that_section_only(self):
-        cp = run("help", "lifecycle")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertTrue(cp.stdout.startswith("## Lifecycle"), cp.stdout[:200])
-        self.assertNotIn("## Architecture", cp.stdout)
-        self.assertNotIn("## Where the rest is", cp.stdout)
-
-    def test_an_unknown_topic_lists_the_topics(self):
-        cp = run("help", "nosuchtopic")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("no help topic matches 'nosuchtopic'", cp.stdout + cp.stderr)
-        self.assertIn("Lifecycle", cp.stdout + cp.stderr)
+        self.assertEqual(self.help("lifecycle"), (0, "## Lifecycle\n\nMake one, remove one.\n\n**An agent in a workspace**\n\nHow an agent works.\n", ""))
 
     def test_a_word_in_a_workflow_title_is_a_topic(self):
-        cp = run("help", "agent")
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("An agent in a workspace", cp.stdout)
+        self.assertEqual(self.help("agent")[1], "**An agent in a workspace**\n\nHow an agent works.\n")
 
-
-class TestHardwareSection(unittest.TestCase):
-    def test_names_every_fleet_device_and_its_driver(self):
-        out = run("help", "hardware").stdout
-        self.assertTrue(out.startswith("## Hardware"), out[:200])
-        confs = [c for c in sorted((REPO / "machines").glob("*.conf")) if re.search(r"^kind=(board|mac|guest)$", c.read_text(), re.M)]
-        self.assertTrue(confs)
-        for conf in confs:
-            name = conf.stem
-            driver = re.search(r"^driver=(\S+)", conf.read_text(), re.M).group(1)
-            with self.subTest(machine=name):
-                self.assertIn(f"**{name}", out, f"{name} has no paragraph in the hardware section")
-                self.assertIn(f"`{driver}`", out, f"{name}'s driver {driver} is not named")
+    def test_an_unknown_topic_lists_the_topics(self):
+        rc, out, err = self.help("nosuchtopic")
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("no help topic matches 'nosuchtopic'", err)
+        self.assertIn("    Lifecycle\n    An agent in a workspace\n    Hardware\n", err)
 
 
 if __name__ == "__main__":

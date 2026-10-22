@@ -130,7 +130,6 @@ class _Gate(WkTest):
         self.addCleanup(lambda: (self.repo / ".git" / "objects").chmod(0o755))
 
 class TestItNeverChangesWhatTheCommandDoes(_Gate):
-
     def test_a_verb_it_watches_still_succeeds_untouched(self):
         (self.repo / "f").write_text("two\n")
         cp = self._git("add", "f")

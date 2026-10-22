@@ -7,20 +7,17 @@ import shlex
 import shutil
 import signal
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
+from tests import fakes
 from tests.fakes import FakeRegistry
-from tests.killpoints import converges
 from tests.support import REPO
 from tests.test_wk_places import LINUX_PROBE
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, places, pr, record, repos, secrets, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
@@ -42,87 +39,23 @@ def step(argv):
     return argv[0]
 
 
-class Scratch:
-    """A Fake world in a scratch directory `tmp`, whose locks live under env's WK_LOCK_DIR."""
-
-    @property
-    def fake(self):
-        return self
-
-    def rel(self, value):
-        """A path or effect with this world's scratch directory taken out, so two worlds compare."""
-        if isinstance(value, tuple):
-            return tuple(self.rel(v) for v in value)
-        return value.replace(str(self.tmp), "") if isinstance(value, str) else value
-
-    def work(self):
-        """The effects that are the command's work: a lock's are process coordination, not state."""
-        return [e for e in self.effects if not (isinstance(e[1], str) and e[1].startswith(self.env["WK_LOCK_DIR"]))]
-
-
-class RecordsActs:
-    """Every act_run as ("act", argv), dry or wet, so a dry run's plan can be held against a wet run's."""
-
-    def act_run(self, argv, **kw):
-        self.effects.append(("act", tuple(argv)))
-        return Result(0) if act.dry_run() else super().act_run(argv, **kw)
-
-    def mutations(self):
-        return [self.rel(e) for e in self.work() if e[0] in ("act", "write", "mkdir", "remove", "kill", "spawn")]
-
-
-class FlowTest(unittest.TestCase):
-    """A scratch directory, os.environ restored after, wk's mode variables unset, and this host named "here"."""
-    UNSET = ("WK_DRY_RUN", "WK_YES", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED", "WK_CMD", "WK_DEBUG", "WK_FORCE")
-
-    def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp(prefix="wk-test-flow-"))
-        self.addCleanup(shutil.rmtree, str(self.tmp), True)
-        for p in (mock.patch.dict(os.environ), mock.patch.object(record, "host_name", return_value="here")):
-            p.start()
-            self.addCleanup(p.stop)
-        for v in self.UNSET:
-            os.environ.pop(v, None)
-
-    def stderr(self, fn):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            result = fn()
-        return result, err.getvalue()
-
-    def refused(self, fn, status=1):
-        with self.assertRaises(Refused) as cm:
-            with contextlib.redirect_stderr(io.StringIO()) as err:
-                fn()
-        self.assertEqual(cm.exception.status, status, err.getvalue())
-        return err.getvalue()
-
-    def dry_run(self):
-        os.environ["WK_DRY_RUN"] = "1"
-
-
 DRIVERS = {"container": places.Container, "vm": places.Vm, "remote": places.Remote, "local": places.LocalWorkspace}
 FAR_ROOT = "/home/u/wk"
 
 
-class World(Scratch, Fake):
+class World(fakes.World):
     """This host with a place per `kinds` entry, each the real driver: podman answers from `containers` (wkdev-create
     writes the ready marker), tart from `vms`, a build box's ssh from `far` (its workspace directories) or fails
     with `unreachable`; inside workspace `ws` (local) its marker names it. The store holds a mirror and one
     snapshot, `main-1`."""
 
     def __init__(self, tmp, kinds=None):
-        super().__init__("here")
-        self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
-        self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
-                    "WK_IN_VM": "1", "WK_PLACE": "fakebox"}
-        self.clock = FakeClock()
+        super().__init__(tmp, WK_IN_VM="1", WK_PLACE="fakebox")
         self.containers, self.vms, self.far, self.unreachable = set(), {}, set(), None
         self.probe = "yes"
         self.checkout, self.merged = Result(0, CHECKOUT), Result(0)
         self.bash = {}
         self.acted = set()
-        self.dirs.add(self.env["WK_LOCK_DIR"])
-        self.answer(["hostname"], out="here\n")
         self.answer([WK, "sync"], out="fetched\n")
         self.answer([WK, "zed"])
         self.react(["podman", "container", "exists"], lambda a, f: Result(0 if a[-1] in f.containers else 1))
@@ -357,7 +290,7 @@ class World(Scratch, Fake):
         return e[0] != "run" or e[1] in self.acted
 
 
-class WorkspaceTest(FlowTest):
+class WorkspaceTest(fakes.FlowTest):
     world_class = World
 
     def setUp(self):
@@ -403,19 +336,6 @@ class WorkspaceTest(FlowTest):
 
     def bash_runs(self, w=None, fn=""):
         return [a for a in self.runs(w, "bash") if fn in a[2]]
-
-    def dry_as_wet(self, make, flow):
-        """`flow` run wet in one world from `make` and dry in another: the dry run's plan is the wet run's, and it
-        changes nothing. The dry world."""
-        wet = make()
-        self.stderr(lambda: flow(wet))
-        dry = make()
-        before = dry.state()
-        self.dry_run()
-        self.stderr(lambda: flow(dry))
-        self.assertEqual(dry.mutations(), wet.mutations())
-        self.assertEqual(dry.state(), before)
-        return dry
 
 
 class TestNewFrontRefusals(WorkspaceTest):
@@ -1058,6 +978,7 @@ class TestRmNames(WorkspaceTest):
         self.assertEqual(rc, 1)
         self.assertIn("fakebox did not answer: Host key verification failed.", err)
         self.assertNotIn("no such workspace", err)
+        self.assertEqual([e for e in w.mutations() if w.mutates(e)], [], "a refusal before any effect keeps every record")
 
     def test_one_refusal_does_not_end_the_batch_and_the_worst_status_is_returned(self):
         os.environ["WK_YES"] = "1"
@@ -1117,50 +1038,7 @@ class TestRmAll(WorkspaceTest):
         self.assertEqual([], [e for e in self.w.effects if e[0] == "run" and e[1][0] == "env"])
 
 
-class Recording(RecordsActs, World):
-    pass
-
-
-class TestKillPoints(WorkspaceTest):
-    def test_new_over_each_real_driver_killed_after_any_effect_and_rerun_converges(self):
-        from wk.sysimage import guestbase
-        from wk.store import Store
-
-        def run_once(w):
-            w.lock = Lock(w.driver.store, w, w.clock)   # each run is its own process: nothing the killed one held survives it
-            with contextlib.redirect_stderr(io.StringIO()):
-                self.detached(w)
-        for kind in ("container", "vm"):
-            with self.subTest(driver=kind), contextlib.ExitStack() as guest_host:
-                if kind == "vm":
-                    guest_host.enter_context(mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True))
-                    guest_host.enter_context(mock.patch.object(guestbase.Base, "ensure", return_value=None))
-                    guest_host.enter_context(mock.patch.object(guestbase.Base, "stale", return_value=""))
-                converges(self, lambda: World(self.tmp, kinds={"fakebox": kind}), run_once, World.state, max_effects=80)
-                w = World(self.tmp, kinds={"fakebox": kind})
-                run_once(w)
-                self.assertEqual(w.driver.state("ws"), "present")
-
-    def rm_world(self, cls=World):
-        w = cls(self.tmp)
-        w.make()
-        w.alias()
-        w.files[w.driver.create_log("ws")] = "log\n"
-        w.files[os.path.join(w.ws_dir(), "changes", "a.cpp")] = "x"
-        w.begin().end(0)
-        w.begin("build", pid=99).end(0)
-        return w
-
-    def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        dry = self.dry_as_wet(lambda: Recording(self.tmp), self.detached)
-        self.assertGreaterEqual(len(dry.mutations()), 9)
-        self.assertEqual((dry.pids, dry.clock.slept), ({os.getpid()}, []))
-
-    def test_a_dry_run_of_rm_is_the_wet_runs_plan_and_touches_nothing(self):
-        os.environ["WK_YES"] = "1"
-        dry = self.dry_as_wet(lambda: self.rm_world(Recording), lambda w: workspace.rm_names(w.reg, w.records, ["ws"]))
-        self.assertIn(("act", ("podman", "rm", "-f", "wk-ws")), dry.mutations())
-
+class TestTheFrontsDryRun(WorkspaceTest):
     def test_a_dry_run_of_the_front_detaches_nothing(self):
         self.dry_run()
         rc, err = self.stderr(lambda: self.front())

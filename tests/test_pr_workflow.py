@@ -15,15 +15,15 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes import WsDriver
-from tests.killpoints import converges
-from tests.support import REPO, load_cmd, rand_suffix, run, scratch_dir, stub_path
+from tests import fakes
+from tests.support import REPO, load_cmd, rand_suffix, stub_path
 
 CMD_PR = REPO / "cmd" / "pr"
 
 
 CMD_PR_MODULE = load_cmd("pr")
 
-from wk import act, decl, git, places, pr, sync  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
+from wk import act, decl, dispatch, git, places, pr, sync  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
@@ -48,10 +48,9 @@ def _make_repo(dir_, branch, filename="f.txt"):
     return _git("rev-parse", "HEAD", cwd=dir_).stdout.strip()
 
 
-class GitWorld(Fake):
-
+class GitWorld(fakes.World):
     def __init__(self):
-        super().__init__("host")
+        super().__init__(name="host")
         self.local = {}            # branch -> sha
         self.remotes = {}          # name -> url
         self.remote_refs = {}      # (remote, branch) -> sha
@@ -60,13 +59,9 @@ class GitWorld(Fake):
         self.dirty = 0
         self.upstream = {}         # branch -> {"remote": r, "merge": ref}
         self.pushed = set()        # (fork, branch)
-        self.driver = WsDriver("ws", REPO, {}, self)
+        self.driver = RecordingDriver(self)
         self.react(["exec", "ws", "test", "-d"], lambda a, f: Result(0 if a[4] in f.dirs else 1))
         self.react(["exec", "ws", "git", "-C"], lambda a, f: f.git(a[5:]))
-
-    @property
-    def fake(self):
-        return self
 
     def _resolve(self, ref):
         if ref.startswith("refs/remotes/"):
@@ -169,7 +164,8 @@ class GitWorld(Fake):
 
 
 class RecordingDriver(WsDriver):
-    """Workspace `ws` on a GitWorld, its mutations kept in order."""
+    """Workspace `ws` on a GitWorld, its mutations kept in order: act_exec prints under a dry run rather than reaching
+    the machine's act_run, so the driver records it."""
 
     def __init__(self, world):
         super().__init__("ws", REPO, {}, world)
@@ -206,16 +202,6 @@ def open_once(driver):
         CMD_PR_MODULE.pr_open(driver, "ws", False, False)
 
 
-class TestPrKillPoints(unittest.TestCase):
-    def test_a_checkout_a_rebase_and_an_open_killed_after_any_effect_and_rerun_converge(self):
-        for name, make, flow, state in (
-                ("checkout", checkout_world, lambda w: pr.checkout(w.driver, w, "ws", "alice:eng/x"), checkout_state),
-                ("rebase", rebase_world, lambda w: CMD_PR_MODULE.pr_rebase(w.driver, "ws"), lambda w: dict(w.local)),
-                ("open", GitWorld, lambda w: open_once(w.driver), lambda w: (set(w.pushed), any(e[0] == "exec" for e in w.effects)))):
-            with self.subTest(flow=name), contextlib.redirect_stderr(io.StringIO()):
-                converges(self, make, flow, state)
-
-
 class BoxKeys:
     """Secrets as `push_from_here` reads it: one fork, and where its private half is."""
 
@@ -226,66 +212,69 @@ class BoxKeys:
         return "/s/push-keys/build_key_%s" % fork
 
 
-class TestPrOpenFromABoxKillPoints(unittest.TestCase):
+MIRROR = "/h/mirror"
+BOX_REF = "refs/wk/push/box/eng/x"
 
-    MIRROR = "/h/mirror"
-    REF = "refs/wk/push/box/eng/x"
 
-    def make_world(self):
-        w = Fake("here")
-        w.fake, w.refs, w.pushed = w, set(), set()
-        w.answer(["git", "init"], 0)
-        w.answer(["git", "-C", self.MIRROR, "config"], 0)
-        w.files["/s/push-keys/build_key_fork"] = "KEY\n"
+def box_world():
+    w = fakes.World()
+    w.refs, w.pushed = set(), set()
+    w.answer(["git", "init"], 0)
+    w.answer(["git", "-C", MIRROR, "config"], 0)
+    w.files["/s/push-keys/build_key_fork"] = "KEY\n"
 
-        def git_in_mirror(argv, fake):
-            if "fetch" in argv:
-                fake.refs.add(argv[-1].split(":", 1)[1])
-            elif "update-ref" in argv:
-                fake.refs.discard(argv[-1])
-            elif "push" in argv:
-                fake.pushed.add(argv[-1])
-            return Result(0)
-        w.react(["git", "-C", self.MIRROR], git_in_mirror)
-        return w
+    def git_in_mirror(argv, fake):
+        if "fetch" in argv:
+            fake.refs.add(argv[-1].split(":", 1)[1])
+        elif "update-ref" in argv:
+            fake.refs.discard(argv[-1])
+        elif "push" in argv:
+            fake.pushed.add(argv[-1])
+        return Result(0)
+    w.react(["git", "-C", MIRROR], git_in_mirror)
+    return w
 
-    def run_once(self, w, keys=None):
-        driver = types.SimpleNamespace(here=w, env={"HOME": "/h"}, name="box", ssh_host=lambda _: "box")
-        keys = keys or BoxKeys()
 
-        @contextlib.contextmanager
-        def held(resource):
-            w.effects.append(("hold", resource))
-            yield
-            w.effects.append(("release", resource))
-        with mock.patch.object(CMD_PR_MODULE, "Store", lambda env: mock.Mock(mirror_dir=lambda: self.MIRROR)), \
-                mock.patch.object(CMD_PR_MODULE, "Lock", lambda *a: mock.Mock(held=held)), \
-                mock.patch.object(CMD_PR_MODULE.secrets, "Secrets", lambda *a: keys), \
-                mock.patch.object(sync, "in_vm", lambda env: False), \
-                contextlib.redirect_stderr(io.StringIO()):
-            CMD_PR_MODULE.push_from_here(driver, "/src", "fork", "eng/x")
+def box_push(w, keys=None):
+    """`wk pr open` pushing from a build box through its own mirror."""
+    driver = types.SimpleNamespace(here=w, env={"HOME": "/h"}, name="box", ssh_host=lambda _: "box")
+    keys = keys or BoxKeys()
 
-    def state(self, w):
-        return (set(w.refs), set(w.pushed))
+    @contextlib.contextmanager
+    def held(resource):
+        w.effects.append(("hold", resource))
+        yield
+        w.effects.append(("release", resource))
+    with mock.patch.object(CMD_PR_MODULE, "Store", lambda env: mock.Mock(mirror_dir=lambda: MIRROR)), \
+            mock.patch.object(CMD_PR_MODULE, "Lock", lambda *a: mock.Mock(held=held)), \
+            mock.patch.object(CMD_PR_MODULE.secrets, "Secrets", lambda *a: keys), \
+            mock.patch.object(sync, "in_vm", lambda env: False), \
+            contextlib.redirect_stderr(io.StringIO()):
+        CMD_PR_MODULE.push_from_here(driver, "/src", "fork", "eng/x")
 
-    def test_a_push_from_a_box_killed_after_any_effect_and_rerun_converges(self):
-        converges(self, self.make_world, self.run_once, self.state)
-        w = self.make_world()
-        self.run_once(w)
-        self.assertEqual(self.state(w), (set(), {"%s:refs/heads/eng/x" % self.REF}))
+
+def box_state(w):
+    return (set(w.refs), set(w.pushed))
+
+
+class TestPrOpenFromABox(unittest.TestCase):
+    def test_the_push_leaves_the_branch_on_the_fork_and_no_temporary_ref(self):
+        w = box_world()
+        box_push(w)
+        self.assertEqual(box_state(w), (set(), {"%s:refs/heads/eng/x" % BOX_REF}))
 
     def test_the_temporary_ref_is_locked_from_its_fetch_until_its_delete(self):
         """`wk gc` keeps a ref whose lock is held, so it cannot delete one between this fetch and this push."""
-        w = self.make_world()
-        self.run_once(w)
-        locks = [i for i, e in enumerate(w.effects) if e == ("hold", pr.push_lock(self.REF)) or e == ("release", pr.push_lock(self.REF))]
+        w = box_world()
+        box_push(w)
+        locks = [i for i, e in enumerate(w.effects) if e == ("hold", pr.push_lock(BOX_REF)) or e == ("release", pr.push_lock(BOX_REF))]
         work = [i for i, e in enumerate(w.effects) if e[0] == "run"]
         self.assertEqual(2, len(locks))
         self.assertTrue(locks[0] < min(work) and max(work) < locks[1], w.effects)
 
     def test_the_push_uses_the_forks_private_key_and_no_agent(self):
-        w = self.make_world()
-        self.run_once(w)
+        w = box_world()
+        box_push(w)
         (argv,) = [e[1] for e in w.effects if e[0] == "run" and "push" in e[1]]
         ssh = next(a for a in argv if a.startswith("core.sshCommand=")).split("=", 1)[1]
         self.assertIn("-i /s/push-keys/build_key_fork", ssh)
@@ -294,35 +283,15 @@ class TestPrOpenFromABoxKillPoints(unittest.TestCase):
         self.assertIn("git@github.com:alice/WebKit.git", argv)
 
     def test_a_machine_with_no_key_refuses_naming_the_remedy_before_any_effect(self):
-        w = self.make_world()
+        w = box_world()
         w.files.clear()
         with self.assertRaises(act.Refused), mock.patch.object(CMD_PR_MODULE, "die", side_effect=act.Refused(1)) as die:
-            self.run_once(w)
+            box_push(w)
         self.assertIn("wk key deploy", die.call_args[0][0])
-        self.assertEqual((set(), set()), self.state(w))
+        self.assertEqual((set(), set()), box_state(w))
 
 
 class TestPrDryRunEqualsWetRun(unittest.TestCase):
-
-    def dry_and_wet(self, make, verb):
-        wet_world, dry_world = make(), make()
-        wet_place, dry_place = RecordingDriver(wet_world), RecordingDriver(dry_world)
-        with contextlib.redirect_stderr(io.StringIO()):
-            verb(wet_place)
-            with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-                verb(dry_place)
-        self.assertTrue(wet_place.mutations)
-        self.assertEqual(dry_place.mutations, wet_place.mutations)
-        return wet_world, dry_world
-
-    def test_a_dry_checkout_is_the_wet_runs_plan_and_touches_nothing(self):
-        _, dry = self.dry_and_wet(checkout_world, lambda t: pr.checkout(t, t.machine, "ws", "alice:eng/x"))
-        self.assertEqual(checkout_state(dry), checkout_state(checkout_world()))
-
-    def test_a_dry_rebase_is_the_wet_runs_plan_and_touches_nothing(self):
-        wet, dry = self.dry_and_wet(rebase_world, lambda t: CMD_PR_MODULE.pr_rebase(t, "ws"))
-        self.assertEqual(({"eng/y": "c" * 40}, {"eng/y": "d" * 40}), (wet.local, dry.local))
-
     def test_a_dry_open_pushes_nothing_and_prints_the_pull_request(self):
         with mock.patch("os.execvp") as execvp, \
                 mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(io.StringIO()) as err:
@@ -361,16 +330,13 @@ def scratch_store(tmp):
                   "XDG_STATE_HOME": str(tmp / "state"), "WK_IN_VM": "", "HOME": str(tmp)})
 
 
-class ScratchTest(unittest.TestCase):
+class ScratchTest(fakes.FlowTest):
     def setUp(self):
-        scratch = scratch_dir(prefix="wk-pr-test-")
-        self.tmp = scratch.__enter__()
-        self.addCleanup(scratch.__exit__, None, None, None)
+        super().setUp()
         self.store = scratch_store(self.tmp)
 
 
 class TestMirrorFetch(ScratchTest):
-
     def setUp(self):
         super().setUp()
         self.here = Local()
@@ -415,7 +381,6 @@ class TestMirrorFetch(ScratchTest):
 
 
 class TestMirrorFetchIsARecorderUnderADryRun(ScratchTest):
-
     def setUp(self):
         super().setUp()
         self.here = Fake("here")
@@ -503,7 +468,6 @@ def calls(driver):
 
 
 class TestPrRebase(unittest.TestCase):
-
     def _run(self, mirror, responses):
         driver = rebase_place(mirror, responses)
         err = io.StringIO()
@@ -562,22 +526,21 @@ class TestPrOpen(unittest.TestCase):
 
 
 class TestPrOpenRefusals(unittest.TestCase):
-
     def test_refuses_when_the_stored_token_is_dead(self):
+        """`wk pr open` needs gh-auth, which a gh whose token the API refuses does not meet."""
+        table = decl.parse("pr", CMD_PR_MODULE.COMMAND, ["open", "some-workspace"])[0]
         with stub_path({
             "gh": '#!/bin/sh\ncase "$1 $2" in\n'
                   '"auth status") exit 0 ;;\n'
                   '"api user") echo \'{"message":"Requires authentication"}\'; exit 1 ;;\n'
                   'esac\nexit 0\n',
-        }) as binp:
-            cp = run("pr", "open", "some-workspace",
-                     env={"PATH": f"{binp}:{os.environ['PATH']}"})
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("gh auth login", cp.stdout)
+        }) as binp, mock.patch.dict(os.environ, {"PATH": f"{binp}:{os.environ['PATH']}"}), \
+                contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
+            dispatch.check_needs("pr", table)
+        self.assertIn("gh auth login", err.getvalue())
 
 
 class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
-
     @classmethod
     def setUpClass(cls):
         if not shutil.which("openssl"):
@@ -663,4 +626,3 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
         self.assertIn(b"200 OK", got)
         self.assertIn(b"GET /user HTTP/1.1", head)
         self.assertIn(b"Accept: application/vnd.github.v3+json", head)
-

@@ -7,20 +7,17 @@ import pty
 import subprocess
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.killpoints import converges
-from tests.support import REPO, WkTest, as_dispatched, bash, func_body, load_cmd, requires_machine, run
+from tests.support import REPO, WkTest, as_dispatched, bash, func_body, load_cmd, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, decl, fleet, quiet  # noqa: E402
+from wk import decl, fleet, quiet  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
 from wk.machine import TIMED_OUT, Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
+from tests import fakes  # noqa: E402
 
 ROOT = str(REPO)
 STATE = "/state/wk/quiesce"
@@ -42,14 +39,13 @@ HOSTS = lib(quiet.HOSTS, "wk_bench_hosts_present", "/etc/hosts")
 RENDER = lib(quiet.COMMON, quiet.RENDER)
 
 
-class World(Fake):
+class World(fakes.World):
     """A Mac: the helper's verbs, the pause, the raiser and the desktop settings move `files` the way the real ones move the machine."""
 
     def __init__(self, macos=True, bench=False, helper=True):
-        super().__init__("mac")
+        super().__init__(name="mac")
         self.macos = macos
         self.env = {"WK_QUIESCE_STATE": STATE, "TMPDIR": "/tmp", "HOME": "/home/u", "WK_IMAGE_MARKER": "/etc/wk-image"}
-        self.clock = FakeClock()
         if helper:
             self.files[PRIV] = ""
         if bench:
@@ -99,26 +95,7 @@ class World(Fake):
         return any(e[0] == "run" and e[1] == tuple(argv) for e in self.effects)
 
 
-class Recording(World):
-    """Every act_run as ("act", argv) in both modes, so a dry run's plan can be held against a wet run's."""
-
-    def act_run(self, argv, **kw):
-        self.effects.append(("act", tuple(argv)))
-        if act.dry_run():
-            return Result(0)
-        return super().act_run(argv, **kw)
-
-    def mutations(self):
-        return [e for e in self.effects if e[0] in ("act", "write", "mkdir", "remove")]
-
-
-class QuiesceTest(unittest.TestCase):
-    def setUp(self):
-        p = mock.patch.dict(os.environ, {}, clear=False)
-        p.start()
-        self.addCleanup(p.stop)
-        for v in ("WK_DRY_RUN", "WK_QUIET", "WK_DESTRUCTIVE", "WK_CONFIRMED"):
-            os.environ.pop(v, None)
+class QuiesceTest(fakes.FlowTest):
 
     def quiet_run(self, fn):
         with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out:
@@ -338,30 +315,6 @@ class TestTheReadings(QuiesceTest):
         self.assertIn("NOT denied", out)
 
 
-class TestCrashOnly(QuiesceTest):
-    def world(self, action, cls):
-        return self.quiesced(cls, bench=True) if action == "off" else cls(bench=True)
-
-    def test_on_and_off_killed_after_any_effect_and_rerun_converge(self):
-        """`killpoints[quiesce]`: `on`, then `off`, each killed after every effect in turn and re-run."""
-        for action in ("on", "off"):
-            with self.subTest(action=action):
-                converges(self, lambda: types.SimpleNamespace(fake=self.world(action, World)),
-                          lambda w: self.quiet_run(getattr(w.fake.q(), action)), lambda w: w.fake.state())
-
-    def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        for action in ("on", "off"):
-            with self.subTest(action=action):
-                wet, dry = self.world(action, Recording), self.world(action, Recording)
-                self.quiet_run(getattr(wet.q(), action))
-                before, slept = dry.state(), list(dry.clock.slept)
-                with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-                    self.quiet_run(getattr(dry.q(), action))
-                self.assertEqual(wet.mutations(), dry.mutations())
-                self.assertGreaterEqual(len(dry.mutations()), 3)
-                self.assertEqual((before, slept), (dry.state(), dry.clock.slept))
-
-
 class TestTheCommand(QuiesceTest):
     def test_bare_is_status_and_anything_else_is_refused(self):
         m = load_cmd("quiesce")
@@ -369,11 +322,10 @@ class TestTheCommand(QuiesceTest):
             m.main(as_dispatched("quiesce", []), None)
             m.main(as_dispatched("quiesce", ["on"]), None)
         self.assertEqual(["status", "on"], [c[0] for c in q.return_value.method_calls])
-        for bad in (["up"], ["on", "off"]):
-            with self.subTest(argv=bad):
-                cp = run("quiesce", *bad)
-                self.assertEqual(2, cp.returncode, cp.stdout)
-                self.assertIn("usage: wk quiesce", cp.stdout)
+        for bad, said in ((["up"], "unknown verb: up"), (["on", "off"], "unexpected argument: off")):
+            with self.subTest(argv=bad), self.assertRaises(decl.Usage) as e:
+                decl.parse("quiesce", m.COMMAND, bad)
+            self.assertIn(said, str(e.exception))
 
     def test_a_session_change_needs_the_helper_and_its_status_only_reads(self):
         def table(verb):

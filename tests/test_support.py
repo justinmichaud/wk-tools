@@ -52,7 +52,6 @@ class TestNoTestSeesTheMachineItRunsOn(unittest.TestCase):
 
 
 class TestNothingATestStartsReadsAStartupFile(unittest.TestCase):
-
     def test_the_suites_stdin_is_not_a_socket(self):
         self.assertFalse(stat.S_ISSOCK(os.fstat(0).st_mode))
 
@@ -65,7 +64,6 @@ class TestNothingATestStartsReadsAStartupFile(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get("WK_TEST_SHIMS"), "the machine-tool shims are tests/run.py's, outside the live tier")
 class TestAPathATestHandsInStillReachesNoMachine(unittest.TestCase):
-
     def test_system_directories_alone_get_the_shims_back(self):
         cp = bash("ssh somehost true; podman machine ssh wk -- true", env={"PATH": "/usr/bin:/bin:/opt/homebrew/bin"})
         self.assertIn("unit tier reached ssh somehost true", cp.stderr)

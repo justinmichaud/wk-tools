@@ -3,15 +3,14 @@
 import contextlib
 import io
 import os
-import shutil
 import subprocess
 import sys
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from tests.fakes import FakeDriver
-from tests.support import REPO, WkTest
+from tests.fakes import FlowTest
+from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, record  # noqa: E402
@@ -29,14 +28,23 @@ def alive(pid):
     return True
 
 
-class ClaimTest(WkTest):
-
+class ClaimTest(FlowTest):
     def setUp(self):
         super().setUp()
         self.store = self.tmp / "store"
         self.store.mkdir()
         (self.tmp / "no-machines").mkdir()
         self.env = {"WK_STORE": str(self.store), "WK_MACHINES_DIR": str(self.tmp / "no-machines")}
+
+    def wk(self, cmd, *argv):
+        """`wk <cmd> <argv>` run in process under this test's store: (exit or the refusal's status, what it said)."""
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, self.env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            try:
+                rc = load_cmd(cmd).main(as_dispatched(cmd, list(argv), os.environ), None)
+            except act.Refused as e:
+                rc = e.status
+        return rc or 0, out.getvalue()
 
     def spawn(self):
         """A pid this test is not the parent of, so `kill -0` never reads an unreaped zombie."""
@@ -95,10 +103,10 @@ class TestTheFleetIsAsked(unittest.TestCase):
         self.assertEqual(self.stores(False), ["moose", "container"])
 
 
-class TestTheBarrier(unittest.TestCase):
+class TestTheBarrier(FlowTest):
     def setUp(self):
-        self.store = Path(__import__("tempfile").mkdtemp(prefix="wk-test-claim-"))
-        self.addCleanup(shutil.rmtree, self.store, True)
+        super().setUp()
+        self.store = self.tmp
         self.machine = Fake()
         self.records = record.Records(self.store, clock=FakeClock(), machine=self.machine,
                                       env={"WK_STORE": str(self.store)})
@@ -160,22 +168,20 @@ class TestTheBarrier(unittest.TestCase):
 
 
 class TestStatusHolds(ClaimTest):
-
     def test_it_prints_the_rows_and_changes_nothing(self):
         _, pid = self.holder()
         before = self.tasks()
-        cp = self.run_wk("status", "--holds", "device:rpi5", env=self.env)
-        self.assertEqual(0, cp.returncode, cp.stdout)
-        rows = [l for l in cp.stdout.splitlines() if l.strip()]
-        self.assertEqual(1, len(rows), cp.stdout)
+        rc, out = self.wk("status", "--holds", "device:rpi5")
+        self.assertEqual(0, rc, out)
+        rows = [l for l in out.splitlines() if l.strip()]
+        self.assertEqual(1, len(rows), out)
         self.assertIn("bench rpi5/speedometer3", rows[0])
         self.assertIn("kill %d" % pid, rows[0])
         self.assertEqual(before, self.tasks())
 
     def test_a_free_board_is_no_rows_and_still_exit_0(self):
-        cp = self.run_wk("status", "--holds", "device:rpi5", env=self.env)
-        self.assertEqual(0, cp.returncode, cp.stdout)
-        self.assertEqual("", cp.stdout.strip())
+        rc, out = self.wk("status", "--holds", "device:rpi5")
+        self.assertEqual((0, ""), (rc, out.strip()))
 
 MACHINE_CONF = '''kind=board
 ssh=fakeboard
@@ -200,9 +206,8 @@ class TestTheCommandsTakeIt(ClaimTest):
     def held(self):
         return self.holder(machine="fakeboard", name="fakeboard/speedometer3")[1]
 
-    def assert_refused(self, cp, pid):
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(0, cp.returncode, out)
+    def assert_refused(self, rc, out, pid):
+        self.assertNotEqual(0, rc, out)
         self.assertIn("fakeboard", out)
         self.assertIn("bench fakeboard/speedometer3", out)
         self.assertIn("kill %d" % pid, out)
@@ -225,19 +230,18 @@ class TestTheCommandsTakeIt(ClaimTest):
         pid = self.held()
         for args in ((), ("--back",)):
             with self.subTest(args=args):
-                self.assert_refused(self.run_wk("boot", "fakeboard", *args, env=self.env), pid)
+                self.assert_refused(*self.wk("boot", "fakeboard", *args), pid)
 
     def test_reading_the_boards_state_takes_no_claim(self):
         self.held()
-        cp = self.run_wk("boot", "fakeboard", "--status", env=self.env)
-        out = cp.stdout + cp.stderr
+        _, out = self.wk("boot", "fakeboard", "--status")
         self.assertNotIn("another live task holds it", out)
         self.assertIn("no boot driver", out)
         self.assertEqual(1, len(self.tasks()), out)
 
     def test_a_dry_run_holds_nothing(self):
-        cp = self.run_wk("boot", "fakeboard", "--dry-run", env=self.env)
-        self.assertIn("no boot driver", cp.stdout + cp.stderr)
+        os.environ["WK_DRY_RUN"] = "1"
+        self.assertIn("no boot driver", self.wk("boot", "fakeboard")[1])
         self.assertEqual([], self.tasks())
 
 

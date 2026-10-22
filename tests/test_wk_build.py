@@ -13,12 +13,11 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes import JobDriver, JobWorld
-from tests.killpoints import converges
 from tests.support import REPO, as_dispatched, load_cmd
-from tests.test_wk_workspace import FlowTest
+from tests.fakes import FlowTest
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, build, dispatch, job, places, record  # noqa: E402
+from wk import act, build, job, places, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Local, Result, isolated_module  # noqa: E402
 
@@ -310,28 +309,6 @@ class TestDryRun(BuildTest):
         self.assertEqual(self.w.recs().list(), [])
         self.assertEqual([e for e in self.w.effects if e[0] in ("watch", "spawn")], [])
 
-    def test_the_plan_is_the_runs_mutations(self):
-        class Recording(World):
-            def act_run(self, argv, **kw):
-                self.effects.append(("act", tuple(argv)))
-                return super().act_run(argv, **kw)
-
-        def mutations(w):
-            locks = w.env["WK_LOCK_DIR"]
-            return [e for e in w.effects if e[0] in ("act", "write", "mkdir", "remove", "kill", "spawn")
-                    if not (isinstance(e[1], str) and e[1].startswith(locks))]
-        wet = Recording(self.tmp)
-        self.run_(wet)
-        dry = Recording(self.tmp)
-        os.environ["WK_DRY_RUN"] = "1"
-        rc, err = self.run_(dry)
-        rel = [tuple(str(x).replace(str(w.tmp), "") for x in e) for w in (wet, dry) for e in mutations(w)]
-        n = len(mutations(wet))
-        self.assertEqual(rel[:n], rel[n:])
-        self.assertGreaterEqual(n, 3)
-        self.assertIn("would run: exec ws python3 -I -c", err)
-        self.assertEqual(dry.pids, {os.getpid()})
-
 
 class TestKill(BuildTest):
     def test_nothing_running_says_so_and_is_0(self):
@@ -440,7 +417,6 @@ class TestBabysitFront(BuildTest):
 
 
 class TestBabysitStates(BuildTest):
-
     def loop(self, builds, fixes=None, attempts="2"):
         w = self.w
         w.env["WK_BABYSIT_ATTEMPTS"] = attempts
@@ -567,14 +543,6 @@ class TestJob(BuildTest):
         self.assertIn("busiest:       ld64 at 99% CPU", err.getvalue())
         self.assertIn("last progress: [5/9]", err.getvalue())
         self.assertIn("tail: last line", err.getvalue())
-
-
-class TestKillPoints(BuildTest):
-    def test_a_build_killed_after_any_effect_and_rerun_converges(self):
-        def run_once(w):
-            with contextlib.redirect_stderr(io.StringIO()):
-                self.make(w).front()
-        converges(self, lambda: World(self.tmp), run_once, World.state)
 
 
 if __name__ == "__main__":
