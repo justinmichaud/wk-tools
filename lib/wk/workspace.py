@@ -125,6 +125,9 @@ def new_place(reg, name, opts):
             "    box makes its checkout only from a %s mirror." % (repo.name, tname, project.get("CHECKOUT")))
     if driver.kind == "local":
         die("a workspace cannot create a workspace -- run 'wk new %s' on the host" % name)
+    mirror = driver.store.mirror_dir()
+    if driver.reads_host_mirror and repo.snapshot and not reg.machine.isdir(mirror):
+        die("no %s mirror at %s:\n    wk sync    makes it, then publishes a snapshot to build from." % (project.get("CHECKOUT"), mirror))
     return driver, repo
 
 
@@ -293,9 +296,6 @@ def _create(driver, records, task, clock, name, base, arch, repo, state):
         sshalias.alias_remove(here, driver.env, name)
     if driver.needs_base and repo.snapshot:
         stage("base")
-        mirror = driver.store.mirror_dir()
-        if not here.isdir(mirror):
-            die("no %s mirror at %s:\n    wk sync    makes it, then publishes a snapshot to build from." % (project.get("CHECKOUT"), mirror))
         bases = Snapshots(driver.store, here)
         base = base or bases.current()
         if not base:

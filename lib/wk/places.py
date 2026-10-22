@@ -1443,11 +1443,9 @@ class Vm(Driver):
         return names
 
     def create(self, ws, base=None, arch="native", repo=None):
-        v, ws_dir, mirror = self.vm(ws), self.store.ws_dir(ws), self.store.mirror_dir()
+        v, ws_dir = self.vm(ws), self.store.ws_dir(ws)
         if self.vm_state(ws) != "absent":
             act.die("workspace '%s' already exists" % ws)
-        if not self.machine.isdir(mirror):
-            act.die("no %s mirror on this machine for '%s' (%s):  wk sync    makes it" % (project.get("CHECKOUT"), ws, mirror))
         from wk.sysimage import guestbase
         base = guestbase.Base(self)
         with base.host.lock().held("guest-base"):

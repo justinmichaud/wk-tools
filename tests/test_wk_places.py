@@ -857,14 +857,9 @@ class TestVmWrite(VmTest):
         self.stderr_of(lambda: self.reg.load("vm").create("new"))
         self.assertEqual(self.tart_calls()[1][3:], ("--cpu", "4", "--memory", "8192", "--random-mac", "--display", "1920x1080", "--display-refit"))
 
-    def test_create_refuses_an_existing_guest_a_missing_mirror_and_a_base_that_did_not_build(self):
+    def test_create_refuses_an_existing_guest_and_a_base_that_did_not_build(self):
         err = self.refused(lambda: self.t.create("mac"))
         self.assertIn("workspace 'mac' already exists", err)
-        self.fake.dirs.discard(self.t.store.mirror_dir())
-        err = self.refused(lambda: self.t.create("new"))
-        self.assertIn("no WebKit mirror on this machine for 'new'", err)
-        self.assertIn("wk sync    makes it", err)
-        self.fake.dirs.add(self.t.store.mirror_dir())
         self.base_ensure.side_effect = Refused(3)
         with self.assertRaises(Refused) as cm:
             self.t.create("new")

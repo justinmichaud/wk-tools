@@ -383,6 +383,14 @@ class TestNewFrontRefusals(WorkspaceTest):
         self.assertIn("'wk status ws' says so:  wk rm ws   then 'wk new ws' to start again", err)
         self.assertEqual([e for e in self.w.effects if e[0] == "spawn"], [])
 
+    def test_a_missing_mirror_refuses_naming_wk_sync_before_anything_runs(self):
+        """`unit new.refuses_without_mirror`: refused before the detach and the `wk sync --mirror` that would clone it."""
+        for kind in ("container", "vm"):
+            w = self.make_world(kinds={"fakebox": kind})
+            w.dirs.discard(w.driver.store.mirror_dir())
+            self.assertIn("no WebKit mirror at %s:\n    wk sync    makes it" % w.driver.store.mirror_dir(), self.refused(lambda: self.front(w)))
+            self.assertEqual(([], []), (self.runs(w), [e for e in w.effects if e[0] == "spawn"]), kind)
+
     def test_a_creation_already_running_is_refused_with_its_pid_and_stage(self):
         self.w.make(marker=False, base=False)
         t = self.w.begin(plan=list(workspace.PLAN), log="/tmp/new-ws.log")
@@ -676,8 +684,7 @@ class TestNewDriver(WorkspaceTest):
         w.unreachable = "Connection refused"
         cases.append((w, "cannot reach the machine behind place 'fakebox', so whether 'ws' is\n    already there cannot be known"))
         for w, words in cases:
-            err = self.refused(lambda: self.detached(w))
-            self.assertIn(words, err)
+            self.assertIn(words, self.refused(lambda: self.detached(w)))
             (t,) = w.records.list()
             self.assertEqual(t.verdict(), "refused")
             self.assertEqual(t.stage(), ["checking"])
@@ -727,21 +734,15 @@ class TestNewDriver(WorkspaceTest):
         self.w.pids.add(4242)
         self.assertEqual(workspace.creation_state(self.w.driver, self.w.records, "ws"), "present")
 
-    def test_no_mirror_or_no_base_snapshot_refuses_naming_wk_sync_and_creates_nothing(self):
-        for unmake, words in ((lambda w: w.dirs.discard(w.driver.store.mirror_dir()), "no WebKit mirror at %s:\n    wk sync    makes it"),
-                              (lambda w: w.publish("main-1", on_branch=False),
-                               "no snapshot this machine can build a workspace from:  wk sync\n    publishes one.")):
-            w = self.make_world()
-            unmake(w)
-            self.assertIn(words.replace("%s", w.driver.store.mirror_dir()), self.refused(lambda: self.detached(w)))
-            self.assertEqual([a for a in self.runs(w) if step(a) == "wkdev-create"], [])
-            self.assertNotIn(w.ws_dir(), w.dirs)
-            (t,) = w.records.list()
-            self.assertEqual((t.verdict(), t.stage(), w.lock_files()), ("failed", ["base"], []))
+    def test_no_base_snapshot_refuses_naming_wk_sync_and_creates_nothing(self):
+        self.w.publish("main-1", on_branch=False)
+        self.assertIn("no snapshot this machine can build a workspace from:  wk sync\n    publishes one.", self.refused(lambda: self.detached()))
+        self.assertEqual(([], False), ([a for a in self.runs() if step(a) == "wkdev-create"], self.w.ws_dir() in self.w.dirs))
+        (t,) = self.w.records.list()
+        self.assertEqual((t.verdict(), t.stage(), self.w.lock_files()), ("failed", ["base"], []))
 
     def test_a_given_base_is_verified_and_its_refusal_is_the_reason(self):
-        err = self.refused(lambda: self.detached(base="main-9"))
-        self.assertIn("snapshot main-9 does not exist", err)
+        self.assertIn("snapshot main-9 does not exist", self.refused(lambda: self.detached(base="main-9")))
         self.w.publish("main-9", on_branch=False)
         self.assertIn("snapshot main-9 is not on branch main tracking origin/main", self.refused(lambda: self.detached(base="main-9")))
         w = self.make_world(kinds={"fakebox": "vm"})
