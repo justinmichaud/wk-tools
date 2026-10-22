@@ -963,7 +963,8 @@ class Container(Driver):
         secrets.Secrets(self.root, self.env, self.machine).store_publish()
 
     def sdk_refresh(self):
-        r = self.machine.act_run(["bash", os.path.join(self.root, "container", "sdk-refresh.sh"), self.sdk()], stream=True)
+        r = self.machine.act_run(["bash", os.path.join(self.root, "container", "sdk-refresh.sh"), self.sdk(),
+                                 project.get("SDK_REPO"), project.get("SDK_PIN")], stream=True)
         if not r.ok:
             act.die("refreshing the %s checkout failed (above)" % project.get("SDK"))
         return True

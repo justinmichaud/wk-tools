@@ -777,12 +777,13 @@ class TestContainerWrite(DriversTest):
             with self.assertRaises(Refused):
                 self.t.store_init()
 
-    def test_sdk_refresh_runs_the_refresh_script_on_the_sdk_checkout(self):
+    def test_sdk_refresh_pins_the_sdk_checkout_to_the_fork(self):
         script = os.path.join(self.t.root, "container", "sdk-refresh.sh")
+        argv = ("bash", script, self.t.sdk(), project.get("SDK_REPO"), project.get("SDK_PIN"))
         self.fake.answer(["bash", script], out="")
         self.assertTrue(self.t.sdk_refresh())
-        self.assertEqual(self.fake.effects[-1], ("run", ("bash", script, self.t.sdk())))
-        self.assertEqual(self.fake.streamed, [("bash", script, self.t.sdk())])
+        self.assertEqual(self.fake.effects[-1], ("run", argv))
+        self.assertEqual(self.fake.streamed, [argv])
         self.fake.answer(["bash", script], rc=1, err="fetch failed\n")
         err = self.refused(self.t.sdk_refresh)
         self.assertIn("fetch failed", err)

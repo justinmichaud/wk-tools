@@ -20,6 +20,8 @@
               ["forkwpe", "https://github.com/justinmichaud/WPEWebKit.git"]],
   "RELEASES": "webkitglib",
   "SDK": "webkit-container-sdk",
+  "SDK_REPO": "https://github.com/justinmichaud/webkit-container-sdk.git",
+  "SDK_PIN": "a837e877dc885311172866e22c4798900a87133a",
   "SDK_IMAGE": "ghcr.io/igalia/wkdev-sdk",
   "SDK_IMAGE_ARMHF": "ghcr.io/igalia/wkdev-sdk:24.04_arm32",
   "SDK_CREATE": "wkdev-create",

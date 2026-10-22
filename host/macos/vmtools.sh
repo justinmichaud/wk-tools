@@ -125,25 +125,16 @@ else
     warn "no build key; workspaces will not be able to push"
 fi
 
-# Without --additional-flags no overlay mount; without --network, the host's.
-if _rsh 'test -d /opt/webkit-container-sdk/.git'; then
-    unchanged "webkit-container-sdk present"
-else
-    info "cloning webkit-container-sdk into the machine"
-    _rsh 'sudo mkdir -p /opt/webkit-container-sdk && sudo chown core:core /opt/webkit-container-sdk &&
-          git clone -q https://github.com/Igalia/webkit-container-sdk.git /opt/webkit-container-sdk'
-    changed "cloned webkit-container-sdk"
-fi
-
-_sdk_head() { _rsh 'git -C /opt/webkit-container-sdk rev-parse HEAD'; }
+_sdk_head() { _rsh 'git -C /opt/webkit-container-sdk rev-parse HEAD 2>/dev/null || true'; }
 _sdk_head_before=$(_sdk_head)
-_rsh 'bash /opt/wk-tools/container/sdk-refresh.sh /opt/webkit-container-sdk' \
-    || die "refreshing the webkit-container-sdk checkout failed (above)"
+_rsh 'sudo mkdir -p /opt/webkit-container-sdk && sudo chown core:core /opt/webkit-container-sdk'
+_rsh "bash /opt/wk-tools/container/sdk-refresh.sh /opt/webkit-container-sdk $(wk_py wk.project SDK_REPO) $(wk_py wk.project SDK_PIN)" \
+    || die "pinning the webkit-container-sdk checkout failed (above)"
 _sdk_head_after=$(_sdk_head)
 if [ "$_sdk_head_before" = "$_sdk_head_after" ]; then
-    unchanged "webkit-container-sdk up to date"
+    unchanged "webkit-container-sdk at the pin"
 else
-    changed "webkit-container-sdk moved to $_sdk_head_after"
+    changed "webkit-container-sdk at $_sdk_head_after"
 fi
 
 debug "installing the egress proxy in the machine"

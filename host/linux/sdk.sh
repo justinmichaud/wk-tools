@@ -4,24 +4,14 @@ wk_eval wk.store paths
 
 SDK="${WK_SDK:-${XDG_DATA_HOME:-$HOME/.local/share}/webkit-container-sdk}"
 
-if [ -d "$SDK/.git" ]; then
-    unchanged "webkit-container-sdk present"
-else
-    info "cloning webkit-container-sdk into $SDK"
-    ensure_dir "$(dirname "$SDK")"
-    git clone -q https://github.com/Igalia/webkit-container-sdk.git "$SDK" \
-        || die "could not clone the container SDK"
-    changed "cloned webkit-container-sdk"
-fi
-
-_before=$(git -C "$SDK" rev-parse HEAD)
-bash "$WK_ROOT/container/sdk-refresh.sh" "$SDK" \
-    || die "refreshing the webkit-container-sdk checkout failed (above)"
+_before=$(git -C "$SDK" rev-parse HEAD 2>/dev/null || true)
+bash "$WK_ROOT/container/sdk-refresh.sh" "$SDK" "$(wk_py wk.project SDK_REPO)" "$(wk_py wk.project SDK_PIN)" \
+    || die "pinning the webkit-container-sdk checkout failed (above)"
 _after=$(git -C "$SDK" rev-parse HEAD)
 if [ "$_before" = "$_after" ]; then
-    unchanged "webkit-container-sdk up to date"
+    unchanged "webkit-container-sdk at the pin"
 else
-    changed "webkit-container-sdk moved to $_after"
+    changed "webkit-container-sdk at $_after"
 fi
 
 _unit_journal=""
