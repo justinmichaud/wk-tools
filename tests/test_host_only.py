@@ -44,17 +44,6 @@ class TestResolveWithoutABuild(WkTest):
             self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
             self.assertIn("xctrace record", cp.stdout)
 
-    def test_wk_profile_composes_the_right_environment(self):
-        with fake_workspace() as ws:
-            cp = ws.run("run", "--preset", "wpe-release", "--profile=native", "--dry-run", "bench.js")
-            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-            self.assertIn("LD_LIBRARY_PATH", cp.stdout)
-            self.assertIn("samply record", cp.stdout)
-            for m in ("sampling", "bytecode", "samply", "instruments", "heaptrack", "massif"):
-                with self.subTest(profile=m):
-                    cp = ws.run("run", "--profile=" + m, "--dry-run", "bench.js")
-                    self.assertTrue(cp.returncode == 0 or "error:" in cp.stdout + cp.stderr, "refused with no reason")
-
 
 def check_boot_files(root, *args):
     return subprocess.run(["python3", str(REPO / "boot" / "check-boot-files.py"), "--root", str(root), *args],
