@@ -24,10 +24,8 @@ from wk.key import cli, common  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
-NAMES = ("github-pat", "litellm", "claude-login", "ntfy", "deploy-key")
+NAMES = ("github-pat", "litellm", "claude-login", "deploy-key")
 GOOD, OTHER_GOOD, STALE, UNJUDGED = "good-token", "good-token-2", "stale-token", "offline-token"
-TOPIC = "topic-minted-here"
-MINTED = [TOPIC]
 REPOS = {"fork": "justinmichaud/WebKit", "forkwpe": "justinmichaud/WPEWebKit", "wk-tools": "someone/wk-tools"}
 ALL_KEYS = {f: "KEY:" + f for f in REPOS}
 
@@ -55,7 +53,7 @@ def judge(name, value, path, ev):
         return "ok\tthe injector holds it" if v.startswith("login") else "bad\tnot a login"
     if name == "litellm":
         return "ok\tai.igalia.com accepts it" if v.startswith("sk-") else "bad\tnot a virtual key"
-    return "ok\tntfy.sh serves it" if v.startswith("topic") else "bad\tnot one word of letters"
+    return "ok\tit serves"
 
 
 class Peer:
@@ -171,10 +169,10 @@ class KeyWorld(World):
 
 
 def toy_rules():
-    """credcheck's table in miniature: ntfy is minted, the rest asked for."""
+    """credcheck's table in miniature: claude-login is minted, the rest asked for."""
     return {n: credcheck.Rule(needs="do its job", forbids="travel", what="the " + n, url="https://example.invalid/",
                               remedy="subscribe to it", store_with="wk key set " + n, check=None, alone=n == "claude-login",
-                              mint=(lambda: MINTED[-1] + "\n") if n == "ntfy" else None) for n in NAMES}
+                              mint=(lambda: "login-minted\n") if n == "claude-login" else None) for n in NAMES}
 
 
 def toy_verdict(name, value, repos=(), path="", evidence=None):
@@ -226,7 +224,7 @@ class KeyTest(SecretsTest):
     def keyed_fleet(self):
         w = self.fleet_world()
         w.keys()
-        w.holds("ntfy", TOPIC)
+        w.holds("claude-login", "login-held")
         return w
 
     def provisioned(self, *peers, pat=GOOD):
@@ -234,21 +232,20 @@ class KeyTest(SecretsTest):
         w.keys()
         w.register()
         w.holds("github-pat", pat)
-        w.holds("ntfy", TOPIC)
         os.environ["WK_YES"] = "1"
         return w
 
 
 class TestTheElection(KeyTest):
     def test_a_peers_working_credential_is_taken_over_one_refused_here(self):
-        w = self.provisioned(Peer("peerbox", creds={"github-pat": GOOD, "ntfy": TOPIC}, keys=ALL_KEYS), pat=STALE)
+        w = self.provisioned(Peer("peerbox", creds={"github-pat": GOOD}, keys=ALL_KEYS), pat=STALE)
         self.run_verb("setup")
         self.assertEqual(GOOD + "\n", w.files[w.held + "/github-pat"])
         self.assertIn("give github-pat", w.peers["peerbox"].asked)
         self.assertFalse([a for a in w.peer_acts() if "github-pat" in a], "the winner was written back over itself")
 
     def test_a_tie_goes_to_this_machine(self):
-        w = self.provisioned(Peer("peerbox", creds={"github-pat": OTHER_GOOD, "ntfy": TOPIC}, keys=ALL_KEYS))
+        w = self.provisioned(Peer("peerbox", creds={"github-pat": OTHER_GOOD}, keys=ALL_KEYS))
         self.run_verb("setup")
         self.assertEqual(GOOD + "\n", w.files[w.held + "/github-pat"])
         self.assertEqual(GOOD, w.peers["peerbox"].creds["github-pat"])
@@ -263,7 +260,7 @@ class TestTheElection(KeyTest):
         self.assertEqual(told, len(w.peer_acts()), "a fleet that agrees was written to again")
 
     def test_the_deploy_key_github_accepts_is_taken_from_the_peer_holding_it(self):
-        w = self.provisioned(Peer("peerbox", creds={"github-pat": GOOD, "ntfy": TOPIC}, keys={f: "KEY:peer-" + f for f in REPOS}))
+        w = self.provisioned(Peer("peerbox", creds={"github-pat": GOOD}, keys={f: "KEY:peer-" + f for f in REPOS}))
         w.github = {r: {} for r in REPOS.values()}
         w.register({f: "peer-" + f for f in REPOS})
         self.run_verb("setup")
@@ -272,7 +269,7 @@ class TestTheElection(KeyTest):
         self.assertFalse([a for a in w.peer_acts() if " adopt fork" in a])
 
     def test_one_nobody_could_judge_is_not_written_over_a_peers(self):
-        w = self.provisioned(Peer("peerbox", creds={"github-pat": UNJUDGED, "ntfy": TOPIC}, keys=ALL_KEYS),
+        w = self.provisioned(Peer("peerbox", creds={"github-pat": UNJUDGED}, keys=ALL_KEYS),
                              pat=UNJUDGED)
         _, _, err = self.run_verb("setup")
         self.assertIn("github-pat: no workstation's could be judged", err)
@@ -344,26 +341,12 @@ class TestAValueTravelsOnStdin(KeyTest):
         self.assertIn(GOOD + "\n", [i for _, i in w.inputs])
 
 
-class TestAMintedValueIsShownOnlyWhenItMayTravel(KeyTest):
-    def set_ntfy(self, alone):
-        k = self.key(KeyWorld(self.tmp))
-        rule = k.rule
-        with mock.patch.object(k, "rule", side_effect=lambda n, f: alone if f == "alone" else rule(n, f)), \
-                contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(0, k.set("ntfy"))
-        return err.getvalue()
-
+class TestAReplaceWithNothingStored(KeyTest):
     def test_a_replace_with_nothing_stored_sets_one(self):
         k = self.key(KeyWorld(self.tmp))
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(0, k.set("ntfy", replace=True))
+            self.assertEqual(0, k.set("claude-login", replace=True))
         self.assertIn("nothing to replace: setting one", err.getvalue())
-
-    def test_an_alone_credential_is_never_printed(self):
-        self.assertIn("printed once: https://example.invalid/" + TOPIC, self.set_ntfy(False))
-        said = self.set_ntfy(True)
-        self.assertNotIn(TOPIC, said)
-        self.assertNotIn("printed once", said)
 
 
 class TestADrySet(KeyTest):
@@ -372,11 +355,11 @@ class TestADrySet(KeyTest):
         os.environ["WK_YES"] = "1"
         wet, dry = KeyWorld(self.tmp), KeyWorld(self.tmp)
         with contextlib.redirect_stderr(io.StringIO()), mock.patch("os.urandom", return_value=b"\0" * 8):
-            self.key(wet).set("ntfy")
+            self.key(wet).set("claude-login")
             before = dry.state()
             os.environ["WK_DRY_RUN"] = "1"
-            self.key(dry).set("ntfy")
-        self.assertIn(TOPIC + "\n", wet.files.values())
+            self.key(dry).set("claude-login")
+        self.assertIn("login-minted\n", wet.files.values())
         self.assertEqual(([], before), (dry.acts(), dry.state()))
 
 
@@ -485,8 +468,8 @@ class TestTheVerbs(KeyTest):
         w = self.world()
         rc, out, err = self.run_verb("setup", w)
         (left,) = [l for l in err.splitlines() if "not settled:" in l]
-        self.assertEqual(["github-pat", "litellm", "claude-login"], left.split("not settled:")[1].split())
-        self.assertEqual(TOPIC + "\n", w.files[w.sec().cred_path("ntfy")])
+        self.assertEqual(["github-pat", "litellm"], left.split("not settled:")[1].split())
+        self.assertEqual("login-minted\n", w.files[w.sec().cred_path("claude-login")])
         self.assertIn(w.held + "/build_key_fork", w.files)
         self.assertRegex(err, r"github-pat\s+skipped\s+\S")
 
@@ -503,25 +486,6 @@ class TestTheVerbs(KeyTest):
         self.assertNotIn(w.held + "/github-pat", w.files, "the old token outlived its replace")
         self.assertEqual("KEY:fork-g1\n", w.files[w.held + "/build_key_fork"])
 
-    def test_a_minted_topic_is_printed_at_the_mint_and_by_show_and_a_replace_mints_another(self):
-        w = self.world()
-        k = self.key(w)
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(0, k.set("ntfy"))
-        self.assertEqual(1, err.getvalue().count(TOPIC), err.getvalue())
-        for verb in ("check", "set"):
-            out = self.run_verb(verb, w) if verb == "check" else self.quiet_set(w, "ntfy")
-            self.assertNotIn(TOPIC, "".join(map(str, out)), verb)
-        _, out, _ = self.run_verb("show", w)
-        self.assertIn("https://example.invalid/" + TOPIC, out)
-        MINTED.append("topic-minted-again")
-        self.addCleanup(MINTED.pop)
-        os.environ["WK_YES"] = "1"
-        said = self.quiet_set(w, "ntfy", replace=True)
-        self.assertEqual("topic-minted-again\n", w.files[w.sec().cred_path("ntfy")])
-        self.assertIn("topic-minted-again", "".join(map(str, said)))
-        self.assertIn("wk key set ntfy", self.run_verb("show", self.world())[1])
-
     def quiet_set(self, w, name, **kw):
         k = self.key(w, **kw.pop("key", {}))
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -533,15 +497,15 @@ class TestTheVerbs(KeyTest):
 
     def test_a_pasted_value_is_put_to_the_rule_and_never_printed(self):
         w = self.world()
-        rc, out, err = self.quiet_set(w, "ntfy", paste=True, value="topic-from-elsewhere\n")
-        self.assertEqual((0, "topic-from-elsewhere\n"), (rc, w.files[w.sec().cred_path("ntfy")]))
-        self.assertNotIn("topic-from-elsewhere", out + err)
-        for given, says in (("not one word\n", "refused"), ("", "wk key set ntfy")):
+        rc, out, err = self.quiet_set(w, "litellm", paste=True, value="sk-from-elsewhere\n")
+        self.assertEqual((0, "sk-from-elsewhere\n"), (rc, w.files[w.sec().cred_path("litellm")]))
+        self.assertNotIn("sk-from-elsewhere", out + err)
+        for given, says in (("not a key\n", "refused"), ("", "wk key set litellm")):
             with self.subTest(given=given):
                 w = self.world()
-                rc, out, err = self.quiet_set(w, "ntfy", paste=True, value=given)
+                rc, out, err = self.quiet_set(w, "litellm", paste=True, value=given)
                 self.assertNotEqual(0, rc)
-                self.assertNotIn(w.sec().cred_path("ntfy"), w.files)
+                self.assertNotIn(w.sec().cred_path("litellm"), w.files)
                 self.assertIn(says, err)
 
     def test_a_name_set_does_not_take_is_refused_naming_the_ones_it_does(self):
@@ -634,7 +598,7 @@ class TestTheFleetsCredentials(KeyTest):
         w = self.provisioned(Peer("peerbox", keys=ALL_KEYS))
         self.run_verb("setup")
         asked = w.peers["peerbox"].asked
-        for name in ("github-pat", "litellm", "ntfy"):
+        for name in ("github-pat", "litellm"):
             self.assertIn("verdict " + name, asked)
         self.assertEqual([], [a for a in asked if "claude-login" in a])
         self.assertEqual([], [a for a in w.peer_acts() if "claude-login" in a])
@@ -652,7 +616,7 @@ class TestTheFleetsCredentials(KeyTest):
         return rc, out.partition("needs you:")
 
     def test_each_peer_row_is_its_own_answer_and_the_alone_one_is_never_asked(self):
-        rc, (table, _, needs) = self.check({"github-pat": OTHER_GOOD, "litellm": "sk-x", "ntfy": TOPIC})
+        rc, (table, _, needs) = self.check({"github-pat": OTHER_GOOD, "litellm": "sk-x"})
         self.assertRegex(table, r"peerbox github-pat\s+it reaches exactly the forks")
         self.assertNotIn("peerbox claude-login", table)
         rc, (table, _, needs) = self.check({})

@@ -129,10 +129,6 @@ class Creds:
             die("could not write " + path)
         self.deliver(name)
         log(self.cred_line(name, "minted" if minted else "stored", path))
-        if minted and not self.alone(name):
-            # Every reader of a stored credential redacts it, so this is the only chance to point a phone at one wk mints.
-            log("  printed once: %s%s" % (self.rule(name, "url"), val))
-            log("  " + self.rule(name, "remedy"))
         cred_print(name, line)
         return 0
 

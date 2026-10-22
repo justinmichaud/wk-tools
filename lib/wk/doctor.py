@@ -46,7 +46,6 @@ MACHINE_LOCAL = (
     ("{claude_login}", "re-authable", "wk key set claude-login; the injector holds it, every workspace a placeholder", ""),
     ("{tailscale_authkey}", "re-authable", "wk key set tailnet (tag:wk, reusable, not ephemeral)", ""),
     ("{tailscale_api}", "re-authable", "wk key set tailnet-api; only the retiring of a stale node needs it", ""),
-    ("{ntfy_topic}", "re-authable", "wk key set ntfy mints a new topic", ""),
     ("{state}/broker", "regenerable", "the broker's request records; the next request makes new ones", ""),
     ("{home}/.ssh/config.d/local", "backed-up", "hand-written ssh entries (host/dotfiles.sh owns the rest)", ""),
     ("{machines}", "backed-up", "hand-written machine confs for this device only", ""),
@@ -470,8 +469,7 @@ class Doctor:
             self._paths = {"push_held": self.store.keyring_push_dir(), "read_pat": sec.machine_read_pat(),
                            "push_pat": sec.machine_pat(), "bugzilla_key": sec.machine_bugzilla_key(),
                            "push_copy": os.path.dirname(sec.machine_push_key("")), "claude_login": sec.cred_path("claude-login"),
-                           "tailscale_api": sec.cred_path("tailnet-api"), "tailscale_authkey": sec.cred_path("tailnet"),
-                           "ntfy_topic": self.store.keyring_ntfy_topic()}
+                           "tailscale_api": sec.cred_path("tailnet-api"), "tailscale_authkey": sec.cred_path("tailnet")}
             self._paths.update(("secret." + r[0], sec.cred_path(r[0])) for r in secrets.agent_secrets())
         return self._paths
 
@@ -666,8 +664,6 @@ class Doctor:
         if not probe:
             yield unk("%s did not answer" % t, "ssh %s true  -- then re-run; nothing was changed" % t)
             return
-        yield from findings(machine_deps.findings_text(machine_deps.findings(self.root, probe, self.env, self.machine)),
-                            "see 'wk machine setup %s'" % t)
         why = machine_deps.stale(driver, self.root)
         yield miss("provisioning on %s predates its inputs: %s" % (t, why), "wk machine setup %s" % t) if why else \
             ok("provisioned from this tree's remote/provision.sh + remote/deps.sh")

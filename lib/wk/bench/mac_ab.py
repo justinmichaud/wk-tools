@@ -9,7 +9,7 @@ import os
 import plistlib
 import shlex
 
-from wk import act, fleet, notify, presets, record as wkrecord, samply, sched
+from wk import act, fleet, presets, record as wkrecord, samply, sched
 from wk.act import die, info, log, warn
 from wk.bench import record
 from wk.bench.ab import PLANTED, Task, check_plan, cost_line, flags, pair, refuse
@@ -478,10 +478,6 @@ class Plant(Task):
                 said = True
             self.clock.sleep(BOOT_POLL)
 
-    def notify(self, headline, detail):
-        if not notify.send(self.root, headline, detail, "mac-ab", env=self.env, machine=self.here):
-            warn("  could not send the notification '%s'" % headline)
-
     def outcome(self, came):
         n, vol = self.name, self.d.c("volume") or "the bench install"
         if came == "bench":
@@ -493,7 +489,6 @@ class Plant(Task):
         why, fix = {"host": ("came back to host mode", "the reboot did not enter '%s'; %s" % (vol, STARTUP_DISK % vol)),
                     "noreboot": ("never rebooted", "reboot %s by any means, the startup manager too, and it runs by itself" % n)}[came]
         warn("%s %s, so the A/B has not run. The job is planted and still valid: %s." % (n, why, fix))
-        self.notify("mac-ab: %s %s" % (n, why), "the A/B has not run. The job is planted and still valid: %s." % fix)
 
     def go(self):
         self.check()
@@ -525,9 +520,6 @@ class Plant(Task):
                 info("planted and not started. The A/B runs the next time the bench install boots.")
                 return 0
             self.restart()
-            self.notify("mac-ab planted on %s" % self.name, "%s, %d-%s rounds, count %s. Arms %s / %s. %s has gone down to measure; "
-                        "then 'wk bench ab --devices %s --collect'." % (" ".join(self.plans), self.rounds, self.o["max_rounds"], self.o["count"],
-                                                                 self.a, self.b, self.name, self.name))
             self.outcome(self.wait())
             return 0
         finally:

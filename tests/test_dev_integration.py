@@ -667,7 +667,7 @@ class TestTheEvidence(unittest.TestCase):
                          credential_problems(rows, CREDENTIALS + ("fork push key",)))
 
     def test_a_credential_doctor_never_named_is_a_problem(self):
-        self.assertEqual(["ntfy: not in wk doctor's output at all"], credential_problems({}, ("ntfy",)))
+        self.assertEqual(["litellm: not in wk doctor's output at all"], credential_problems({}, ("litellm",)))
 
     def test_what_step_2_does_follows_the_record(self):
         for rec, want in ((None, "new"), ({"ws": "creating", "state": "creating"}, "new"),

@@ -90,12 +90,6 @@ class Key(Creds, DeployKeys, Election, Check):
     def show(self):
         for fork, repo in [f[:2] for f in self.push_keys()]:
             self.out.write("# %s\n%s\n" % (repo, self.pub_of(fork)))
-        # The topic name is the whole ntfy credential, so this is the one reader that prints it: a second phone joins the topic already minted.
-        if self.present("ntfy"):
-            self.out.write("# ntfy -- %s\n%s%s\n" % (self.rule("ntfy", "remedy"), self.rule("ntfy", "url"),
-                                                      (self.sec.cred_read("ntfy") or "").rstrip("\n")))
-        else:
-            self.out.write("# ntfy -- no topic on this machine: wk key set ntfy\n")
         return 0
 
     def give(self, what):

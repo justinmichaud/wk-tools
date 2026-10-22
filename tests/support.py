@@ -64,7 +64,6 @@ NO_GITHUB = "http://127.0.0.1:1"
 TAILSCALE_KNOWS_NOTHING = "echo '{}'\n"
 os.environ["WK_GITHUB_API"] = NO_GITHUB
 os.environ["WK_TAILNET_API"] = NO_GITHUB
-os.environ["WK_NTFY_API"] = NO_GITHUB
 os.environ["WK_ANTHROPIC_API"] = NO_GITHUB
 os.environ["WK_LITELLM_API"] = NO_GITHUB
 os.environ["WK_BUGZILLA_API"] = NO_GITHUB
@@ -116,7 +115,6 @@ def _clean_env(extra=None, wk_root=False):
     env["WK_HOST_SECRETS"] = NO_SECRETS
     env["WK_GITHUB_API"] = NO_GITHUB
     env["WK_TAILNET_API"] = NO_GITHUB
-    env["WK_NTFY_API"] = NO_GITHUB
     env["WK_ANTHROPIC_API"] = NO_GITHUB
     env["WK_LITELLM_API"] = NO_GITHUB
     env["WK_BUGZILLA_API"] = NO_GITHUB

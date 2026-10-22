@@ -45,7 +45,7 @@ def where(args, reg):
 
 
 COMMAND = Command(where=where, name="optional", readonly=True, group="hosts", opts=(
-    Opt("--all", "also ask every build machine for its tools, identity, variables, credentials and provisioning, and "
+    Opt("--all", "also ask every build machine for its provisioning, and "
         "every bench machine what `wk doctor <machine>` asks it"),
     Opt("--probe-store", "the store's key=value facts alone, for the host that asks the podman VM"),
     Opt("--probe-tools", "this checkout's sha= and dirty= alone, for a machine comparing its wk-tools with this one's"),
