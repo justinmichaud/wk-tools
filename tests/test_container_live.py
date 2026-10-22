@@ -206,8 +206,9 @@ class TestBuiltWorkspace(unittest.TestCase):
         self.assertTrue(lldb.expect(r"Process [0-9]+ launched: .*/jsc", 600), "lldb did not launch jsc:\n" + tail(lldb.out))
         self.assertTrue(lldb.expect(r"(?m)^\(lldb\) $", 300), "no lldb prompt after the launch:\n" + tail(lldb.out))
         lldb.send("continue\n")
-        self.assertTrue(lldb.expect(r"^WK-LLDB-1$", 600), "jsc did not print under lldb:\n" + tail(lldb.out))
-        lldb.send("quit\n")
+        self.assertTrue(lldb.expect(r"WK-LLDB-1", 600), "jsc did not print under lldb:\n" + tail(lldb.out))
+        self.assertTrue(lldb.expect(r"Process [0-9]+ exited with status = 0", 120), "jsc did not exit 0 under lldb:\n" + tail(lldb.out))
+        lldb.send("quit\n")   # with jsc gone, lldb asks nothing and ends
         rc = lldb.wait(120)
         lldb.close()
         self.assertEqual(rc, 0, tail(lldb.out))
