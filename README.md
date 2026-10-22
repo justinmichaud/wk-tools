@@ -285,8 +285,10 @@ exec`, the guest agent's own channel, never the network (macOS refuses a
 launchd job's connection to a guest). The `wk-<name>` alias the editor uses
 reaches the guest's sshd the same way: its ProxyCommand runs `nc 127.0.0.1 22`
 under `tart exec`. A guest mounts one host directory: the mirror, read-only
-on its own tag, `wk-mirror`, which a LaunchDaemon the base installs mounts at
-boot under `/Volumes/wk-mirror`.
+on its own tag, `wk-mirror`, mounted at boot under `/Volumes/wk-mirror` by
+one of the three launchd jobs the base keeps for itself (`lib/wk/daemons.py`
+renders them as it does the host's: the mirror mount, the `caffeinate` that
+keeps the guest awake, and the agent that sets its display at login).
 Each start forwards the host's request broker to `~/.wk-broker.sock` in the
 guest, so `wk sync` in there asks the broker as a container does, and the
 guest's own socket on the push service to `~/.wk-push.sock`, so a push in there

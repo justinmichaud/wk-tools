@@ -1,5 +1,5 @@
-"""lib/wk/daemons.py over a fake machine: the rows' renderings, the program stamp, one ensure under systemd and under
-launchd, the prune, the dry run and the kill points."""
+"""lib/wk/daemons.py over a fake machine: the rows' renderings (the guest's three jobs exactly), the program stamp, one
+ensure under systemd and under launchd in both domains, the prune, the dry run and the kill points."""
 import contextlib
 import glob
 import io
@@ -14,12 +14,16 @@ from tests.support import REPO, WkTest
 sys.path.insert(0, str(REPO / "lib"))
 from wk import daemons  # noqa: E402
 from tests.fakes import FakeClock  # noqa: E402
+from wk.act import Refused  # noqa: E402
 from wk.daemons import Daemon  # noqa: E402
 from wk.machine import Result  # noqa: E402
+from wk.places import GUEST_MIRROR_MOUNT, GUEST_MOUNT_MIRROR, MIRROR_TAG  # noqa: E402
 
 HOME = "/home/u"
 UNITS = HOME + "/.config/systemd/user/"
 AGENTS = HOME + "/Library/LaunchAgents/"
+DAEMONS = "/Library/LaunchDaemons/"
+SUDO = ("sudo", "-n")
 
 
 def quiet(fn, *a):
@@ -29,7 +33,8 @@ def quiet(fn, *a):
 
 
 class Box(fakes.World):
-    """systemd and launchd as sets: `active` units, `loaded` labels, `serving` sockets; a name in `refuse` never starts."""
+    """systemd and launchd as sets: `active` units, `loaded` labels, `serving` sockets; a name in `refuse` never starts.
+    launchctl answers under `sudo -n` as it does bare, and a `sudo -n tee` lands what was piped into it."""
 
     def __init__(self):
         super().__init__(name="box")
@@ -39,12 +44,19 @@ class Box(fakes.World):
         self.react(["systemctl", "--user", "is-active"], lambda a, f: Result(0 if a[-1] in f.active else 3))
         self.react(["systemctl", "--user", "enable"], lambda a, f: Result(1) if a[-1] in f.refuse else f.active.add(a[-1]) or Result(0))
         self.react(["systemctl", "--user", "disable"], lambda a, f: f.active.discard(a[-1]) or Result(0))
-        self.react(["launchctl", "print"], lambda a, f: Result(0 if a[-1].rsplit("/", 1)[1] in f.loaded else 113))
-        self.react(["launchctl", "bootout"], self._bootout)
-        self.react(["launchctl", "bootstrap"], self._bootstrap)
-        self.react(["launchctl", "kickstart"], self._kickstart)
+        for pre in ((), SUDO):
+            self.react([*pre, "launchctl", "print"], lambda a, f: Result(0 if a[-1].rsplit("/", 1)[1] in f.loaded else 113))
+            self.react([*pre, "launchctl", "bootout"], self._bootout)
+            self.react([*pre, "launchctl", "bootstrap"], self._bootstrap)
+            self.react([*pre, "launchctl", "kickstart"], self._kickstart)
+        self.react([*SUDO, "tee"], lambda a, f: f._set_file(a[-1], f.stdin) or Result(0))
+        self.react([*SUDO, "rm", "-f"], lambda a, f: f._drop(a[-1]) or Result(0))
         self.react(["python3", "-c", daemons.SOCKET_ANSWERS], lambda a, f: Result(0 if a[-1] in f.serving else 1))
-        self.lock_held = []
+        self.lock_held, self.stdin = [], None
+
+    def run(self, argv, input=None, timeout=None, stream=False):
+        self.stdin = input
+        return super().run(argv, input=input, timeout=timeout, stream=stream)
 
     def _bootout(self, a, f):
         label = a[-1].rsplit("/", 1)[1]
@@ -113,11 +125,35 @@ class TestTheRenderings(DaemonTest):
     def test_an_agent_is_kept_alive_from_login_or_started_on_demand(self):
         sup = daemons.Launchd(self.box, "/r", "/logs", self.clock)
         for boot in (True, False):
-            doc = plistlib.loads(sup.render(Daemon("proxy", {"A": "1"}, "/s", boot=boot), {"A": "1"}).encode())
+            doc = plistlib.loads(sup.render(Daemon("proxy", {"A": "1"}, "/s", boot=boot, keep=boot), {"A": "1"}).encode())
             self.assertEqual((doc["Label"], doc["RunAtLoad"], doc["KeepAlive"]), ("com.wk.proxy", boot, boot))
             self.assertEqual(["/usr/bin/python3", "/r/container/proxy/wk-proxy.py"], doc["ProgramArguments"])
             self.assertEqual(("1", daemons.LAUNCHD_PATH), (doc["EnvironmentVariables"]["A"], doc["EnvironmentVariables"]["PATH"]))
             self.assertEqual("/logs/proxy.log", doc["StandardErrorPath"])
+
+    def test_the_guests_three_jobs_render_exactly_and_carry_no_stamp(self):
+        sup = daemons.Launchd(self.box, "/r", "/logs", self.clock)
+        rows = daemons.guest_rows("/Users/admin", "1280x800")
+        self.assertEqual(daemons.GUEST_WORDS, tuple(rows))
+        self.assertEqual(("system", "system", "user"), tuple(rows[w].domain for w in daemons.GUEST_WORDS))
+        jobs = {"nosleep": (["/usr/bin/caffeinate", "-dimsu"], True),
+                "mirror": ([GUEST_MOUNT_MIRROR, MIRROR_TAG, GUEST_MIRROR_MOUNT], {"SuccessfulExit": False}),
+                "display": (["/Users/admin/.local/bin/wk-set-display", "1280", "800"], False)}
+        for word, (argv, keep) in jobs.items():
+            with self.subTest(word):
+                want = plistlib.dumps({"Label": "com.wk." + word, "ProgramArguments": argv,
+                                       "EnvironmentVariables": {"PATH": daemons.LAUNCHD_PATH}, "RunAtLoad": True, "KeepAlive": keep,
+                                       "StandardOutPath": "/logs/%s.log" % word, "StandardErrorPath": "/logs/%s.log" % word}).decode()
+                self.assertEqual(want, sup.body(rows[word]))
+                self.assertNotIn("WK_PROGRAM_STAMP", want)
+
+    def test_a_systemd_user_unit_refuses_a_command_outside_the_programs_and_the_system_domain(self):
+        for row, why in ((daemons.guest_rows("/h", "1x1")["nosleep"], "runs a command outside PROGRAMS"),
+                         (Daemon("proxy", {}, domain="system"), "is in the system domain")):
+            err = io.StringIO()
+            with self.subTest(why), contextlib.redirect_stderr(err), self.assertRaises(Refused):
+                self.systemd().render(row, {})
+            self.assertIn("a systemd user unit cannot hold %s: it %s" % (row.word, why), err.getvalue())
 
 
 class TestTheProgramStamp(WkTest):
@@ -263,7 +299,11 @@ class TestLaunchd(RendererConformance, DaemonTest):
         return AGENTS + self.name() + ".plist"
 
     def row(self, word="github-inject", boot=True):
-        return Daemon(word, {"SOCK": "/s/%s.sock" % word}, "/s/%s.sock" % word, boot=boot, lock=self.login if word == "github-inject" else None)
+        return Daemon(word, {"SOCK": "/s/%s.sock" % word}, "/s/%s.sock" % word, boot=boot, keep=boot,
+                      lock=self.login if word == "github-inject" else None)
+
+    def acts(self):
+        return [e[1] for e in self.box.effects if e[0] == "act"]
 
     def converge(self, word="proxy"):
         self._sup.changes = []
@@ -291,7 +331,7 @@ class TestLaunchd(RendererConformance, DaemonTest):
 
     def test_an_on_demand_agent_is_bootstrapped_then_kickstarted(self):
         self.assertTrue(quiet(self._sup.ensure, self.row("proxy", boot=False))[0])
-        self.assertIn(("run", ("launchctl", "kickstart", self._sup.svc("proxy"))), self.box.effects)
+        self.assertIn(("run", ("launchctl", "kickstart", self._sup.svc(self.row("proxy")))), self.box.effects)
         self.assertIn("/s/proxy.sock", self.box.serving)
 
     def test_a_bootstrap_launchd_refuses_is_named_with_where_to_look(self):
@@ -305,6 +345,56 @@ class TestLaunchd(RendererConformance, DaemonTest):
         self.converge("push")
         self.assertGreaterEqual(sum(self.clock.slept), daemons.READY_WAIT)
 
+    def guest(self, word, display="1280x800"):
+        self._sup.changes = []
+        ok, err = quiet(self._sup.ensure, daemons.guest_rows(HOME, display)[word])
+        return ok, err, self._sup.changes
+
+    def test_a_system_job_is_written_and_bootstrapped_under_sudo_and_is_served_once_loaded(self):
+        plist = DAEMONS + "com.wk.nosleep.plist"
+        self.assertEqual((True, ["start com.wk.nosleep"]), self.guest("nosleep")[::2])
+        self.assertEqual([(*SUDO, "tee", plist), (*SUDO, "launchctl", "bootstrap", "system", plist)], self.acts())
+        self.assertEqual(self._sup.body(daemons.guest_rows(HOME, "1280x800")["nosleep"]), self.box.files[plist])
+        self.assertIn(("run", (*SUDO, "launchctl", "print", "system/com.wk.nosleep")), self.box.effects)
+        self.assertNotIn("kickstart", str(self.box.effects), "a job without a socket is serving once loaded")
+        self.box.effects.clear()
+        self.assertEqual((True, []), self.guest("nosleep")[::2])
+        self.assertEqual([], self.acts())
+
+    def test_a_changed_system_job_is_booted_out_rewritten_and_bootstrapped_in_that_order(self):
+        self.guest("mirror")
+        self.box.effects.clear()
+        with mock.patch("wk.places.GUEST_MIRROR_MOUNT", "/Volumes/elsewhere"):
+            self.assertEqual((True, ["restart com.wk.mirror"]), self.guest("mirror")[::2])
+        plist = DAEMONS + "com.wk.mirror.plist"
+        self.assertEqual([(*SUDO, "launchctl", "bootout", "system/com.wk.mirror"), (*SUDO, "tee", plist),
+                          (*SUDO, "launchctl", "bootstrap", "system", plist)], self.acts())
+        self.assertIn("/Volumes/elsewhere", self.box.files[plist])
+
+    def test_the_display_agent_is_the_users_own_and_set_from_the_display_asked_for(self):
+        self.assertEqual((True, ["start com.wk.display"]), self.guest("display", "1920x1200")[::2])
+        plist = AGENTS + "com.wk.display.plist"
+        self.assertEqual([("launchctl", "bootstrap", "gui/%d" % os.getuid(), plist)], self.acts())
+        doc = plistlib.loads(self.box.files[plist].encode())
+        self.assertEqual(([HOME + "/.local/bin/wk-set-display", "1920", "1200"], False), (doc["ProgramArguments"], doc["KeepAlive"]))
+
+    def test_a_system_job_launchd_refuses_names_sudo_launchctl_print(self):
+        self.box.refuse.add("com.wk.nosleep")
+        ok, err, _ = self.guest("nosleep")
+        self.assertFalse(ok)
+        self.assertIn("com.wk.nosleep did not reach readiness -- the guest sleeps between builds", err)
+        self.assertIn("sudo -n launchctl print system/com.wk.nosleep; the log is /logs/nosleep.log", err)
+
+    def test_a_stale_system_job_is_booted_out_and_removed_under_sudo(self):
+        self.box.write(DAEMONS + "com.wk.old.plist", "x")
+        self.box.write(DAEMONS + "org.other.plist", "x")
+        self.box.loaded.add("com.wk.old")
+        self.box.effects.clear()
+        quiet(self._sup.prune, daemons.GUEST_WORDS)
+        self.assertEqual([(*SUDO, "launchctl", "bootout", "system/com.wk.old"), (*SUDO, "rm", "-f", DAEMONS + "com.wk.old.plist")],
+                         self.acts())
+        self.assertEqual(({DAEMONS + "org.other.plist"}, set()), (set(self.box.files), self.box.loaded))
+
 
 class TestTheCommand(DaemonTest):
     def test_the_podman_machine_runs_three_rows_from_its_mount_over_podman_machine_ssh(self):
@@ -312,6 +402,20 @@ class TestTheCommand(DaemonTest):
         self.assertEqual(sup.m.kind, "podman")
         self.assertEqual(("/opt/wk-tools", "podman machine ssh m1 -- ", ("proxy", "push", "github-inject")), (sup.root, sup.journal, words))
         self.assertEqual("", rows["github-inject"].env["WK_INJECT_CLAUDE_LOGIN"])
+
+    def test_a_guest_runs_its_three_jobs_from_its_own_tree_and_home(self):
+        sup, rows, words = daemons.place("guest", {"HOME": "/Users/admin", "WK_VM_DISPLAY": "1920x1200"})
+        self.assertEqual(("here", daemons.TREE, "/Users/admin/.local/state/wk", daemons.GUEST_WORDS), (sup.m.name, sup.root, sup.logs, words))
+        self.assertEqual(("/Users/admin/.local/bin/wk-set-display", "1920", "1200"), rows["display"].argv)
+        self.assertEqual((GUEST_MOUNT_MIRROR, MIRROR_TAG, GUEST_MIRROR_MOUNT), rows["mirror"].argv)
+        with mock.patch.object(daemons, "place", lambda where, env: (daemons.Launchd(self.box, "/r", "/logs", self.clock), rows, words)):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                daemons.main(["guest", *words], {})
+            self.assertEqual("changed 'start com.wk.nosleep'\nchanged 'start com.wk.mirror'\nchanged 'start com.wk.display'\n", out.getvalue())
+            with self.assertRaises(SystemExit) as cm:
+                daemons.main(["guest", "proxy"], {})
+        self.assertIn("guest runs no proxy", str(cm.exception))
 
     def test_a_stage_reads_one_changed_line_per_change_and_an_unknown_word_is_refused(self):
         sup = self.systemd()

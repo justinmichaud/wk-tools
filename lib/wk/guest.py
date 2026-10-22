@@ -124,7 +124,7 @@ class Host:
                 "broker": Daemon("broker", {"WK_ROOT": self.root, "WK_STORE": store.store_dir(),
                                             "WK_BROKER_PUBLISH_MACHINE": store.podman_machine()}, store.runtime_socket()),
                 "push": Daemon("push", {"WK_PUSH_SOCKET": push, "WK_PUSH_GUEST_DIR": self.dir}, push),
-                "proxy": Daemon("proxy", proxy, at, boot=False)}
+                "proxy": Daemon("proxy", proxy, at, boot=False, keep=False)}
 
     def ensure(self, word):
         self.machine.mkdir(self.dir)

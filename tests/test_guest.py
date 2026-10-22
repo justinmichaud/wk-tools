@@ -597,11 +597,22 @@ class TestTheLiveWayIn(_LiveGuest):
         g.kill(pid)
 
     def test_vm_mirror_tag_mount(self):
-        """`live vm.mirror_tag_mount`: the base's LaunchDaemon mounted the mirror's own tag at boot, where mirror_dir is."""
+        """`live vm.mirror_tag_mount`: the base's mirror job mounted the mirror's own tag at boot, where mirror_dir is."""
         vm, ws = self.found
         r = vm.exec(ws, ["sh", "-c", "mount | grep -F %s && test -d %s" % (shlex.quote(" on %s (" % places.GUEST_MIRROR_MOUNT),
                                                                         shlex.quote(vm.mirror_dir()))], timeout=60)
         self.assertTrue(r.ok, r.out + r.err)
+
+    def test_vm_guest_jobs(self):
+        """`live vm.guest_jobs[<job>]`: the three jobs the base renders for itself (daemons.guest_rows) are loaded in a
+        running guest, nosleep and mirror in launchd's system domain and display in the user's, running what the row says."""
+        vm, ws = self.found
+        for word, row in daemons.guest_rows(vm.home(), guest.display(vm.env)).items():
+            with self.subTest(job=word):
+                sudo, domain = ("sudo -n ", "system") if row.domain == "system" else ("", 'gui/$(id -u)')
+                r = vm.exec(ws, ["sh", "-c", "%slaunchctl print %s/com.wk.%s" % (sudo, domain, word)], timeout=60)
+                self.assertTrue(r.ok, r.out + r.err)
+                self.assertIn(" ".join(row.argv), " ".join(r.out.split()))
 
     def test_vm_ssh_transport(self):
         """`live vm.ssh_transport`: ssh over the guest's sshd on tart exec answers, as the editor's alias and the
