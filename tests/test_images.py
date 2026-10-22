@@ -41,7 +41,7 @@ class TestTheLoader(ScratchRoot):
 
     def test_a_second_load_inherits_nothing_from_the_first(self):
         self.conf("a", "IMG_MACHINE=rpi5\nCFG_NEEDS=\"x\"\n")
-        self.conf("b", "IMG_BUILDER=pmos\n")
+        self.conf("b", "IMG_BUILDER=guest\n")
         images.load("a", self.env)
         b = images.load("b", self.env)
         self.assertEqual((b["IMG_MACHINE"], b["CFG_NEEDS"]), ("", ""))
@@ -117,7 +117,7 @@ class TestTheImageWorkspace(unittest.TestCase):
         self.assertEqual(images.image_ws(PRESET + "@moose", STORE), WS)
 
     def test_a_host_builder_or_no_preset_names_none(self):
-        for spec in ("bridge-pinephone", "recovery-pinephone", "nosuch"):
+        for spec in ("macos-guest-base", "nosuch"):
             with self.subTest(spec=spec):
                 self.assertEqual(images.image_ws(spec, STORE), "")
 

@@ -648,7 +648,7 @@ class TestStatusCarriesTheLegs(WkTest):
         self.assertRegex(out, r"warmup\s+B\s+speedometer3\s+92s")
         self.assertRegex(out, r"-\s+B\s+motionmark\s+running")
         self.assertEqual(2, len([l for l in out.splitlines() if re.match(r"warmup\s+[AB]\s", l)]))
-        self.assertRegex(out, r"warmup captures: none in .*/warmup")
+        self.assertRegex(out, r"warmup profiles: none in .*/warmup")
 
     def test_a_job_that_has_not_started_says_so_rather_than_listing_the_volume(self):
         self.assertIn("no leg of this job", self._legs(started=""))
@@ -664,7 +664,7 @@ class TestStatusCarriesTheLegs(WkTest):
             w.mkdir(parents=True)
             (w / "speedometer3-A.json.gz").write_bytes(b"")
             cp = bash('python3 "$WK_ROOT/lib/wkdata.py" ab-legs %s' % shlex.quote(str(root)))
-            self.assertIn("warmup captures: speedometer3-A.json.gz", cp.stdout)
+            self.assertIn("warmup profiles: speedometer3-A.json.gz", cp.stdout)
 
 
 class TestTheDriverAnswersFromAnotherMachine(WkTest):

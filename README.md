@@ -26,8 +26,6 @@ Credentials required for git, git-webkit, github, claude, etc are held outside e
 
 **bench machine** - a board or Mac that can be booted into a system for perf testing, in `machines/<name>.conf`
 
-**bridge** - a device running pmOS connecting an ethernet port to the network, in `machines/<name>.conf`. This is currently only used to connect my bmc to tailnet.
-
 **bench system** — the OS image on a bench machine that gets measured
 
 built by `wk sysimage build`, written to a card by `wk sysimage write`, armed for one
@@ -118,7 +116,7 @@ groups:
   exception, since the editor runs where you typed the command: it asks the
   machine holding the workspace for a route and opens that from here.
 - **This host's own hardware, refused inside a workspace and on a
-  build machine.** `machine`, `key`, `quiesce`, `boot`, `sysimage`, `gc`. These act on fleet devices, bridges, or this machine's own
+  build machine.** `machine`, `key`, `quiesce`, `boot`, `sysimage`, `gc`. These act on fleet devices or this machine's own
   provisioning, so they never run against a checkout inside a sandbox, and a
   shared build box refuses them too — a build box builds, it does not own
   fleet hardware.
@@ -149,7 +147,7 @@ never one below.
 
 | layer | what it holds | rule |
 | --- | --- | --- |
-| `home` | the fleet as facts: `machines/*.conf`, the tailnet, bridges, the BMC | config only; nothing imports it, every layer reads it |
+| `home` | the fleet as facts: `machines/*.conf`, the tailnet | config only; nothing imports it, every layer reads it |
 | `lab` | places and drivers, the fleet walk, sysimage, boot, quiesce and session, the bench pipeline's mechanics | knows nothing of WebKit |
 | `wk` | the WebKit kit: build presets, `Tools/Scripts` wrappers, plans, PGO, the PR flow | wraps `Tools/Scripts`, never replaces it; drives places through `lab` |
 | `field` | what reads results: reports, crash dumps, symbolication | consumes `wk`; nothing depends on it |
@@ -465,7 +463,7 @@ wk bench ab wpe:1725 --devices rpi3-32,rpi4-32,rpi5-64 --dry-run   # every step 
 wk bench ab wpe:1725 --devices rpi4 --bits 32 --plan jetstream3 --rounds 8 --yes --detach
 wk bench ab <task> --kill
 wk bench ab <sha> --base <sha> --release 2.38 --devices rpi3       # A/A: the noise floor
-wk bench ab --systems <id-a>,<id-b> --devices rpi5 --workspace <image-ws>   # two system images, one slot
+wk bench ab --systems <id-a>,<id-b> --devices rpi5 --workspace <image-ws>   # two bench systems, one slot
 wk bench report <task> --html
 ```
 
@@ -555,26 +553,11 @@ wk boot --list
 
 Every machine is one `machines/<name>.conf`, named as the CLI names it, with a
 `kind`: `build` or `peer` (a place), `board`, `mac` or `guest` (a bench
-machine), or `bridge`. Values are literals. A bench role that is also a peer
+machine). Values are literals. A bench role that is also a peer
 names the peer (`ssh=<peer>`). A place whose `hostname -s`
 is not its name says what it is (`hostname`): that is how its far
 end knows which machine it is, however many share its home. A conf in
 `~/.config/wk/machines/` sets keys over the shared one's, for this device only.
-
-**Provision a bridge phone**
-
-```sh
-wk sysimage build recovery-pinephone        # Jumpdrive: 'wk sysimage write' it to a card, boot the phone
-                                             # from it, and its internal storage appears on that machine
-wk sysimage disks rpi5                       # which device the phone's storage is
-wk machine setup tailnet-bridge-generic --disk rpi5:/dev/sda
-                                             # writes the bridge image there, prints the hand steps,
-                                             # waits for the phone, applies the role, prints the policy
-wk machine setup tailnet-bridge-generic      # re-apply: renders the role here, the phone applies it
-wk machine tailnet tailnet-bridge-generic    # the tailnet join alone, after setup --no-tailnet
-wk machine status tailnet-bridge-generic     # its health check; no name: every bridge
-wk machine rm tailnet-bridge-generic         # the role and its tailnet login go; postmarketOS stays
-```
 
 **An agent in a workspace**
 
@@ -873,8 +856,6 @@ inside a container).
 - `WK_MAC_BENCH_HOLD` seconds the Mac bench autorun stays up after its last job (default 900).
 - `WK_MAC_BENCH_SSH` the ssh destination of the Mac's bench install, over the conf's `bench_ssh`.
 - `WK_MAC_BENCH_TOOLS` where the wk-tools checkout is on the Mac's bench install.
-- `WK_PMOS_HOST` the postmarketOS build host, over the image preset's `PMO_BUILD_HOST`.
-- `WK_PMOS_ROOT` the postmarketOS build root on that host (default `~/wk-pmos`).
 - `WK_QUIESCE_STATE` the directory quiesce records live in (default `~/.local/state/wk/quiesce`).
 - `WK_NTFY_API` the ntfy server notifications are published to (default `https://ntfy.sh`).
 - `WK_SCREEN_WATCH_SECONDS` how often the screen watch samples (default 10).

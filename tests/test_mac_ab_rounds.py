@@ -375,9 +375,9 @@ class TestTheLiveRows(unittest.TestCase):
 
     @requires_machine("tolken")
     def test_bench_warmup_profile_mbp(self):
-        """`live bench.warmup_profile[<s>]` for mbp, its read-only half: --status names the warmup's captures."""
+        """`live bench.warmup_profile[<s>]` for mbp, its read-only half: --status names the warmup's profiles."""
         err = self.back("status")
-        self.assertTrue("warmup captures" in err or "nothing on mbp is readable" in err, err)
+        self.assertTrue("warmup profiles" in err or "nothing on mbp is readable" in err, err)
 
 
 if __name__ == "__main__":

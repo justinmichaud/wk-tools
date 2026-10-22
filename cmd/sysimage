@@ -9,7 +9,7 @@
 # wk: sub build,webkit,disks,holds,path takes=2
 # wk: sub holds opts=--slot=,--commit=,--preset=,--workspace=,--toolchain
 # wk: sub path opts=--workspace=
-# wk: sub build opts=--workspace=,--detach,--stop,--resume,--stage=,--commit=,--slot=,--preset=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
+# wk: sub build opts=--workspace=,--detach,--stop,--stage=,--commit=,--slot=,--preset=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
 # wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--preset=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet
 # wk: sub write opts=--from=,--disk=,--image-preset=,--machine=,--rescue,--grow,--no-grow
 #
@@ -33,8 +33,6 @@
 #                   --stage layers|fetch|image|toolchain|webkit|pgo-mix
 #                   (default image; pgo-mix takes --slot)
 #       buildroot   --workspace, --detach, --stop
-#       pmos        --detach, --resume (on a Linux aarch64 machine over ssh)
-#       fetch       no options
 #       mac-volume  on the Mac, one of --create, --fetch [--version <v>],
 #                   --install (erases the volume, reboots), --provision (in
 #                   bench mode), --repair, --build-pkg, --all [--version <v>];

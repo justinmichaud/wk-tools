@@ -17,11 +17,6 @@ FIELDS = {
     "BR_TREE_URL": "", "BR_TREE_BRANCH": "", "BR_TREE_COMMIT": "", "BR_DEFCONFIG": "",
     "BR_OVERLAY_TAILSCALE": "", "BR_EXTERNAL": "", "BR_IMAGE": "",
     "BR_KERNEL_DEB_URL": "", "BR_KERNEL_DEB_SHA256": "", "BR_KERNEL_RELEASE": "",
-    "FET_URL": "", "FET_SHA256": "", "FET_XZ": "", "FET_NOTE": "", "FET_DEVICE": "",
-    "PMO_DEVICE": "", "PMO_UI": "", "PMO_CHANNEL": "", "PMO_PMB_VERSION": "",
-    "PMO_USER": "", "PMO_PASSWORD": "", "PMO_PACKAGES": "", "PMO_EXTRA_SPACE": "",
-    "PMO_BRIDGE": "", "PMO_BUILD_HOST": "", "PMO_WIFI_BANDS": "",
-    "PMO_KERNEL_APORT": "", "PMO_KCONFIG": "",
 }
 MARKER = "/etc/wk-image"
 WS_BUILDERS = ("yocto", "buildroot")
@@ -143,7 +138,6 @@ def spec_place(machine, here, default):
 
 
 def image_ws(spec, env=None):
-    """`<builder>-<preset>`, or "" for a builder that builds on the host, or no preset at all."""
     preset = spec_preset(spec)
     try:
         builder = load(preset, env)["IMG_BUILDER"]
@@ -187,7 +181,6 @@ def slot_dir(ws, slot, env=None):
 
 
 def toolchain_holds(ws, cross_target, env=None):
-    """The cross toolchain helper's own test of an installed SDK, which lib/wk/sysimage/yocto_ws.py reads too."""
     d = os.path.join(Store(env).ws_dir(ws), "build", "CrossToolChains", cross_target, "build", "toolchain")
     if not os.path.isfile(os.path.join(d, ".toolchain_path_configured")):
         return False

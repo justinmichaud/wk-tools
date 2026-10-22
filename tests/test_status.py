@@ -104,10 +104,9 @@ class TestReprovisionLine(unittest.TestCase):
                  "reprovision": "wk sysimage build p\nwk boot rpi4"},
                 {"kind": "fleet", "machine": "rpi5", "role": "workstation", "mode": "host mode", "media": "nvme",
                  "reprovision": "wk sysimage build p2\nwk boot rpi5"},
-                {"kind": "bridge", "name": "some-bridge", "device": "d", "segment": "s"},
                 {"kind": "exit", "code": 0}]
         out = render(recs, "text").stdout
-        for text in ("by role", "a rescue system", "a bench system", "a workstation", "a tailnet bridge"):
+        for text in ("by role", "a rescue system", "a bench system", "a workstation"):
             self.assertIn(text, out)
 
 
@@ -123,17 +122,16 @@ class TestFleetDeviceRecord(unittest.TestCase):
         self.assertEqual(rec["conf"], "machines/rpi4.conf")
 
     def test_the_mode_words(self):
-        for probeable, mode, bridge, want in (("no", "", "", "unknown from here"), ("yes", "host", "", "host mode"),
-                                               ("yes", "base abc", "", "base image -- not a bench system"),
-                                               ("yes", "bench abc", "", "bench mode"), ("yes", "", "", "unreachable"),
-                                               ("yes", "unreachable", "phone", "unreachable via phone")):
-            self.assertEqual(status.fleet_mode(probeable, mode, bridge), want)
+        for probeable, mode, want in (("no", "", "unknown from here"), ("yes", "host", "host mode"),
+                                      ("yes", "base abc", "base image -- not a bench system"),
+                                      ("yes", "bench abc", "bench mode"), ("yes", "", "unreachable")):
+            self.assertEqual(status.fleet_mode(probeable, mode), want)
 
     def test_a_probe_that_said_nothing_is_no_record(self):
         self.assertIsNone(status.fleet_record("x", self.CONF, {}, 4))
 
     def test_the_fields_land_where_the_renderer_reads_them(self):
-        fields = dict(role="workstation", probeable="yes", mode="host", bridge="", armed="img-1", media="usb",
+        fields = dict(role="workstation", probeable="yes", mode="host", armed="img-1", media="usb",
                       reprovision="wk boot x", tailnet="x 1.2.3.4 (up)", direct="")
         rec = status.fleet_record("x", self.CONF, fields, 4)
         self.assertEqual((rec["mode"], rec["armed"], rec["media"], rec["reprovision"]), ("host mode", "img-1", "usb", "wk boot x"))
@@ -141,7 +139,7 @@ class TestFleetDeviceRecord(unittest.TestCase):
         self.assertNotIn("armed_by", rec)
         self.assertIn("** armed for img-1 -- wk boot x --status **", render([rec]).stdout)
 
-    ARMED_FIELDS = dict(role="workstation", probeable="yes", mode="host", bridge="", armed="img-1", media="usb",
+    ARMED_FIELDS = dict(role="workstation", probeable="yes", mode="host", armed="img-1", media="usb",
                         reprovision="", tailnet="", direct="", armed_by="tolken", armed_at="2026-01-01T00:00:00Z")
 
     def test_an_arm_is_desync_once_consumed_stale_or_unreadable(self):
@@ -167,61 +165,6 @@ class TestFleetDeviceRecord(unittest.TestCase):
         out = render([rec]).stdout
         self.assertIn("armed for img-1 by tolken since 2026-01-01T00:00:00Z", out)
         self.assertIn("desync", out)
-
-
-class TestBridgeRecord(unittest.TestCase):
-    """`fields` is bridge/bin/wk-bridge-healthcheck's raw facts (lib/wk/bridge judges them); `facts` missing from
-    an answering, role-carrying phone means the healthcheck itself never ran (no non-interactive root), told
-    apart here from one that ran and found something wrong."""
-
-    CONF = dict({k: v("phone") if callable(v) else v for k, v in fleet.BRIDGE_DEFAULTS.items()},
-                device="pinephone", segment="10.99.1.0/24", note="a phone")
-    HEALTHY = {
-        "facts": "yes", "wifi_iface": "wlan0", "wifi_addr": "192.168.1.5/24", "wifi_power_save": "off",
-        "seg_iface_exists": "yes", "seg_carrier": "1", "seg_addr": "10.99.1.1/24", "seg_usb_speed": "480",
-        "leases_file_nonempty": "yes", "leases_ping": "",
-        # The one blob wk-bridge-healthcheck hands judge(): raw `tailscale status --json`.
-        "ts_status_json": json.dumps({"BackendState": "Running",
-                                       "Self": {"Online": True, "Tags": ["tag:bridge"], "PrimaryRoutes": ["10.99.1.0/24"]}}),
-        "svc_wk-bridge-dhcp": "running", "svc_wk-bridge-nftables": "running", "svc_wk-bridge-netwatch": "running",
-        "svc_wk-bridge-usb-host": "running", "svc_sshd": "running", "svc_chrony": "running", "svc_nm": "running",
-        "svc_tailscale": "running", "nft_table": "yes", "ip_forward": "1",
-        "resolv_exists": "yes", "resolv_nameservers": "1", "resolv_first": "nameserver 1.1.1.1", "dns_resolves": "yes",
-        "clock_year": "2026", "clock_iso": "2026-09-24 00:00 UTC", "sshd_password_auth": "no",
-        "watchdog_device": "yes", "watchdog_fed": "yes", "swap_nonzram": "0", "crashed": "", "uptime": "up 1 day",
-        "battery": "",
-    }
-
-    def _rec(self, fields, want="123"):
-        return status.bridge_record("phone", self.CONF, want, fields, lambda n: ("", ""))
-
-    def test_no_answer_is_unreachable(self):
-        self.assertEqual(self._rec({})["state"], "unreachable")
-
-    def test_answering_with_no_role_names_the_setup(self):
-        rec = self._rec({"reachable": "yes", "role": "no"})
-        self.assertEqual(rec["state"], "no bridge role")
-        self.assertIn("wk machine setup phone", rec["notes"][0]["text"])
-
-    def test_a_healthy_role_at_this_repositorys_sum_is_up(self):
-        rec = self._rec(dict(self.HEALTHY, reachable="yes", role="yes", sum="123"))
-        self.assertEqual((rec["state"], rec["role_insync"]), ("up", True))
-        self.assertNotIn("health", rec)
-
-    def test_a_health_check_that_needs_root_is_told_apart_from_an_unhealthy_one(self):
-        rec = self._rec({"reachable": "yes", "role": "yes", "sum": "999"})
-        self.assertEqual((rec["state"], rec["role_insync"]), ("role installed", False))
-        rec = self._rec(dict(self.HEALTHY, reachable="yes", role="yes", sum="123",
-                              ts_status_json=json.dumps({"BackendState": "Running",
-                                                          "Self": {"Online": True, "Tags": ["tag:bridge"], "PrimaryRoutes": []}})))
-        self.assertEqual(rec["state"], "unhealthy")
-        self.assertIn("no approved subnet route", rec["health"])
-
-    def test_the_role_sum_is_over_the_repositorys_bridge_files(self):
-        want = status.bridge_role_sum(REPO)
-        self.assertTrue(want.isdigit(), want)
-        again = bash('cd bridge && cat $(ls bin/* | sort) $(ls init.d/* | sort) | cksum | awk \'{print $1}\'').stdout.strip()
-        self.assertEqual(want, again)
 
 
 class TestSelfRoleAndMode(unittest.TestCase):

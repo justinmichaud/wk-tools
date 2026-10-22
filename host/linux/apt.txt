@@ -30,29 +30,13 @@ python3
 # and jsc-profile's samply fallback (claude/skills/jsc-profile/SKILL.md) both shell out to it.
 linux-tools-generic
 
-# The pmos image builder (lib/wk/sysimage/pmos_build.py), which runs on a Linux aarch64 machine
-# over ssh and needs root there. pmbootstrap partitions an image file with
-# kpartx and loop devices:
-#
-#   multipath-tools  carries kpartx, which is the name pmbootstrap asks for --
-#                    and the one place where the program and the package are
-#                    called different things. It also brings a multipathd
-#                    daemon, which no other Linux host here has a use for; it is
-#                    installed anyway, because a build host that needs a manual
-#                    apt line is not "one command to flash a phone".
-#   python3-venv     pmbootstrap is pinned to a git tag in a venv of its own;
-#                    every PyPI release of it is yanked
-#   xz-utils         the compressed image the store keeps
-#   rsync            pushes this checkout's lib/, which the build runs from
-multipath-tools
-python3-venv
+# xz-utils: lib/wk/sysimage/write.py decompresses an image on the machine that writes it.
+# rsync: lib/wk/machine.py pushes this checkout's lib/ to a machine.
 xz-utils
 rsync
 
-# PyYAML, because an image's network configuration is derived from the
-# machine's own netplan rather than copied (lib/wk/sysimage/pmos_build.py):
-# the two ends render it with different backends, and getting that wrong
-# produces an image with no network on a board with no cable.
+# PyYAML: admin/wk-card-priv derives a card's network configuration from the
+# machine's own netplan, which the stdlib cannot read.
 python3-yaml
 
 # GPU and the benchmark session on the attached monitor. cage is a one-client

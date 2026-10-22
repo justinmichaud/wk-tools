@@ -6,7 +6,6 @@ import os
 import sys
 
 from wk import act, guest, images, pr, project, reach, rubble as rb, workspace
-from wk.bridge import provision as bridge_provision
 from wk.act import die, info, log, warn
 from wk.bench import mac as benchmac, seed
 from wk.bench.board import SLOTS_DIR
@@ -14,7 +13,7 @@ from wk.clock import Clock
 from wk.lock import Lock, rubble as rubble_of_locks
 from wk.machine import Ssh
 from wk.store import Store, in_vm, rubble as store_rubble
-from wk.sysimage import guestbase, pmos, task
+from wk.sysimage import guestbase, task
 
 
 def build_outputs(store, env):
@@ -22,7 +21,7 @@ def build_outputs(store, env):
             "yocto": os.path.join(store.store_dir(), "cache", "yocto"),
             "fetch": task.cache_dir(env),
             "mac-volume": os.path.join(os.path.dirname(task.cache_dir(env)), "mac-tailnet"),
-            "pmos": None, "guest": None}   # each builds elsewhere, with rows of its own
+            "guest": None}   # builds elsewhere, with rows of its own
 
 
 class Gc:
@@ -64,12 +63,6 @@ class Gc:
     def reach(self):
         return reach.Reach(self.here, self.env, self.reg.fleet)
 
-    def pmos_hosts(self):
-        return pmos.build_hosts(self.env)
-
-    def pmos_machine(self, host):
-        return pmos.ssh_machine(self.reg.fleet, self.env, self.here, host)
-
     def install(self):
         return benchmac.Install(self.root, self.here, self.env)
 
@@ -86,13 +79,11 @@ class Gc:
         if self.store_half:
             rows += self.image_rows() + self.ccache_rows()
         rows += seed.rubble(self.here, lock, os.path.join(self.store.cache_dir(), "bench"))
-        rows += bridge_provision.rubble(self.store, self.here, lock)
         rows += self.runner_rows() + self.build_output_rows()
         rows += workspace.rubble(listed, stored, self.here, self.root, pid is not None and self.here.alive(pid), self.clock)
         if self.host_half:
             rows += pr.rubble(self.store, self.here, lock)
             rows += (guestbase.rubble(vm) + guest.rubble(vm) if vm else []) + self.board_rows() + self.remote_rows()
-            rows += pmos.rubble(self.pmos_hosts(), self.pmos_machine, self.env)
             if self.mac_host:
                 rows += benchmac.rubble(self.install())
         if self.host_half and not self.store_half:

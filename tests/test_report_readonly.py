@@ -73,8 +73,7 @@ class TestTheClassifier(unittest.TestCase):
                      ["ssh", "box", "sh -c 'systemctl restart wk-proxy'"], ["tailscale", "up"]):
             self.assertTrue(acts(argv, ro), argv)
         for argv in (["podman", "machine", "inspect", "wk"], ["tart", "list", "--format", "json"], ["ssh", "-G", "box"],
-                     ["ssh", "box", "cd /x && ./wk status --continued"], ["sudo", "-n", "-l"], ["tailscale", "status", "--json"],
-                     ["ssh", "box", "sudo -n /usr/local/sbin/wk-bridge-healthcheck 2>&1 || true"]):
+                     ["ssh", "box", "cd /x && ./wk status --continued"], ["sudo", "-n", "-l"], ["tailscale", "status", "--json"]):
             self.assertFalse(acts(argv, ro), argv)
 
 

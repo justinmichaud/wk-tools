@@ -1,4 +1,4 @@
-"""`wk machine`: set up and remove the build machines, peers, boards, Macs and bridges in machines/, list the
+"""`wk machine`: set up and remove the build machines, peers, boards, and Macs in machines/, list the
 fleet, and probe for a machine or sweep for every device. Each kind's setup and rm is its own module here."""
 
 import json
@@ -10,13 +10,12 @@ from wk.act import die, info, log, warn
 from wk.kv import ConfError
 from wk.machine import Local, Ssh
 from wk.machine_cmd.board import BoardMachines
-from wk.machine_cmd.bridge import BridgeMachines
 from wk.machine_cmd.build import CONFS, BuildMachines
 from wk.machine_cmd.mac import MacMachines
 from wk.workspace import require_name
 
 
-class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
+class Machines(BuildMachines, BoardMachines, MacMachines):
     def __init__(self, root, env=None, here=None, far=None):
         self.root = str(root)
         self.env = os.environ if env is None else env
@@ -61,7 +60,7 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
             "  that forgets it on every device. 'wk machine setup %s' brings it back." % (self.rel(path), name))
         return 0
 
-    def setup(self, name, kind=None, at=None, no_tailnet=False, disk=None, image=None, rebuild=False):
+    def setup(self, name, kind=None):
         require_name(name)
         conf, path = self.conf(name), self.fleet.conf_path(name)
         new = conf is None
@@ -80,9 +79,6 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         elif kind and kind != conf["kind"]:
             die("%s says kind=%s, and --kind %s disagrees. The conf is the answer:\n"
                 "    edit it, or drop --kind." % (self.rel(self.fleet.path(name)), conf["kind"], kind))
-        if conf["kind"] == "bridge":
-            return self.bridge().setup(name, at=at, no_tailnet=no_tailnet, disk=disk, image=image, rebuild=rebuild)
-        self.refuse_bridge_flags(conf, at or no_tailnet or disk or image or rebuild)
         if conf["kind"] == "board":
             return self.setup_board(name, conf)
         if conf["kind"] == "mac":
@@ -104,15 +100,12 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
         """Boards and Macs hold no places, so they take a Machine straight rather than `driver()`'s Remote."""
         return self.far if self.far is not None else Ssh(dest, timeout=reach.ssh_timeout(self.env), via=self.here)
 
-    def rm(self, name, at=None):
+    def rm(self, name):
         require_name(name)
         conf = self.conf(name)
         if conf is None:
             die("no conf for '%s' (%s) -- nothing to remove" % (name, self.rel(self.fleet.conf_path(name))))
         path = self.fleet.path(name)
-        if conf["kind"] == "bridge":
-            return self.bridge().rm(name, at=at)
-        self.refuse_bridge_flags(conf, at)
         if conf["kind"] == "board":
             return self.rm_board(name, conf, path)
         if conf["kind"] not in fleet.PLACE_KINDS:
@@ -191,14 +184,10 @@ class Machines(BuildMachines, BoardMachines, MacMachines, BridgeMachines):
 
 def render_survey(doc, out):
     for v in doc["vantages"]:
-        where = "as asked" if v["via"] == "given" else "from this machine" if v["vantage"] == "local" else "through " + v["via"]
+        where = "as asked" if v["via"] == "given" else "from this machine"
         if not v["swept"]:
             warn("%s (%s): cannot be swept" % (v["segment"], where))
-            if v["vantage"] == "local":
-                log("  nmap is not installed here, and there is deliberately no second sweeper. './setup' installs it.")
-            else:
-                log("  %s is unreachable, or has no nmap. Every device on this segment is reached through it,\n"
-                    "  so none of them is at fault for being absent here.  wk machine status %s" % (v["vantage"], v["via"]))
+            log("  nmap is not installed here, and there is deliberately no second sweeper. './setup' installs it.")
             continue
         info("%s (%s)%s" % (v["segment"], where, "" if v["found"] else ": nothing answered"))
         for h in (x for x in doc["hits"] if x["ip"] in v["found"]):
@@ -208,16 +197,12 @@ def render_survey(doc, out):
 def render_hit(h, out):
     def row(k, v):
         out.write("    %-16s %s\n" % (k, v))
-    out.write("  %-15s %-17s %-9s %s\n" % (h["ip"], h["mac"], h["state"], h["machine"] or h["bridge"] or h["hostname"] or h["vendor"]))
+    out.write("  %-15s %-17s %-9s %s\n" % (h["ip"], h["mac"], h["state"], h["machine"] or h["hostname"] or h["vendor"]))
     if h["machine"]:
         row("fleet machine", "%s -- machines/%s.conf%s" % (h["machine"], h["machine"], ", " + h["vendor"] if h["vendor"] else ""))
     elif h["vendor"]:
         row("hardware", h["vendor"])
-    if h["_lease"]:
-        row("reserved as", h["_lease"])
-    if h["bridge"]:
-        row("tailnet bridge", "%s -- machines/%s.conf" % (h["bridge"], h["bridge"]))
-    if h["machine"] or h["lease"] or h["bridge"] or h["hostname"]:
+    if h["machine"] or h["hostname"]:
         row("on the tailnet", "as " + h["tailnet_peer"] if h["tailnet_peer"] else
             "not as any name this repo knows -- this address is how it is reached")
     if h["hostname"]:

@@ -1,9 +1,7 @@
-# scarthgap's pseudo (e11ae91) cannot track the directory fd tar hands to mkdirat on an aarch64
-# 7.x kernel ("got *at() syscall for unknown directory, fd 4" ... "Cannot mkdir: Bad address");
-# `pseudo bash -c 'tar -cf - . | tar -xf -'` reproduces it outside bitbake. Upstream c63f439
-# (__open64_2 wrapper) and b3958b0 (AT_EMPTY_PATH efault) fix it. pseudo is a build-time fakeroot,
-# never installed, so this changes how the image is built and not what it contains.
-# Delete this file when the pinned poky carries pseudo >= 1.9.11.
+# scarthgap's own pseudo recipe today: 1.9.11 at this SRCREV (poky scarthgap, read 2026-10-21). WebKit's
+# Tools/yocto/rpi/manifest.xml pins poky at d4576e3c, whose pseudo (1.9.3) cannot track the directory fd
+# GNU tar 1.35 hands to mkdirat on an Ubuntu 24.04 build host. Delete this file when that manifest moves
+# to a poky with pseudo >= 1.9.11.
 
 SRCREV = "ba8887e5f1e922f866681ec7dec1a00b602a9328"
 PV = "1.9.11+git"

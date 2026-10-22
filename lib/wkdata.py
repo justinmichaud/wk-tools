@@ -100,9 +100,9 @@ def ab_legs(root):
     except OSError:
         caps = []
     if caps:
-        print("warmup captures: %s" % ", ".join(caps))
+        print("warmup profiles: %s" % ", ".join(caps))
     else:
-        print("warmup captures: none in %s" % warmup)
+        print("warmup profiles: none in %s" % warmup)
 
 
 def main(argv):

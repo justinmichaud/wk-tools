@@ -64,7 +64,6 @@ device=/dev/sda
 root=/dev/nvme0n1p2
 image_preset=webkit-2.52-yocto-rpi5-64
 mac={mac}
-bridge=""
 role=workstation
 os=any
 volume=""

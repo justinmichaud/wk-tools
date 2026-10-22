@@ -27,9 +27,9 @@ class TestHelpTopics(unittest.TestCase):
         self.assertIn("Lifecycle", cp.stdout + cp.stderr)
 
     def test_a_word_in_a_workflow_title_is_a_topic(self):
-        cp = run("help", "bridge")
+        cp = run("help", "agent")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("Provision a bridge phone", cp.stdout)
+        self.assertIn("An agent in a workspace", cp.stdout)
 
 
 class TestHardwareSection(unittest.TestCase):

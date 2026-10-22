@@ -73,7 +73,7 @@ ALLOWLIST = (
                                     "codeload.github.com", "raw.githubusercontent.com")]
     + [(h, (80, 443), "tunnel") for h in ("valid.apple.com", "ocsp.apple.com", "crl.apple.com", "i.pki.goog",
                                          "archive.ubuntu.com", "ports.ubuntu.com", "security.ubuntu.com",
-                                         "ddebs.ubuntu.com")]
+                                         "ddebs.ubuntu.com", "apt.llvm.org")]
     + [("github.com", (443,), "tunnel"), ("github.com", (22,), "refuse")]
     + [(h, (443,), "inject") for h in ("api.github.com", "bugs.webkit.org", "api.anthropic.com", "claude.ai",
                                       "platform.claude.com")]

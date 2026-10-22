@@ -18,8 +18,6 @@ from tests.support import REAL_MACHINES, REPO, live_selected, machine_reachable,
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, machine_cmd, places, reach, tools  # noqa: E402
 from wk.machine_cmd import build, deps  # noqa: E402
-from wk import bridge  # noqa: E402
-from wk.bridge import role  # noqa: E402
 from wk.machine import Fake, Result  # noqa: E402
 
 HOME = "/home/me"
@@ -399,49 +397,6 @@ class TestBoard(MachineTest):
         for helper in self.HELPERS:
             self.assertIn(("run", ("rm", "-f", helper)), w.fake.effects)
         self.assertEqual([e for e in w.fake.effects if e[0] == "remove"], [("remove", str(w.fleet / "box.conf"))])
-
-
-class TestBridgeDispatch(MachineTest):
-    def bridge_world(self):
-        w = self.world()
-        (w.fleet / "phone.conf").write_text("kind=bridge\ndevice=pinephone\nsegment=10.9.0.0/24\nrouter=10.9.0.1\n")
-        return w
-
-    def test_a_bridge_setup_is_the_bridge_roles_with_its_flags(self):
-        w = self.bridge_world()
-        with mock.patch.object(role.Role, "setup", return_value=0) as setup:
-            self.assertEqual(self.quiet(lambda: w.machines().setup("phone", at="10.0.0.9", no_tailnet=True))[0], 0)
-        setup.assert_called_once_with("phone", at="10.0.0.9", no_tailnet=True, disk=None, image=None, rebuild=False)
-
-    def test_a_bridge_rm_and_tailnet_are_the_bridge_roles(self):
-        w = self.bridge_world()
-        with mock.patch.object(role.Role, "rm", return_value=0) as rm, mock.patch.object(role.Role, "tailnet", return_value=0) as tn:
-            self.quiet(lambda: w.machines().rm("phone", at="10.0.0.9"))
-            self.quiet(lambda: w.machines().tailnet("phone"))
-        rm.assert_called_once_with("phone", at="10.0.0.9")
-        tn.assert_called_once_with("phone", at=None)
-
-    def test_tailnet_is_refused_for_anything_but_a_bridge(self):
-        self.assertIn("not a bridge", self.verb(1, "tailnet", "box", conf=BUILD)[1])
-
-    def test_the_bridge_flags_are_refused_for_a_build_machine(self):
-        w = self.world(conf=BUILD)
-        rc, err = self.quiet(lambda: w.machines().setup("box", at="10.0.0.9"))
-        self.assertEqual(rc, 1)
-        self.assertIn("are a bridge's", err)
-        self.assertEqual(self.quiet(lambda: w.machines().setup("box", disk="rpi5:/dev/sda"))[0], 1)
-        self.assertEqual(self.quiet(lambda: w.machines().rm("box", at="10.0.0.9"))[0], 1)
-        self.assertFalse(self.runs(w))
-
-    def test_status_is_the_bridge_health_check_and_refused_for_anything_else(self):
-        w = self.bridge_world()
-        with mock.patch.object(bridge.Bridge, "status", return_value=0) as status, \
-                mock.patch.object(bridge.Bridge, "ls", return_value=0) as ls:
-            self.quiet(lambda: w.machines().status("phone", at="10.0.0.9"))
-            self.quiet(lambda: w.machines().status())
-        status.assert_called_once_with("phone", at="10.0.0.9")
-        ls.assert_called_once_with()
-        self.assertIn("not a bridge", self.verb(1, "status", "box", conf=BUILD)[1])
 
 
 class TestProbeAndLs(MachineTest):

@@ -88,7 +88,7 @@ class Boot:
     # -- status
 
     def quiet_siblings(self):
-        """(quiet, total) of the other fleet machines on this one's net and bridge, by the tailnet."""
+        """(quiet, total) of the other fleet machines on this one's net, by the tailnet."""
         rows = (self.peers or reach.Reach(env=self.env)).peers()
         if not rows:
             return 0, 0
@@ -96,7 +96,7 @@ class Boot:
         quiet = total = 0
         for n in fleet.Fleet(self.root, self.env).names(fleet.BENCH_KINDS):
             conf = load_conf(self.root, n, self.env) if n != self.name else None
-            if not conf or conf.get("net", "") != self.c("net") or conf.get("bridge", "") != self.c("bridge"):
+            if not conf or conf.get("net", "") != self.c("net"):
                 continue
             total += 1
             names = [x.lower() for x in (conf.get("ssh"), conf.get("bench_ssh")) if x]
@@ -111,9 +111,6 @@ class Boot:
             self.evidence()
             if image:
                 act.log("  the record says it was armed for system %s" % image)
-            elif self.c("bridge"):
-                act.log("  no arming record could be read; it is behind %s, so rule that out first:  wk machine status %s"
-                        % (self.c("bridge"), self.c("bridge")))
             else:
                 act.log("  no arming record could be read: an outage, or a bench system answering elsewhere.")
                 quiet, total = self.quiet_siblings()
@@ -293,7 +290,7 @@ def fleet_probe(root, name, env):
     if not conf or conf["driver"] not in drivers():
         return {}
     d = open_driver(root, conf, env=env)
-    out = dict(role=conf["role"], probeable="yes", mode="", bridge=conf.get("bridge", ""), armed="", armed_by="",
+    out = dict(role=conf["role"], probeable="yes", mode="", armed="", armed_by="",
                armed_at="", armed_boot="", boot_id="")
     try:
         if d.probeable():

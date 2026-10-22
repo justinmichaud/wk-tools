@@ -43,21 +43,16 @@ class TestImagePresetsAreData(unittest.TestCase):
 
     def test_a_board_image_is_for_a_board_the_fleet_declares(self):
         fleet = Fleet(REPO)
-        boards, bridges = set(fleet.names(("board",))), set(fleet.names(("bridge",)))
-        phones = {p["PMO_DEVICE"] for p in presets().values() if p["IMG_BUILDER"] == "pmos"}
+        boards = set(fleet.names(("board",)))
         for n, p in presets().items():
             with self.subTest(preset=n):
                 if p["IMG_BUILDER"] in images.WS_BUILDERS:
                     self.assertIn(p["IMG_MACHINE"], boards)
-                elif p["IMG_BUILDER"] == "pmos":
-                    self.assertIn(p["PMO_BRIDGE"], bridges)
                 elif p["IMG_BUILDER"] == "mac-volume":
                     self.assertEqual(fleet.kind(p["IMG_MACHINE"]), "mac")
-                elif p["IMG_BUILDER"] == "guest":
-                    self.assertEqual("", p["IMG_MACHINE"], "the guest base is no board's")
                 else:
-                    self.assertEqual(p["IMG_BUILDER"], "fetch")
-                    self.assertIn(p["FET_DEVICE"], phones)
+                    self.assertEqual(p["IMG_BUILDER"], "guest")
+                    self.assertEqual("", p["IMG_MACHINE"], "the guest base is no board's")
 
     def test_a_buildroot_defconfig_is_the_repos_or_the_preset_says_what_it_needs(self):
         for n, p in presets().items():

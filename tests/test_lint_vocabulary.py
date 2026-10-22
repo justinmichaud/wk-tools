@@ -52,6 +52,9 @@ RETIRED = {
     "say 'bench machine'; `bench-device` is only the role value machines/*.conf declares":
         re.compile(r"(?i)\bbench devices?\b|(?<![\w\"'=-])bench-devices?(?![\w\"'-])"),
     "say 'A/B task'": Unless(r"(?i)\bexperiments?\b", r"Apple's experiment|\bexperiments(?==|\s+com\.apple)"),
+    "say 'bench system' (the OS image a bench machine boots and measures)": re.compile(r"(?i)\bsystem images?\b"),
+    "say 'warmup profile' (the recording the warmup round captures)":
+        re.compile(r"(?i)\bwarm-?up (?:captures?|recordings?|traces?)\b|\btime[ -]profiles?\b"),
     "say 'image preset' (image/presets, `wk sysimage presets`)":
         re.compile(r"(?i)\bimage[ -](?:profiles?|configs?|configurations?)\b|\bsysimage configs\b|\bimage/configs\b"),
 }

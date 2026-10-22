@@ -125,20 +125,20 @@ class TestTheReader(FleetTest):
                 self.assertIn(str(self.dir / "k.conf"), err.getvalue())
 
     def test_a_listing_names_only_the_kinds_asked_for(self):
-        for n, k in (("a", "build"), ("b", "peer"), ("c", "board"), ("d", "bridge")):
+        for n, k in (("a", "build"), ("b", "peer"), ("c", "board"), ("d", "guest")):
             self.conf(n, "kind=%s\n" % k)
         self.assertEqual(self.fleet.names(fleet.PLACE_KINDS), ["a", "b"])
-        self.assertEqual(self.fleet.names(("bridge",)), ["d"])
+        self.assertEqual(self.fleet.names(("guest",)), ["d"])
         self.assertIsNone(self.fleet.load("nosuch"))
 
     def test_the_overlay_sets_keys_over_the_shared_conf_and_can_declare_its_own(self):
-        self.conf("br", "kind=bridge\nsegment=10.0.0.0/24\ncard=x\n")
+        self.conf("br", "kind=guest\nsegment=10.0.0.0/24\ncard=x\n")
         self.conf("br", "card=rpi5:/dev/sdb\n", self.local)
-        self.conf("mine", "kind=bridge\nsegment=10.1.0.0/24\n", self.local)
+        self.conf("mine", "kind=guest\nsegment=10.1.0.0/24\n", self.local)
         loaded = self.fleet.load("br")
         self.assertEqual({k: loaded[k] for k in ("kind", "segment", "card")},
-                         {"kind": "bridge", "segment": "10.0.0.0/24", "card": "rpi5:/dev/sdb"})
-        self.assertEqual(self.fleet.names(("bridge",)), ["br", "mine"])
+                         {"kind": "guest", "segment": "10.0.0.0/24", "card": "rpi5:/dev/sdb"})
+        self.assertEqual(self.fleet.names(("guest",)), ["br", "mine"])
         self.assertEqual(self.fleet.path("br"), str(self.dir / "br.conf"))
         self.assertEqual(self.fleet.path("mine"), str(self.local / "mine.conf"))
 
@@ -160,7 +160,7 @@ class TestTheReader(FleetTest):
 class TestTheReadersOverIt(FleetTest):
     def test_a_bench_machines_conf_is_its_node_fields_and_another_kind_is_none(self):
         self.conf("b", "kind=board\nnote=\"it's a board\"\ndriver=pi-sd\n")
-        self.conf("br", "kind=bridge\nsegment=10.0.0.0/24\n")
+        self.conf("br", "kind=build\nhost=br\n")
         got = load_conf(REPO, "b", self.env)
         self.assertEqual({k: got.get(k) for k in ("note", "driver", "name", "kind")},
                          {"note": "it's a board", "driver": "pi-sd", "name": "b", "kind": None})

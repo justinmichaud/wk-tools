@@ -63,7 +63,7 @@ class Merger:
              "switch": "switches", "capacity": "capacity", "bench": "bench", "task": "tasks", "sdk": "sdk"}
 
     def __init__(self):
-        self.doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
+        self.doc = {"machines": [], "fleet": [], "exit": 0}
         self.index = {}
         self.ws_index = {}
 
@@ -110,8 +110,6 @@ class Merger:
             self.machine(r.get("machine", "?"))[self.LISTS[kind]].append(r)
         elif kind == "fleet":
             self.doc["fleet"].append(r)
-        elif kind == "bridge":
-            self.doc["bridges"].append(r)
         elif kind == "exit":
             self.doc["exit"] = max(self.doc["exit"], int(r.get("code", 0)))
 
@@ -446,7 +444,7 @@ def render_machine_block(m, colour):
     return out
 
 
-def render_fleet_and_bridges(doc, colour):
+def render_fleet(doc, colour):
     wr = Writer(colour)
     out = wr.out
     fleet = [f for f in doc["fleet"] if f.get("machine") != self_machine_name(doc)]
@@ -493,8 +491,6 @@ def render_fleet_and_bridges(doc, colour):
             if any(f.get("role") == "bench-device" for f in fleet):
                 roles.append(("a rescue system", "wk sysimage write <id> --disk <machine>:<device> --rescue"))
                 roles.append(("a bench system", "wk sysimage write <id> --disk <machine>:<device>"))
-            if doc.get("bridges"):
-                roles.append(("a tailnet bridge", "wk machine setup <name> --disk <machine>:<device>"))
             if any(f.get("role") == "workstation" for f in fleet):
                 roles.append(("a workstation", "./setup"))
             if roles:
@@ -504,25 +500,6 @@ def render_fleet_and_bridges(doc, colour):
                 for what, cmd in roles:
                     out.append("      " + paint(what.ljust(lw), "dim", colour) + "   " + cmd)
                 out.append("")
-
-    if doc["bridges"]:
-        wr.heading("tailnet bridges", "probed: the segment, the role, and its own health check")
-        bw = max(len(b.get("name", "")) for b in doc["bridges"])
-        start = len(out)
-        for b in doc["bridges"]:
-            out.append("  %s  %-10s %-14s %s" % (b.get("name", "").ljust(bw), b.get("device", "?"), b.get("segment", "?"),
-                                                 paint(b.get("state", "?"), severity(b.get("state")), colour)))
-            pad = "  " + " " * bw + "  "
-            if b.get("health"):
-                wr.kv("health", b["health"], pad)
-            if "role_insync" in b:
-                wr.kv("role", paint("this repository's", "good", colour) if b["role_insync"]
-                      else paint("older than this repository -- wk machine setup %s" % b.get("name", ""), "bad", colour), pad)
-            wr.meta(b, pad)
-            if b.get("note"):
-                out.append(pad + paint(b["note"], "dim", colour))
-            wr.notes(b.get("notes"), pad)
-        wr.align(start)
 
     return out
 
@@ -583,7 +560,7 @@ def render_text_stream(records, out, colour):
 
     for m in merger.doc["machines"]:
         draw(m["name"])
-    for line in render_fleet_and_bridges(merger.doc, colour):
+    for line in render_fleet(merger.doc, colour):
         out.write(line + "\n")
     out.write("\n")
     out.flush()
@@ -616,7 +593,7 @@ class Live:
         self.interval = max(5, int(interval))
         self.lock = threading.Lock()
         self.busy = threading.Lock()
-        self.doc = {"machines": [], "fleet": [], "bridges": [], "exit": 0}
+        self.doc = {"machines": [], "fleet": [], "exit": 0}
         self.stamp = 0
         self.refreshing = False
 

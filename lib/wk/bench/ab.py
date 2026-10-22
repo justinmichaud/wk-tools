@@ -1,6 +1,6 @@
 """`wk bench ab`: an interleaved A/B across the fleet's boards. A change's arms are two slots, base and the
 patched head, each built against every device's image and deployed to its board; `--systems A,B` names two
-system images on one board instead. The plan is a graph (lib/wk/sched.py) run in this process: each build,
+bench systems on one board instead. The plan is a graph (lib/wk/sched.py) run in this process: each build,
 deploy and collection is the `wk` command a person types, and each board's rounds are one board A/B
 (lib/wk/bench/board_ab.py), a `wk bench run` on the machine holding the image workspace the task lives in."""
 
@@ -223,7 +223,7 @@ class AB(Task):
     def check_systems(self):
         o = self.o
         if self.spec:
-            die("--systems compares two system images, so there is no change to build: drop '%s'" % self.spec)
+            die("--systems compares two bench systems, so there is no change to build: drop '%s'" % self.spec)
         refuse(o, BUILD_ONLY, "%s says how to build a change's slots, and a --systems A/B builds nothing")
         if "," in o["devices"]:
             die("--systems names two system ids, and a system id names one board's image: one --devices board")

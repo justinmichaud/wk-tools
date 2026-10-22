@@ -6,7 +6,7 @@ import os
 import re
 import shlex
 
-from wk import bridge, fleet, guest, images, places, priv, project, reach, record, secrets, status
+from wk import fleet, guest, images, places, priv, project, reach, record, secrets, status
 from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.key.cli import Key
@@ -198,14 +198,6 @@ def report_store(out, gitremedy, fork_key, macos, want):
     return rows
 
 
-def battery_verdict(name, blob):
-    f = kv(blob)
-    pct, st, limit, cur = f.get("percent") or "?", f.get("status") or "?", f.get("limit", ""), f.get("current", "")
-    if cur and cur != "?" and cur == limit:
-        return ok("%s: %s%% %s, capped at %s%%" % (name, pct, st, cur))
-    return miss("%s: %s%% %s, cap reads %s (want %s)" % (name, pct, st, cur or "?", limit or "?"), "wk machine setup %s" % name)
-
-
 def mac_battery_line(out):
     lines = out.splitlines()
     m = re.search(r"\s(\d{1,3})%;", lines[1]) if len(lines) > 1 else None
@@ -239,7 +231,7 @@ def device(root, name, env, machine, probe=status.fleet_probe, answers=None):
         yield unk("%s: the fleet probe %s" % (name, "failed: " + fields["error"] if fields else "did not answer within %ss" % cap),
                   "wk machine probe %s" % name)
         return
-    mode = status.fleet_mode(fields["probeable"], fields["mode"], fields["bridge"])
+    mode = status.fleet_mode(fields["probeable"], fields["mode"])
     yield check("%s answers in %s" % (name, mode) if fields["mode"] else "%s is %s" % (name, mode), "wk machine probe %s" % name,
                 bool(fields["mode"]) and not mode.startswith("unreachable"))
     if fields.get("armed"):
@@ -545,14 +537,6 @@ class Doctor:
             yield ok("provisioned from this tree's remote/provision.sh + remote/deps.sh")
 
     def battery(self):
-        phones = bridge.Bridge(self.root, self.env, self.machine)
-        for name in phones.names():
-            try:
-                blob = phones.battery(name)
-            except bridge.Unreachable:
-                yield unk("%s: did not answer" % name, "wk machine status %s" % name)
-                continue
-            yield battery_verdict(name, blob)
         if self.macos:
             line = mac_battery_line(self.machine.run(["pmset", "-g", "batt"]).out)
             if line:

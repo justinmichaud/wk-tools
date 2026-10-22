@@ -194,26 +194,7 @@ class TestEachOverrideReachesWhatItNames(WkTest):
             survey.identify("10.0.0.9", "")
         self.assertEqual(asked[-1], "benchy@10.0.0.9")
 
-    def test_wk_bridge_timeout_caps_each_health_check(self):
-        from wk import status
-        caps = []
-        walk = types.SimpleNamespace(root=str(REPO), reach=lambda n: ("", ""),
-                                     env={"HOME": "/h", "WK_MACHINES_DIR": str(REAL_MACHINES), "WK_BRIDGE_TIMEOUT": "3"})
-        with mock.patch.object(status, "bridge_ssh", lambda name, probe, ts, connect, cap: caps.append(cap) or ""):
-            status.Walk.bridges(walk)
-        self.assertTrue(caps)
-        self.assertEqual(set(caps), {3.0})
-
-
 class TestStatusOverrides(WkTest):
-    def test_a_wedged_bridge_ssh_cannot_outlive_the_ceiling(self):
-        from wk import kv, status
-        with stub_path({"ssh": "#!/bin/sh\nsleep 30\n"}) as binp, \
-                mock.patch.dict(os.environ, {"PATH": "%s:%s" % (binp, os.environ["PATH"])}):
-            out = status.bridge_ssh("testphone", status.BRIDGE_PROBE, True, 1, 1)
-        self.assertEqual(out, "")
-        self.assertEqual(status.bridge_record("testphone", {}, "x", kv.kv(out), lambda n: ("", ""))["state"], "unreachable")
-
     def test_wk_wait_timeout_is_the_waits_default_timeout(self):
         from tests.support import load_cmd
         cmd = load_cmd("status")

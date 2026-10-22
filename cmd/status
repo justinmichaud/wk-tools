@@ -24,7 +24,7 @@
 # writes a static page (- for $TMPDIR/wk-status.html).
 #
 #   --holds <res>   the live tasks in this machine's store holding <res>
-#   --no-fleet      the workspaces alone; --no-devices drops boards and bridges
+#   --no-fleet      the workspaces alone; --no-devices drops boards
 #   --records       the records, one JSON object per line
 #   --wait          block while busy (exit 2), then report; --timeout=<s>
 #                   stops waiting without claiming the work stopped
@@ -38,7 +38,6 @@
 #
 #   WK_WAIT_TIMEOUT, WK_WAIT_INTERVAL   --wait's defaults (0: forever; 5s)
 #   WK_FLEET_TIMEOUT    ceiling on one fleet-device probe (4s)
-#   WK_BRIDGE_TIMEOUT   ceiling on one bridge health check (20s)
 #   WK_STATUS_PORT, WK_STATUS_INTERVAL   --port and --interval defaults (0, 20)
 #   WK_STATUS_VIEW      the view a bare `wk status` gets: text, web or json
 

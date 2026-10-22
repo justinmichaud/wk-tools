@@ -1,5 +1,4 @@
-"""An image build's stage as a task with `wk build`'s record, detach, watchdog and stop, done when its log carries
-the stage script's own marker whatever its exit status says; and the pinned download a builder fetches."""
+"""An image build's stage as a task with `wk build`'s record, detach, watchdog and stop; and the pinned download a builder fetches."""
 
 import hashlib
 import os
@@ -12,7 +11,6 @@ from wk.act import Refused, die, info, log, warn
 from wk.lock import Lock
 from wk.resources import Budget, Resources, build_jobs, disk_gb
 from wk.store import Store, dispatch_place
-from wk.sysimage.ls import human_bytes
 
 MB_PER_JOB = 2048   # a WPE compile runs about 2 GB a job
 TAIL_LINES = 20
@@ -64,38 +62,6 @@ def fetch_base(machine, url, sha, env):
     if why:
         die(why)
     return dest
-
-
-class Fetch:
-    def __init__(self, machine, preset, env):
-        self.machine, self.p, self.env = machine, preset, env
-
-    def path(self):
-        return os.path.join(cache_dir(self.env), os.path.basename(self.p["FET_URL"]))
-
-    def outputs(self):
-        return [self.path()] if self.machine.exists(self.path()) else []
-
-    def build(self, rest):
-        p = self.p
-        options(rest, (), (), "usage: wk sysimage build %s [--dry-run]" % p["IMG_PRESET"])
-        if act.dry_run():
-            cached = self.machine.exists(self.path())
-            log("would fetch image %s" % p["IMG_PRESET"])
-            log("  from        %s" % p["FET_URL"])
-            log("              %s" % ("cached" if cached else "not cached -- would download"))
-            log("  pinned to   %s" % p["FET_SHA256"])
-            log("  what it is  %s" % p["FET_NOTE"])
-            log("dry run -- nothing was fetched.")
-            return 0
-        src = fetch_base(self.machine, p["FET_URL"], p["FET_SHA256"], self.env)
-        try:
-            size = human_bytes(os.path.getsize(src))
-        except OSError:
-            size = "?"
-        info("fetched %s  (%s)" % (os.path.basename(src), size))
-        log("  write it:  wk sysimage write --from %s --disk <machine>:<device>" % src)
-        return 0
 
 
 def check_commit(commit):
@@ -163,7 +129,6 @@ class Stage:
         return 0
 
     def size(self, max_jobs=None, mb=MB_PER_JOB):
-        """(budget, running, jobs); self.res is the machine's envelope those were sized against."""
         env = dict(self.env, WK_MB_PER_JOB=str(mb), **({"WK_MAX_JOBS": str(max_jobs)} if max_jobs else {}))
         budget, self.res = Budget(self.here, env, self.clock), Resources(self.here, env)
         running = budget.running(job.holder_alive(self.reg))

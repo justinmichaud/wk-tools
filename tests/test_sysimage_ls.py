@@ -16,7 +16,7 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import act, images, record  # noqa: E402
 from wk.machine import Fake, Local, Result  # noqa: E402
 from wk.store import Store  # noqa: E402
-from wk.sysimage import cli, ls, macvolume, pmos  # noqa: E402
+from wk.sysimage import cli, ls, macvolume  # noqa: E402
 
 YOCTO = "webkit-2.52-yocto-rpi3-32"          # a profile-guided release
 BUILDROOT = "wpewebkit-2.38-buildroot-rpi3-32"
@@ -97,77 +97,17 @@ class TestTheBuildersConform(unittest.TestCase):
         self.assertLessEqual(named, reachable)
 
 
-class TestPmosAndFetchImagesHaveAReader(unittest.TestCase):
-    """A fetch image is left in this host's own cache; a pmos image on its build host."""
-
-    def test_a_fetched_image_is_found_in_this_host_s_cache_and_none_yet_is_no_marker(self):
-        with scratch_dir() as d:
-            reg = registry(d)
-            p = images.load("recovery-pinephone", reg.env)
-            self.assertEqual(ls.builder_outputs(reg, None, p), [])
-            cached = os.path.join(str(d), "cache", "images", "pine64-pinephone.img.xz")
-            os.makedirs(os.path.dirname(cached), exist_ok=True)
-            open(cached, "w").close()
-            self.assertEqual(ls.builder_outputs(reg, None, p), [cached])
-
-    def test_a_pmos_image_is_asked_of_its_build_host(self):
-        with scratch_dir() as d:
-            reg = registry(d)
-            reg.env["WK_PMOS_ROOT"] = "/p"
-            p = images.load("bridge-pinephone", reg.env)
-            machine = Fake("rpi5")
-
-            def answer(argv, fake):
-                text = argv[2]
-                if "ls -1t" in text:
-                    return Result(0, "bridge-pinephone-20260101T000000Z\n")
-                if "result" in text or "disk.wic.xz" in text or text == "true":
-                    return Result(0)
-                return Result(1)
-            machine.react(("sh", "-c"), answer)
-            with unittest.mock.patch.object(pmos, "ssh_machine", return_value=machine) as m:
-                self.assertEqual(ls.builder_outputs(reg, None, p),
-                                 ["/p/out/bridge-pinephone-20260101T000000Z/disk.wic.xz"])
-            self.assertEqual(m.call_args[0][-1], "rpi5")
-
-    def test_a_pmos_build_host_that_does_not_answer_is_unknown_not_no_image(self):
-        with scratch_dir() as d:
-            reg = registry(d)
-            reg.env["WK_PMOS_ROOT"] = "/p"
-            p = images.load("bridge-pinephone", reg.env)
-            machine = Fake("rpi5")
-            machine.answer(("sh", "-c"), rc=255)
-            with unittest.mock.patch.object(pmos, "ssh_machine", return_value=machine):
-                with self.assertRaises(ls.Unknown) as cm:
-                    ls.builder_outputs(reg, None, p)
-                self.assertIn("does not answer", str(cm.exception))
-                warned = []
-                rows = ls.Listing(reg, "", "here", lambda ws: False, warned.append).host_rows()
-        self.assertEqual(rows, [])
-        self.assertIn("cannot tell whether bridge-pinephone is built: rpi5, the build host, does not answer over ssh", warned)
-
-
 class TestAnUnreadableImageIsNoAnswer(unittest.TestCase):
     def test_holds_refuses_rather_than_saying_no(self):
-        with scratch_dir() as d, unittest.mock.patch.object(pmos, "outputs", side_effect=ls.Unknown("rpi5 does not answer")):
+        with scratch_dir() as d, unittest.mock.patch.object(macvolume.MacVolume, "outputs", side_effect=ls.Unknown("the Mac does not answer")):
             with self.assertRaises(act.Refused), contextlib.redirect_stderr(io.StringIO()) as err, \
                     contextlib.redirect_stdout(io.StringIO()) as out:
-                sysimage(d).holds("bridge-pinephone", None, None, None, None, False)
-        self.assertIn("cannot tell whether bridge-pinephone is built: rpi5 does not answer", err.getvalue())
+                sysimage(d).holds("perf-macos-tolken", None, None, None, None, False)
+        self.assertIn("cannot tell whether perf-macos-tolken is built: the Mac does not answer", err.getvalue())
         self.assertEqual(out.getvalue(), "")
 
 
-class NoPmosHost(WkTest):
-    """A listing here asks no pmos build host."""
-
-    def setUp(self):
-        super().setUp()
-        p = unittest.mock.patch.object(pmos, "outputs", return_value=[])
-        p.start()
-        self.addCleanup(p.stop)
-
-
-class TestTheListing(NoPmosHost):
+class TestTheListing(WkTest):
     """`wk sysimage ls` on this store: a row per image, its state, and what to do next."""
 
     def test_the_columns_name_the_board_and_leave_where_blank_here(self):
@@ -228,7 +168,7 @@ class TestTheListing(NoPmosHost):
                          ["3B", "1.0K", "1.5K", "10K", "5.0G"])
 
 
-class TestTheFleetWalk(NoPmosHost):
+class TestTheFleetWalk(WkTest):
     """This store's rows first, then each place whose machine answers for a store of its own,
     asked through its own wk with the label it is to print and no walk of its own."""
 
@@ -333,7 +273,7 @@ class TestPath(WkTest):
             self.assertEqual((cp.rc, cp.out), (1, ""))
             p = yocto_image(d)
             self.assertEqual(ran(s.path, YOCTO, None).out, "%s\n" % p)
-            self.assertEqual(ran(s.path, "bridge-pinephone", None).rc, 1, "a host-built preset has no workspace")
+            self.assertEqual(ran(s.path, "macos-guest-base", None).rc, 1, "a host-built preset has no workspace")
             self.assertIn("usage: wk sysimage path", ran(s.path, "", None).err)
 
 
@@ -370,7 +310,7 @@ class TestTheRoutingAnswers(unittest.TestCase):
             self.assertEqual(cli.wsplace(["holds", YOCTO + "@moose"], reg), "moose")
             self.assertEqual(cli.wsplace(["holds", YOCTO + "@" + record.machine_name(reg.env)], reg), "container")
             self.assertEqual(cli.wsplace(["holds", YOCTO], reg), "")
-            self.assertEqual(cli.wsplace(["holds", "bridge-pinephone@moose"], reg), "")
+            self.assertEqual(cli.wsplace(["holds", "macos-guest-base@moose"], reg), "")
 
 
 class TestAnImageBuiltInAGuestReachesTheHost(unittest.TestCase):

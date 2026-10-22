@@ -5,7 +5,7 @@ import unittest
 
 from tests.support import REPO, owed
 
-EXCEPTED_HOSTS = {"moosebmc", "buildbox4", "devbox-arm64-2", "devbox-armhf-2"}
+EXCEPTED_HOSTS = {"buildbox4", "devbox-arm64-2", "devbox-armhf-2"}
 MAC = re.compile(r"(?<![0-9A-Fa-f:])(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}(?![0-9A-Fa-f:])")
 LOCAL_NAME = re.compile(r"\b[A-Za-z0-9][A-Za-z0-9-]*\.local\b(?![/\w])")
 IPV4 = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
@@ -60,7 +60,7 @@ class TestDetection(unittest.TestCase):
         self.assertEqual(text_hits("ssh pi.local\ncd ~/.local/bin\n$HOME/.local/state\n"), [(1, "name pi.local")])
 
     def test_a_jump_or_address_outside_the_excepted_stanzas_is_found(self):
-        conf = ("Host moosebmc\n  HostName 10.99.0.2\n  ProxyJump l5\n"
+        conf = ("Host buildbox4\n  HostName 10.99.0.2\n  ProxyJump l5\n"
                 "Host rpi5\n  HostKeyAlias rpi5\n  HostName 10.0.0.9\n  ProxyJump gw # note\n"
                 "Host box\n  HostName box.example\n")
         self.assertEqual(ssh_config_hits(conf), [(5, "HostKeyAlias in Host rpi5"), (6, "address 10.0.0.9 in Host rpi5"),
@@ -68,8 +68,7 @@ class TestDetection(unittest.TestCase):
 
 
 class TestNoAddressesInTheTree(unittest.TestCase):
-    @owed("five board and bridge confs still carry a MAC and two tailnet-bridge ssh stanzas still carry "
-          "HostKeyAlias: closed once both boards join the tailnet by image")
+    @owed("five board confs still carry a MAC: closed once the boards join the tailnet by image")
     def test_no_conf_or_library_names_an_address_by_which_a_node_is_reached(self):
         hits = tree_hits()
         self.assertEqual(hits, [], "%d addresses:\n%s" % (len(hits), "\n".join(hits)))

@@ -89,12 +89,10 @@ class TestTheSweep(unittest.TestCase):
         f.answer(["sh", "-c", reach.SWEEP], rc=66)
         self.assertIsNone(r.sweep("10.99.0.0/24"))
 
-    def test_a_bridge_contributes_the_segment_it_routes(self):
-        f, r = world({"br": "kind=bridge\nssh=br-phone\nsegment=10.99.1.0/24\nleases=\"aa:bb:cc:00:00:01,10.99.1.10,rpi4\"\n"})
+    def test_the_segments_swept_are_this_machines_own(self):
+        f, r = world()
         f.answer(["ip", "-4", "-o", "addr", "show"], out="2: en0 inet 192.168.1.4/24 brd x\n")
-        s = reach.Survey(r)
-        self.assertEqual(s.vantages(), [("local", "192.168.1.0/24", "local"), ("br-phone", "10.99.1.0/24", "br")])
-        self.assertEqual(s.leases(), {"aa:bb:cc:00:00:01": ("10.99.1.10", "rpi4", "br")})
+        self.assertEqual(reach.Survey(r).vantages(), [("local", "192.168.1.0/24", "local")])
 
 
 if __name__ == "__main__":

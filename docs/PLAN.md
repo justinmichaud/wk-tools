@@ -130,57 +130,139 @@ Answered 2026-10-05 (fifth batch): the user's Bugzilla account has no editbugs, 
 
 Answered 2026-10-18: a publish from a container is served by the caller's ancestry (a person's own run, no agent session between), and wk-tools is the one repository an agent commits and pushes; `kernel.yama.ptrace_scope` stays as the machine ships it (0 on the podman machine), since an agent attaching to a person's shell is a hole the sandbox need not close.
 
+Answered 2026-10-21: the size budgets stay (core 10k, tests 15k) and are met by architecting around the four workflows (the workspace loop, agent sessions, board bench, Mac bench), each feature well defined and nothing over-engineered; the bridge phones and the pmOS builder are deleted; the forks and git identity stay hard-coded in `lib/wk/project.json` and `dotfiles/gitconfig` (one user); what has no user yet lives in `docs/future/`, which no agent reads, with the by-hand items (Tailscale console, the stray fork ref, the memory patches, the clangd misses); `round`, `device` (a `board` is a Pi), `slot` and `warmup profile` are the spellings, held by `lint.vocabulary`; the pseudo bbappend is scarthgap head's own recipe (WebKit's yocto manifest pins an older poky), so there is no reproducer to build and the row goes, and the manifest bump is an upstream WebKit patch; Claude commits and pushes wk-tools (the never-commit rule is WebKit's); the Mac's arm is measured at the end of the night, with the return the morning's `wk boot mbp --back`.
+
+Answered 2026-10-21 (second batch): kept in the workspace loop are `run --profile` (sampling, bytecode, samply), `run --until-crash`, `--rr`/`--replay`, `build --babysit` and `gui --lldb`/`--rr`; `key sudo` and `quiesce session` stay, `key backup`, `pr report` and `zed --tools` go; `wk status` is text, `--json` and `--wait`, its web page goes; the argument-set A/B, the subtest exclusions and the EEPROM recovery path stay, the Mac `ab-summary` goes; the rpi5 tuning tree and the desktop and shell preferences stay in core; the SDK patches move to a fork branch of webkit-container-sdk checked out at a pin; the `container/bin/` conveniences no code calls go; the key election and the `CFG_NEEDS` presets stay.
+
 Answered 2026-10-05 (sixth batch): each repo has its own push identity (wk-tools its own deploy key); commands declare the repos they serve and the dispatcher refuses the rest; on a Mac the host-side injector holds and refreshes the claude.ai login and the podman VM's injector forwards Claude traffic to it, so a guest never needs the podman VM (the two VMs do not fit the Mac's memory envelope together); the injector adds the bearer for api.anthropic.com, claude.ai and platform.claude.com.
 
 ## Cutting it down
 
-40k lines of bash is the problem, not the raw material. It is that big
-because every command re-implements the shared concerns, because incidents
-became special cases, and because 46 commands do about 20 jobs. The size is
-budgeted and lint holds the budget; a change that goes over trims something.
+Measured 2026-10-21 (non-blank lines): 36k of Python core, 52k of tests, after
+every step below 5 landed and a trimming pass. Four read-only inventories of the
+tree (`scratchpad/inv-*.md` of that night) agree on where it goes: dedup alone
+takes the core to about 25k, so the rest of the way is architecture -- each
+feature defined by the workflow it serves, one object per concept, no second
+pipeline for a second machine kind. The budgets stand and lint holds them: a
+change that goes over trims something.
 
 | | today | budget |
 | --- | --- | --- |
-| core (`wk`, commands, drivers) | 40k bash | 10k Python |
-| what runs on a board or in a place | in the 40k | 1k bash |
-| tests | 70k | 15k |
-| commands | 46 | 20 |
-| a command | up to 1,550 lines | 200 |
-| machine directories | 3 | 1 |
+| core (`wk`, `cmd/`, `lib/`) | 36k Python | 10k Python |
+| what runs on a board, a bench install or in a place | 1.1k bash | 1k bash |
+| the host setup stages (`setup`, `host/`, `admin/`) | 5.5k bash | 3k bash |
+| tests | 52k | 15k |
+| commands | 25 | 20 |
 
-Where the lines go:
+**The four workflows**, and nothing else is architected around:
 
-- **Duplication collapses to one.** Nine ssh wrappers, three locks, eleven
-  waits, four loggers, twenty JSON readers and 350 `awk`/`sed` pipelines
-  become one `Machine`, one record, one clock, one logger and dictionaries.
-- **Commands merge by job.** One name per job, subverbs for the rest:
+1. *The workspace loop*: `new`, `build`, `run` (with `--profile` sampling,
+   bytecode and samply, `--until-crash`, `--rr`/`--replay`), `test`, `enter`,
+   `zed`, `scp`, `sync`, `pr`, `rm`, `gui` (with `--lldb`/`--rr`), `build
+   --babysit`, on a container, a macOS guest or a build box; the PR workflow
+   through the push service.
+2. *Agent sessions*: `ai` with the wall, the credential injector, `key` (setup,
+   deploy, sudo, push) and the push rule by the caller's ancestry.
+3. *Board bench*: `sysimage` (buildroot, yocto, write, disks), `boot`, `bench
+   deploy|run|ab|report` with arms of (system, slot, args), PGO, the subtest
+   exclusions, the EEPROM recovery path.
+4. *Mac bench*: the bench volume as a sysimage builder, stage, `bench run
+   --system mbp`, the Mac A/B through the plant and the autorun, `quiesce`
+   (and `quiesce session` for the Linux seat), zero-touch nights.
 
-  | today | becomes |
-  | --- | --- |
-  | `remote`, `vm`, `bridge`, `pi setup`, `find` | `machine` (setup, rm, ls, probe) over `machines/` |
-  | `pi deploy`, `pi bench`, `bench staged`, `bench stage`, `bench mac-ab`, `bench mac-volume`, `ab` | `bench` (deploy, run, ab, report) over the one pipeline |
-  | `boot`, `pi boot-order`, `pi helper` | `boot` |
-  | `sysimage`, `image/*` | `sysimage` (build, write, ls) with one build path per image kind |
-  | `key`, `push`, `sudo`, `backup`, `skills` | `key` and `push` |
-  | `doctor`, `disk`, `version`, `verify` | `doctor` |
-  | `remotes` | `sync --fix` |
-  | `completion` | generated by the dispatcher |
-  | `zed`, `gui` | kept: the editor, and the browser in the benchmark seat for layout tests on a GPU |
-  | `pick`, `notify`, `mcp`, `skills` | deleted (`notify` becomes a library call) |
+Gone, by the answers of 2026-10-21: the bridge phones and the pmOS builder,
+the `fetch` builder, `wk status`'s web page, `key backup`, `pr report`, `zed
+--tools`, the Mac on-volume `ab-summary` (the one task report prints there),
+the workspace conveniences in `container/bin/` that no code calls (`git-clean`,
+`git-sync-fork`, `commit-count`, `strip-addresses`, `plot-memory-log`, the
+memory patches), and the SDK patch script (`container/sdk-patches/`): the
+edits live on a fork branch of webkit-container-sdk that `./setup` checks out
+at a pin. Kept, by the same answers: the rpi5 workstation tuning tree, the
+desktop and shell preferences in `host/`, the key election, the nine
+`CFG_NEEDS` presets.
 
-- **Special cases become data.** The Mac's quiet-desktop tables, the board
-  confs, the subtest exclusions and the credential rules are files a reader
-  loads, not code paths.
-- **Tests are written once per rule.** Kill-point and conformance tests are
-  parameterised over commands and drivers, so a rule is one test body
-  instead of one per command per agent.
-- **Prose leaves the code.** The 15% comment ceiling stays; incident history
-  and rejected alternatives go, since the test is the record of the rule.
+**One object per concept.** Each is a contract a conformance test runs over
+every implementation; nothing outside the contract is called from a command.
 
-Step 0 includes the deletion pass: every command and every image kind is
-kept, merged or deleted by name, in this file, before anything is ported.
-Deleting is cheaper than porting, so anything with no user in the next
-quarter goes first.
+- *A command is a table.* `cmd/<name>` is a dict (name, where, takes, opts,
+  subverbs, destructive, dryrun, repos) and one function. The dispatcher
+  builds argparse from the table, prints the help from the table and the
+  docstring, prompts, forwards and sets the exit code. No `# wk:` DSL, no
+  per-command `sys.path`/`noqa` bootstrap, no `d.post` hooks: a command that
+  needs an after-step calls it.
+- *`Machine`*: `Local` and `Ssh`; the podman machine and `tart exec` are
+  `Ssh` argv variants, not classes. `Fake`, `FakeClock`, `Exited` and `Killed`
+  live in `tests/fakes.py`; nothing in `lib/` names them.
+- *`Driver`*: one contract of about twenty methods -- list, info, state,
+  create, destroy, start, stop, exec, exec_argv, exec_tty, copy in and out,
+  src, home, store, ssh_endpoint, build_argv, ccache_dir, build_size, sync,
+  install_agents -- over `Container`, `Vm`, `Remote` and `LocalWorkspace`.
+  A method one driver has and another lacks is not in the contract and not
+  called from a command. One readiness wait, one `remake_hint`, every podman
+  machine call through the one `Ssh`.
+- *The record*: `Task` with `holds=`; a build budget, a device claim and a
+  workspace lock are holds on it (`resources.Budget` and `job.busy_reason`
+  fold in). One wait, one liveness question, one kill.
+- *The fleet*: `fleet.each(argv)` is the one "ask every place's own wk and
+  merge" (today in `dispatch.bare_report`, `cmd/ls`, `cmd/stop`,
+  `fleetwalk`, `status.Walk`, `record.fleet_stores`, `sudo`).
+- *Diagnostics*: `doctor` owns every "is X healthy" row (the guest desktop
+  findings, `status.Walk.health`, the machine-local table); `status` reports
+  records and renders them once, as text, `--json` and `--wait`.
+- *Credentials*: one delivery (today `guest.write_agent_secrets`, the firstrun
+  symlinks and `machine_cmd.build.credentials`), one verdict line per
+  credential, `credcheck` imported, never spawned.
+- *The bench `System`*: `boot`, `deploy`, `run`, `collect`, `after`, with
+  `env_fields` and `home`, over container, guest, board and the Mac volume;
+  one `Run` (no `BoardRun`/`StagedRun` overrides, no `run_class` switch); one
+  `AB` whose arm is (system, slot, args) with one rounds engine
+  (counterbalance, lost-round limit, the stopping rule asked in process) over
+  a board, the fleet and the Mac; one report behind one entry point; one
+  profiler attach; the autorun is that `Run` on the bench install, planted.
+  The Mac is a system, not a special case: `stage` is `deploy`, `staged` is
+  `run --system mbp`.
+- *Boot*: one `Channel` with methods (no `call(fn_name)` dispatch), a
+  per-driver `arm_sequence` the board A/B calls instead of its own; `Boot`
+  has no `arming` ladder.
+- *Images*: builders are data and stages over one `task.Stage` lifecycle;
+  an image is found by `Builder.outputs`, never catalogued.
+- *Daemons*: one supervisor renders a systemd unit or a launchd plist from a
+  (program, env, socket) row for the proxy, the push service, the injector
+  and the broker, on the host, in the podman machine and in a guest.
+- *Shell stays where the shell is the point*: `boot/onboard/`,
+  `bench/mac-bench-firstboot.sh`, `build/guard.sh`, the three helpers and the
+  setup stages. Shell inside Python strings (530 lines today) becomes argv
+  lists or a file under those directories.
+
+**Tests, once per rule.** `tests/fakes.py` holds the one fake world (the
+twenty-seven `World` classes and six act recorders fold into it); one
+table-driven module holds kill points, dry run and final state for every
+mutating command (today `converges(` in 40 modules); one conformance mixin per
+contract (Machine, Driver, System, Channel, Builder); one module per subsystem
+(the push service in one, the credential store in one, the dispatcher in
+three); no test asserts prose, README text, comment counts or line counts
+except the lint rules, which are one module with a rule table. `test_owed_live`
+is generated from the Owed table.
+
+**Budgets per package** (Python non-blank; lint holds each):
+
+| package | today | budget | tests today | tests budget |
+| --- | --- | --- | --- | --- |
+| dispatcher: `dispatch`, `decl`, `act`, `completion`, `wk` | 1,230 | 800 | 1,734 | 900 |
+| `machine` | 773 | 400 | 554 | 500 |
+| `places` and the drivers | 1,816 | 950 | 1,135 | 1,000 |
+| record, job, lock, resources, clock | 1,174 | 550 | 1,500 | 700 |
+| workspace, build, sync, pr, git, presets, store, tools, agents | 2,350 | 1,150 | 6,001 | 1,800 |
+| wall, pushgate, secrets, key, credcheck, ai, sudo | 3,000 | 1,150 | 5,400 | 2,000 |
+| status, doctor, gc, ls, fleet, reach | 2,100 | 700 | 1,600 | 900 |
+| bench, pgo, sched, scores | 7,300 | 1,300 | 9,500 | 2,200 |
+| boot | 1,433 | 650 | 3,000 | 1,100 |
+| sysimage, images, slot | 3,900 | 950 | 4,300 | 1,400 |
+| guest, mac, quiet, session, screen, notify, tailnet, machine_cmd | 2,600 | 900 | 3,300 | 1,000 |
+| `cmd/*` | 2,763 | 500 | -- | -- |
+| lint rules | -- | -- | 1,300 | 700 |
+| live bodies | -- | -- | 2,000 | 800 |
+| **sum** | **~30k + 2.8k cmd** | **10,000** | **~41k** | **15,000** |
 
 ## Testing, concretely
 
@@ -699,34 +781,13 @@ exist.
 
    5.19 **yocto, in-workspace half.** *Landed* (`lib/wk/sysimage/yocto_ws.py`, with
      port-target folded in; the memory guard stays `build/guard.sh`, reached as one `bash -c`
-     line). Nothing of it has run in a workspace yet. Owed: `live sysimage.pseudo_reproducer` has
-     no body -- it needs a pseudo built at scarthgap's pin (e11ae91), which nothing builds, so
-     whether to build one for the test or drop the bump at the next poky move is the user's call.
-   - Closes: marks live `sysimage.pseudo_reproducer`.
+     line). Nothing of it has run in a workspace yet. Owed: WebKit's `Tools/yocto/rpi/manifest.xml`
+     pins a poky whose pseudo (1.9.3) fails under GNU tar 1.35; `image/yocto/meta-wk`'s bbappend is
+     scarthgap head's own recipe (1.9.11) until an upstream patch moves the pin.
    - Decision: port it; the container has python3. Bitbake is reached as
      `bash -c '. oe-init-build-env && bitbake …'`, one line.
 
-   5.20 **pmos builder.** *Landed* (`lib/wk/sysimage/pmos.py`, the driving `Pmos`
-     class `cli.py`'s `build()` routes a pmos profile to, and
-     `lib/wk/sysimage/pmos_build.py`, the build itself. The far half imports
-     `wk.*` plainly: the driver pushes this checkout's `lib/wk` to the build
-     host (`copy_tree_in`, so it needs rsync) and runs `PYTHONPATH=<root>/lib
-     python3 -m wk.sysimage.pmos_build remote-build|wifi-ssid`, every process
-     through `here()` and every wait through the clock. Its one non-stdlib
-     import is PyYAML, for the netplan it reads the phone's uplink from --
-     netplan's own dependency (`host/linux/apt.txt`), with no stdlib YAML
-     reader. The image comes off through `Machine.copy_out`, is decompressed
-     by `xz -d` here and hashed in blocks. `wk gc`'s pmos rows are built from
-     `cache_probe`'s `{work, out}` numbers, and `purge_work` asks nothing: gc's
-     one question covers it; there is no mDNS. Owed: no live check (needs an aarch64
-     Linux build host and a phone); `test_owed_pmos.py` covers the reporting,
-     refusals, host resolution, the copy and the rubble rows against the Fake,
-     and `pmos_build.py`'s pure parts, not `Build.run` or the `iw scan` band
-     check -- pmbootstrap, loop devices and sudo have no fake to run against;
-     `lint.one_wifi_reader` stays owed for `pmos_build.py`'s netplan read.
-   - Closes: the `test_owed_pmos` rows.
-   - Decision: pmos stays. It exists only for the bridge phones, which
-     5.37 needs.
+   5.20 **pmos builder.** *Deleted* with the bridge phones (answered 2026-10-21).
 
    *Group 3: the bench pipeline*
 
@@ -988,60 +1049,7 @@ exist.
      nothing, since a guest is reached by its alias). The base's staleness
      stays a recomputed inputs hash.
 
-   5.35 **Bridge read side.** *Landed* (`lib/wk/bridge.py`: `ls`, `status`,
-     `battery`, `resolve` (the conf name, then `wk.reach`'s sweep of this
-     machine's segments, and the ssh destination it finds) and `judge` (the facts a healthy/unhealthy bridge reports);
-     `bridge/bin/wk-bridge-healthcheck` trimmed to raw `key=value` facts,
-     no judging, no ANSI; `lib/wk/status.py`'s bridge probing
-     (`BRIDGE_PROBE`, `bridge_record`) reads the same facts through
-     `bridge.judge`; `lib/wk/fleet.py`'s bridge kind fills the `BR_*`
-     defaults). Owed: `live bridge.segment[<bridge>]` waits on a person at
-     the phone; `wk.reach`'s sweep
-     needs ip(8) and nmap, so a macOS host finds a phone off the tailnet only
-     by `--at`.
-   - Closes: `unit bridge.segment_down_vs_off`.
-   - Decision: the phone prints raw facts and the judging moves to
-     Python, which trims `wk-bridge-healthcheck`.
-
-   5.36 **Bridge setup, tailnet and rm.** *Landed* (`lib/wk/bridge/` is a
-     package: `__init__` the read half, `plan.py` renders every file, the
-     manifest and the bundle from the conf and the facts the phone reports,
-     `role.py` is `wk machine setup|tailnet|rm <bridge>` through
-     `machine_cmd`'s kind dispatch, the tailnet join and the policy done from
-     here; `bridge/provision.sh` is a 184-line busybox apply of `base` and
-     `role`; `lib/wk/tailnet.py` with `Api.transport` as its one seam, every
-     importer repointed). Owed: `live bridge.setup[moose-bmc]` is marked and
-     has not run; the phone's output arrives when each phase ends, not as it
-     runs; `rm` logs the node out and does not retire it through
-     `wk.tailnet`. The auth key's mint-or-reuse rule is `wk.tailnet.Fleet`
-     (bash asks it through `wk_tailscale_authkey` in `lib/common.sh`).
-   - Closes: `unit killpoints[machine setup]` for a bridge; marks live
-     `bridge.setup[moose-bmc]`.
-   - Decision: the host renders nftables, dnsmasq and the init scripts from
-     the conf, and the phone only applies them. The phone has no python3.
-
-   5.37 **Bridge provision.** *Landed*
-     (`lib/wk/bridge/provision.py`: `wk machine setup <bridge> --disk
-     <machine>:<device> [--image <path>|--rebuild]` asks once, gets the
-     newest `PMO_BRIDGE` build off its host (building it if none, or on
-     `--rebuild`), hands it to `wk sysimage write --disk` as the one writer,
-     prints the hands-on steps and waits up to 15 minutes for the phone (names
-     every tick, a sweep once a minute) before `Role.apply`.
-     `bridge/devices.tsv` is the device table (`wk.bridge.devices`); `wk
-     machine status [<bridge>]` lists and reports bridges, `wk doctor`'s
-     battery row reads `Bridge.battery` in process, and `bridge` is a
-     dispatcher tombstone). Owed: `live
-     bridge.segment[<bridge>]` is marked (health check and cable only) and
-     has not run; the rest of that row -- the eMMC route end to end, a board
-     getting its reserved address, the netwatch ladder, the dock at 480, the
-     camera -- needs a person at the phone; the copied image lives under the
-     store's artifact directory, under a per-bridge lock, and
-     `bridge.provision.rubble` names one a kill left and `wk gc` takes it.
-   - Closes: marks live `bridge.segment[<b>]`.
-   - Decision: a card goes to `sysimage write --disk` only. Jumpdrive
-     auto-detection is a second write path and goes.
-
-   *Group 5, serial*
+   5.35-5.37 **The bridge phones.** *Deleted* (answered 2026-10-21): `machines/` holds no `bridge` kind, and moose's BMC is in `docs/future/`.
 
    5.38 **`wk gc` in Python.** *Landed* (`cmd/gc` over `lib/wk/gc.py`; the row
      shape is `lib/wk/rubble.py`, and `rubble()` is appended to `store.py`,
@@ -1152,7 +1160,39 @@ exist.
    `wk rm` refuses a workspace holding a task no readable export holds as it
    is now, and `--force` crosses it (`unit test_rm_results`); `wk doctor`
    names each workspace's `bench/` as backed-up beside the store's.
-7. Delete this file.
+7. **The cut.** The architecture above, landed package by package. Each
+   sub-step ports one package to its contract, deletes what it replaces,
+   moves its tests to `tests/fakes.py` and the table-driven modules, and
+   leaves lint and unit green; lint holds the package's budget from the
+   sub-step that lands it. ∥ marks what runs concurrently on disjoint files.
+
+   7.1 **Fakes and the test tables.** `tests/fakes.py` (the one World, from
+     `machine.Fake`, `FakeClock`, `Exited`, `Killed`), `tests/killpoints.py`
+     as the table-driven kill-point/dry-run/final-state module, one
+     conformance mixin per contract. Everything after depends on it.
+   7.2 ∥ **The command table and the dispatcher.** The `# wk:` DSL, the
+     argv arithmetic and the cmd bootstrap go; `cmd/*` are tables plus one
+     function; `completion` and help come from the table.
+   7.3 ∥ **`Machine` and the `Driver` contract.** `places.py` to the twenty
+     methods; `PodmanVm`/`TartExec` as `Ssh` argv; one readiness wait.
+   7.4 ∥ **The record and the fleet.** `holds=` absorbs `Budget` and
+     `busy_reason`; `fleet.each`; the web page, migration and skew code go.
+   7.5 ∥ **Diagnostics.** `doctor` owns health; `status` renders records.
+   7.6 ∥ **Credentials and the wall.** One delivery, one verdict line,
+     `credcheck` imported; the per-caller bridge (fix-bridge) is the rule.
+   7.7 ∥ **The bench `System`, `Run` and `AB`.** One of each; the Mac as a
+     system; `ab-summary` and the `ab_summary` renderer go.
+   7.8 ∥ **Boot.** One `Channel`, `arm_sequence` per driver.
+   7.9 ∥ **Images.** The `fetch` builder, `CFG_NEEDS` plumbing kept, the SDK
+     fork branch replaces `sdk-patches/`; one dry-run printer.
+   7.10 ∥ **Guests and daemons.** The one supervisor; `guest.py`'s findings
+     into `doctor`; the conveniences in `container/bin/` go.
+   7.11 **Tests by cluster.** After each package lands: the push service,
+     credential, dispatcher, status, A/B, bench-run, boot and lifecycle
+     clusters each to one module; `test_owed_live` generated.
+   7.12 **Budgets in lint.** The per-package table above as a lint rule,
+     failing on the first package over.
+8. Delete this file.
 
 ## Owed
 
@@ -1248,8 +1288,6 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `wk machine setup <box>` leaves a build box in one shape (zsh, or a named warning), and a cleanup accepted at the prompt is removed | 5 | `live machine_cmd.setup[<box>]` |
 | `wk machine setup <box>` installs the pinned node into the box user's `~/.local` without sudo, and `wk new --on <box>` then installs pi there | 5 | `live machine_cmd.node[buildbox4]` |
 | A board is reached by tailnet name alone: no MAC, `.local`, address stanza, `HostKeyAlias` or ProxyJump remains once both boards join by image, and the bench install is reached at its own name | 5 | `lint.no_addresses` (tests/test_lint_no_addresses.py; the tree check is owed: the board and bridge confs' MACs, the bridges' `HostKeyAlias`) |
-| The Librem 5 runs the pmOS bridge role in front of moose's BMC, with the BMC's own config in a conf file | 5 | `live bridge.setup[moose-bmc]` |
-| A bridge's segment is proven: provision on the eMMC route asks which disk, a board on `lan0` gets its reserved address and a workspace reaches it, `wk bridge tailnet` approves the route and `autoApprovers` holds after a policy edit, the netwatch ladder stops at its budget, the dock holds 480 Mbit, the watchdog device exists, the camera streams, and a bridge whose segment is down reads differently from one that is off | 5 | `live bridge.segment[<bridge>]`, `unit bridge.segment_down_vs_off` |
 | An image build runs from a Tart guest and the image reaches the host for writing | 5 | `live sysimage.build[vm]` |
 | A task's results live in its workspace, `wk bench ls` names them wherever they are, the task restarts from where it stopped on any machine, and `wk doctor` names the results backed-up | 6 | `unit test_bench_results`, `killpoints[bench export]` (tests/test_bench_results.py) |
 | On a macOS host a board A/B's run-benchmark and page server run in the podman VM and reach the boards | 5 | `live bench.vm_reaches_boards` |
@@ -1288,16 +1326,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 
 Decisions are asked as questions, and their answers are recorded under "Decisions taken".
 
-- The cut is spent at the four rules: measured 2026-10-05 in a wk-tools workspace, core is 33.0k
-  non-blank lines and tests 51.7k after a trimming pass over every package and the two structural
-  merges (the A/B drivers on `ab.Task`, the image builders' one staged lifecycle), each of which
-  found the remaining code to be distinct behaviour. 10k and 15k are reachable only by removing
-  features or by the user naming what goes: lower the budgets to what was measured, or name the
-  features to drop?
-
-- meta-wk's pseudo bump (5.19): build a pseudo at scarthgap's pin for the reproducer, or drop the bump at the next poky move?
-- The Mac's goal is a run nobody attends ("Zero-touch Mac nights" under step 5): the arm and return bless are measured first; if the host install cannot be reached at its login window, the return waits for the morning's `wk boot mbp --back`. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`, `unit bench.variance_pairing`).
-- `lib/wk/project.json` and `dotfiles/gitconfig` hard-code your forks and git identity in every workspace and guest, while README says "a fork under your own account". Keep it (one user), or move the fork owner and identity to a gitignored per-machine conf?
-- Tailscale, in the admin console: Karen limited to immich, nextcloud, overleaf and proxmox and those apps isolated from each other; your two accounts reach everything; the untrusted-router question for the bridge phones and the camera; the MBP on public WiFi; a full port scan.
-- Keep or drop, none code-closable today: Windows build machines; a bare rented cloud VM as a place (and PII-free perf testing on it); code-server, a web UI over the driver contract on the gateway, and sessions spawned from a phone; helix on a shared remote and from source for armhf; Haiku and BSD guests; iOS via public entitlements; backing up Claude conversations and sharing memory across machines; devcontainers.
-- By hand: delete the stray `refs/remotes/fork/dev/mya-1` on your WebKit fork; supply the three memory patches as real diffs; the clangd LSP errors and jump-to-definition misses need a person in `wk zed` on a real checkout.
+- Zero-touch Mac nights: the arm and the return bless are measured at the end of 2026-10-21's night; if
+  the host install cannot be reached at its login window, the return stays the morning's `wk boot mbp
+  --back`. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`,
+  `unit bench.variance_pairing`).

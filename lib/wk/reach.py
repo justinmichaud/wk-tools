@@ -23,7 +23,7 @@ ip neigh show 2>/dev/null"""
 
 
 def parse_peers(text):
-    """DNSName, not HostName: macOS capitalises HostName, and both bridge phones answer `localhost`."""
+    """DNSName, not HostName: macOS capitalises HostName."""
     try:
         doc = json.loads(text)
     except ValueError:
@@ -192,31 +192,22 @@ command -v tailscale >/dev/null 2>&1 && echo "tailscale=yes" || echo "tailscale=
 [ -e /etc/wk/rescue ] && echo "marker=rescue" || echo "marker=none"
 """
 UNPINNED = ["-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR"]
-# Not a database: the prefixes the Raspberry Pi Foundation owns, and the one the phones' USB adapters synthesise.
 OUI = {"b8:27:eb": "Raspberry Pi (pre-4)", "d8:3a:dd": "Raspberry Pi", "dc:a6:32": "Raspberry Pi",
        "e4:5f:01": "Raspberry Pi", "2c:cf:67": "Raspberry Pi", "00:00:00": "synthesised (USB adapter, no EEPROM)"}
-HIT_KEYS = ("ip", "mac", "state", "machine", "vendor", "lease", "bridge", "hostname", "tailnet_peer", "wk_image_id",
+HIT_KEYS = ("ip", "mac", "state", "machine", "vendor", "hostname", "tailnet_peer", "wk_image_id",
             "wk_role", "wk_image_preset", "wk_builder", "tailscale", "marker", "uname")
 
 
 class Survey:
-    """Every device on every segment this machine or a bridge phone sits on, joined to what this repo declares."""
+    """Every device on every segment this machine sits on, joined to what this repo declares."""
 
-    def __init__(self, reach, segment=None, vantage=None, ssh=True, timeout=60):
-        self.r, self.segment, self.vantage, self.ssh, self.timeout = reach, segment, vantage, ssh, timeout
-
-    def bridges(self):
-        return self.r.fleet.names(("bridge",))
+    def __init__(self, reach, segment=None, ssh=True, timeout=60):
+        self.r, self.segment, self.ssh, self.timeout = reach, segment, ssh, timeout
 
     def vantages(self):
         if self.segment:
-            return [(self.vantage or "local", self.segment, "given")]
-        out = [("local", seg, "local") for seg in self.r.segments_local()]
-        for b in self.bridges():
-            c = self.r.conf(b)
-            if c.get("segment"):
-                out.append((c.get("ssh") or b, c["segment"], b))
-        return [v for v in out if not self.vantage or v[0] == self.vantage]
+            return [("local", self.segment, "given")]
+        return [("local", seg, "local") for seg in self.r.segments_local()]
 
     def fleet_macs(self):
         out = {}
@@ -224,24 +215,6 @@ class Survey:
             mac = self.r.conf(m).get("mac", "").lower()
             if mac:
                 out[mac] = m
-        return out
-
-    def leases(self):
-        out = {}
-        for b in self.bridges():
-            for lease in self.r.conf(b).get("leases", "").split():
-                f = lease.split(",")
-                if len(f) >= 3:
-                    out.setdefault(f[0].lower(), (f[1], f[2], b))
-        return out
-
-    def bridge_addrs(self):
-        """A bridge phone declares no MAC (its adapter is whichever dock is plugged in): only its address ties it to the wire."""
-        out = {}
-        for b in self.bridges():
-            addr = self.r.without_tailnet(b).split(" ")[0]
-            if re.match(r"^\d+\.\d+\.\d+\.\d+$", addr):
-                out[addr] = b
         return out
 
     def _ask(self, dest, opts=()):
@@ -266,29 +239,25 @@ class Survey:
         return {}
 
     def hit(self, ip, mac, state, known):
-        macs, leases, addrs = known
-        machine = macs.get(mac, "")
-        lease = leases.get(mac)
-        bridge = addrs.get(ip, "")
-        declared = bridge or (self.r.conf(machine).get("ssh", "") if machine else "")
+        machine = known.get(mac, "")
+        declared = self.r.conf(machine).get("ssh", "") if machine else ""
         seen = self.identify(ip, declared)
         peer = ""
-        for n in (machine, lease[1] if lease else "", bridge, seen.get("host", "")):
+        for n in (machine, seen.get("host", "")):
             p = self.r.peer(n) if n else None
             if p:
                 peer = "%s at %s (%s)" % p
                 break
         h = dict(ip=ip, mac=mac, state=state, machine=machine, vendor=OUI.get(mac[:8], ""),
-                 lease=lease[1] if lease else "", bridge=bridge, hostname=seen.get("host", ""), tailnet_peer=peer,
+                 hostname=seen.get("host", ""), tailnet_peer=peer,
                  wk_image_id=seen.get("id", ""), wk_role=seen.get("role", ""), wk_image_preset=seen.get("profile", ""),
                  wk_builder=seen.get("builder", ""), tailscale=seen.get("tailscale", ""), marker=seen.get("marker", ""),
                  uname=seen.get("uname", ""))
-        h["_lease"] = "%s (%s pins %s)" % (lease[1], lease[2], lease[0]) if lease else ""
         h["_account"] = seen.get("account", "")
         return h
 
     def run(self, want_mac=""):
-        known = (self.fleet_macs(), self.leases(), self.bridge_addrs())
+        known = self.fleet_macs()
         vantages, hits = [], []
         for name, cidr, via in self.vantages():
             rows = self.r.sweep(cidr, name, self.timeout)

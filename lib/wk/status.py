@@ -1,5 +1,5 @@
-"""The `wk status` walk: one job per place, then the fleet's devices and
-bridges, each returning the records wk.statusview draws and the worst exit
+"""The `wk status` walk: one job per place, then the fleet's devices,
+each returning the records wk.statusview draws and the worst exit
 code it found. Every fact is read as the walk runs; nothing is stored."""
 
 import calendar
@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import secretfile
 import shlex
-from wk import bridge, fleet, guest, images, places, project, reach, record, secrets, statusview, tools
+from wk import fleet, guest, images, places, project, reach, record, secrets, statusview, tools
 from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.lock import holder_pid
@@ -47,24 +47,6 @@ printf 'behind=%s\nahead=%s\n' "${1:-}" "${2:-}"
 @BASE@
 printf 'wsbase=%s\n' "${_b:-?}"
 '''
-
-
-BRIDGE_PROBE = r'''
-printf "reachable=yes\n"
-if [ -x /usr/local/sbin/wk-bridge-healthcheck ]; then
-    printf "role=yes\n"
-    printf "sum=%s\n" "$(cat $(ls /usr/local/sbin/wk-bridge-* 2>/dev/null | sort) \
-        $(ls /etc/init.d/wk-bridge-* 2>/dev/null | sort) 2>/dev/null | cksum | cut -d" " -f1)"
-    if [ "$(id -u)" = 0 ]; then
-        /usr/local/sbin/wk-bridge-healthcheck 2>&1 || true
-    elif command -v doas >/dev/null 2>&1; then
-        doas -n /usr/local/sbin/wk-bridge-healthcheck 2>&1 || true
-    else
-        sudo -n /usr/local/sbin/wk-bridge-healthcheck 2>&1 || true
-    fi
-else
-    printf "role=no\n"
-fi'''
 
 
 def fleet_timeout(env):
@@ -126,7 +108,7 @@ def far_side_reason(driver, side, why):
     return "not a machine of its own"
 
 
-def fleet_mode(probeable, mode, bridge):
+def fleet_mode(probeable, mode):
     if probeable == "no":
         return "unknown from here"
     if mode == "host":
@@ -135,7 +117,7 @@ def fleet_mode(probeable, mode, bridge):
         return "base image -- not a bench system"
     if mode.startswith("bench"):
         return "bench mode"
-    return "unreachable" + (" via %s" % bridge if bridge else "")
+    return "unreachable"
 
 
 def sdk_newest(local, tags):
@@ -530,7 +512,7 @@ def fleet_record(name, conf, fields, cap, reach=None, clock=None):
         r.opt("direct", direct)
         return r.done()
     r.set("role", fields["role"])
-    r.set("mode", fleet_mode(fields["probeable"], fields["mode"], fields["bridge"]))
+    r.set("mode", fleet_mode(fields["probeable"], fields["mode"]))
     r.set("media", fields["media"])
     r.opt("armed", fields["armed"])
     if fields.get("armed"):
@@ -563,7 +545,7 @@ def self_mode_word(env):
 def self_fleet_record(root, env, machine):
     """Read locally, never by probing this machine as a board."""
     r = Rec("fleet", machine=machine, role=self_role(root, machine),
-            mode=fleet_mode("yes", self_mode_word(env), ""))
+            mode=fleet_mode("yes", self_mode_word(env)))
     r.raw("self", True)
     return r.done()
 
@@ -582,58 +564,6 @@ def machine_confs(root, env):
         if conf.get("driver") and conf.get("note"):
             out.append((n, conf))
     return out
-
-
-def bridge_role_sum(root):
-    """cksum over the role's files in the order the phone sums them: bin, then init.d, each sorted."""
-    paths = []
-    for sub in ("bin", "init.d"):
-        d = os.path.join(root, "bridge", sub)
-        try:
-            paths += [os.path.join(d, n) for n in sorted(os.listdir(d))]
-        except OSError:
-            continue
-    out = Local().run(["sh", "-c", 'cat "$@" | cksum', "sh", *paths], input="").out.split()
-    return out[0] if out else ""
-
-
-def bridge_ssh(name, script, as_root, connect_timeout, cap):
-    r = Local().run(Ssh(name, ["-l", "root"] if as_root else [], connect_timeout).argv(script), input="", timeout=cap)
-    return r.out if r.ok else ""
-
-
-def bridge_record(name, conf, want, fields, reach):
-    """`fields` is the phone's raw facts (bridge/bin/wk-bridge-healthcheck), judged here -- the
-    phone has no python3 to do it in."""
-    bc = bridge.BridgeConf(name, conf)
-    r = Rec("bridge", name=name, device=bc.device, segment=bc.segment)
-    r.opt("note", bc.note)
-    r.set("conf", "machines/%s.conf" % name)
-    tailnet, direct = reach(name)
-    r.opt("tailnet", tailnet)
-    r.opt("direct", direct)
-    if fields.get("reachable") != "yes":
-        r.set("state", "unreachable")
-    elif fields.get("role") != "yes":
-        r.set("state", "no bridge role")
-        r.warn("it answers, and nothing on it is a bridge -- 'wk machine setup %s' provisions it" % name)
-    else:
-        insync = bool(fields.get("sum")) and fields.get("sum") == want
-        r.raw("role_insync", insync)
-        if fields.get("facts") != "yes":
-            r.set("state", "role installed")
-            r.warn("its health check needs root and this end has no\n      non-interactive route to it -- "
-                   "'wk machine setup %s' gives it one, once, interactively" % name)
-        else:
-            report = bridge.judge(fields, bc)
-            if report.failed:
-                r.set("state", "unhealthy")
-                r.opt("health", next((text for level, text in report.rows if level == "bad"), ""))
-            else:
-                r.set("state", "up")
-        if not insync:
-            r.warn("the role on it is not this repository's -- 'wk machine setup %s' re-provisions it" % name)
-    return r.done()
 
 
 def wait_until_idle(poll, timeout, interval, clock, label, info, warn):
@@ -659,7 +589,7 @@ def wait_until_idle(poll, timeout, interval, clock, label, info, warn):
 
 
 class Walk:
-    """One `wk status`: a job per place this machine lists, plus the fleet's devices and bridges."""
+    """One `wk status`: a job per place this machine lists, plus the fleet's devices."""
 
     def __init__(self, root, name=None, fleet=True, devices=True, env=None, clock=None, reg=None):
         self.root = str(root)
@@ -728,10 +658,10 @@ class Walk:
             self.health_owner = next((t for t in names if self._is_here(t)), None)
             jobs = [(t, self._job(t, None)) for t in names]
             if self.devices:
-                jobs += [("devices", self.fleet_devices), ("bridges", self.bridges)]
+                jobs += [("devices", self.fleet_devices)]
         if markers:
-            plan = [{"job": t, "machine": self.machine_of_place(t)} for t, _ in jobs if t not in ("devices", "bridges")]
-            plan += [{"job": t} for t, _ in jobs if t in ("devices", "bridges")]
+            plan = [{"job": t, "machine": self.machine_of_place(t)} for t, _ in jobs if t != "devices"]
+            plan += [{"job": t} for t, _ in jobs if t == "devices"]
             yield {"kind": "plan", "jobs": plan}
         worst = 0
         with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
@@ -990,19 +920,3 @@ class Walk:
         with ThreadPoolExecutor(max_workers=max(1, len(confs))) as pool:
             recs = list(pool.map(one, confs))
         return [r for r in recs if r], 0
-
-    def bridges(self):
-        f = fleet.Fleet(self.root, self.env)
-        names = f.names(("bridge",))
-        want = bridge_role_sum(self.root)
-        connect = fleet_timeout(self.env)
-        cap = float(self.env.get("WK_BRIDGE_TIMEOUT", "20"))
-
-        def one(name):
-            out = bridge_ssh(name, BRIDGE_PROBE, True, connect, cap)
-            if not out.startswith("reachable="):
-                out = bridge_ssh(name, BRIDGE_PROBE, False, connect, cap)
-            return bridge_record(name, f.load(name), want, kv(out), self.reach)
-
-        with ThreadPoolExecutor(max_workers=max(1, len(names))) as pool:
-            return list(pool.map(one, names)), 0

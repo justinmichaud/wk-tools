@@ -57,7 +57,7 @@ class World(Host):
         self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
         self.store_dir = str(self.tmp / "store")
         self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": self.store_dir, "WK_IN_VM": "1", "WK_ROOT": str(REPO),
-                    "WK_LOCK_DIR": str(self.tmp / "locks"), "XDG_STATE_HOME": str(self.tmp / "state"), "WK_PMOS_ROOT": "/p"}
+                    "WK_LOCK_DIR": str(self.tmp / "locks"), "XDG_STATE_HOME": str(self.tmp / "state")}
         self.clock = FakeClock()
         self.store = Store(self.env)
         self.dirs.update({self.env["WK_LOCK_DIR"], os.path.join(self.store_dir, "ws")})
@@ -73,11 +73,9 @@ class World(Host):
         self.answer(["git", "-C", self.store.mirror_dir(), "for-each-ref"])
         self.container = places.Container("container", str(REPO), self.env, self)
         self.vm = None
-        self.remotes, self.boards, self.offline, self.pmos_hosts = [], [], {}, []
-        self.board, self.pmos = Host("rpi5-bench"), Host("pmhost")
+        self.remotes, self.boards, self.offline = [], [], {}
+        self.board = Host("rpi5-bench")
         self.install = types.SimpleNamespace(staging_root=lambda: None, here=self)
-        self.pmos.outs, self.pmos.rcs = [], {}
-        self.pmos.react(["sh", "-c"], self._pmos_sh)
         self.board.react(["ls", "-1A"], lambda a, f: Result(0, "".join(n + "\n" for n in f.listdir(a[-1]))) if a[-1] in f.dirs
                          else Result(0))
         self.effects = []
@@ -100,20 +98,6 @@ class World(Host):
             f.containers.discard(n)
             f._drop(os.path.join(self.store_dir, "ws", n))
         return Result(0)
-
-    def _pmos_sh(self, argv, f):
-        t = argv[2]
-        if t.startswith("du -sk /p/work /p/out"):
-            return Result(0, "500\t/p/work\n300\t/p/out\n")
-        if t.startswith("du -sk /p/work"):
-            return Result(0, "500\n")
-        if t.startswith("ls -1t /p/out"):
-            return Result(0, "".join(n + "\n" for n in f.outs))
-        if t.startswith("cat /p/out/"):
-            return Result(0, f.rcs.get(t.split("/")[3], ""))
-        if t.startswith("rm -rf /p/out/"):
-            f.outs.remove(t.split("/")[-1])
-        return Result(0, "1M\n" if t.startswith("du -sh") else "")
 
     def remove(self, path):
         super().remove(path)
@@ -174,12 +158,6 @@ class FakeGc(gc.Gc):
 
     def reach(self):
         return types.SimpleNamespace(offline=lambda n: self.w.offline.get(n, ""))
-
-    def pmos_hosts(self):
-        return self.w.pmos_hosts
-
-    def pmos_machine(self, host):
-        return self.w.pmos
 
     def install(self):
         return self.w.install
@@ -242,14 +220,6 @@ def _seed(w):
     return lambda: d not in w.dirs
 
 
-def _bridge_image(w):
-    d = os.path.join(w.store.cache_dir(), "bridge")
-    w.mkdirs(d)
-    path = os.path.join(d, "moose-bmc.img")
-    w.files[path] = "x" * 64
-    return lambda: path not in w.files
-
-
 def _payload(w):
     seeds = os.path.join(w.store.cache_dir(), "bench")
     for n in ("speedometer3-aaaaaaaaaaaa", "speedometer3-bbbbbbbbbbbb"):
@@ -302,17 +272,6 @@ def _tart_cache(w):
 def _guest_base(w):
     w.vm = FakeVm(w, ["wk-base"])
     return lambda: False
-
-
-def _pmos_builds(w):
-    w.pmos_hosts = ["pmhost"]
-    w.pmos.outs, w.pmos.rcs = ["pm-3", "pm-2", "pm-1"], {"pm-2": "0", "pm-1": "0"}
-    return lambda: w.pmos.outs == ["pm-2"]
-
-
-def _pmos_work(w):
-    w.pmos_hosts = ["pmhost"]
-    return lambda: any("rm -rf /p/work" in a[-1] for a in w.pmos.acts())
 
 
 def _staged(w, which):
@@ -377,7 +336,6 @@ KINDS = {
     "snapshot": (_snapshot, ""),
     "mirror": (_mirror, "--purge-mirror"),
     "seed": (_seed, ""),
-    "bridge-image": (_bridge_image, ""),
     "payload": (_payload, ""),
     "runner": (_runner, ""),
     "build-output": (_build_output, "--purge-builds"),
@@ -387,8 +345,6 @@ KINDS = {
     "ccache": (_ccache, ""),
     "tart-cache": (_tart_cache, ""),
     "guest-base": (_guest_base, "wk sysimage build macos-guest-base --rm"),
-    "pmos-builds": (_pmos_builds, ""),
-    "pmos-work": (_pmos_work, "--purge-pmos"),
     "staged-unfinished": (lambda w: _staged(w, "20260103"), ""),
     "staged-finished": (lambda w: _staged(w, "20260101"), "--purge-builds"),
     "board-slot-copy": (lambda w: _board(w, "a.part"), ""),
@@ -453,7 +409,7 @@ class TestAMeasurementIsNeverRubble(GcTest):
 
     def test_no_flag_takes_it_and_gc_names_the_move_into_its_workspace(self):
         d = self.task("bug-238")
-        for flags in ((), ("--purge-rubble",), ("--purge-rubble", "--purge-builds", "--purge-images", "--purge-pmos")):
+        for flags in ((), ("--purge-rubble",), ("--purge-rubble", "--purge-builds", "--purge-images")):
             with self.subTest(flags=flags):
                 rc, err = self.run_gc(*flags)
                 self.assertEqual(rc, 0, err)

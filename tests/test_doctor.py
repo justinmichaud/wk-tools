@@ -152,7 +152,7 @@ PEERS = json.dumps({"Peer": {"a": {"DNSName": "pi-rescue.tail.ts.net.", "Tailsca
 
 
 def probed(mode="host", armed="", **over):
-    f = dict(role="bench-device", probeable="yes", mode=mode, bridge="", armed=armed, armed_by="me",
+    f = dict(role="bench-device", probeable="yes", mode=mode, armed=armed, armed_by="me",
              armed_at="2099-01-01T00:00:00Z", armed_boot="", boot_id="", media="sd")
     f.update(over)
     return f
@@ -508,19 +508,6 @@ class TestAMachineThatDoesNotAnswer(unittest.TestCase):
                                  findings=lambda root, probe, env=None, here=None: [("wanted", "ccache", "")]).build_machine("box"))
         self.assertEqual((MISS, "ccache", "see 'wk machine setup box'"), rows[0])
         self.assertEqual((OK, "provisioned from this tree's remote/provision.sh + remote/deps.sh", ""), rows[1])
-
-    def test_a_bridge_phone_that_does_not_answer_is_unknown(self):
-        d = tempfile.mkdtemp(prefix="wk-test-doctor-bridges-")
-        self.addCleanup(shutil.rmtree, d)
-        for n in ("phone-a", "phone-b"):
-            with open(os.path.join(d, n + ".conf"), "w") as f:
-                f.write("kind=bridge\ndevice=pinephone\nsegment=10.9.0.0/24\nrouter=10.9.0.1\n")
-        fake = Fake()
-        fake.react(["ssh"], lambda argv, fk: Result(255, "", "No route to host") if "phone-a" in " ".join(argv)
-                   else Result(0, "percent=87\nstatus=Charging\nlimit=80\ncurrent=80\n"))
-        rows = list(fake_doctor(False, env={"WK_MACHINES_DIR": d}, machine=fake).battery())
-        self.assertEqual([(UNK, "phone-a: did not answer", "wk machine status phone-a"),
-                          (OK, "phone-b: 87% Charging, capped at 80%", "")], rows)
 
 
 class TestRootAccess(unittest.TestCase):

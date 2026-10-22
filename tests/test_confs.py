@@ -83,14 +83,13 @@ class TestConfFieldSets(unittest.TestCase):
     def test_machines_of_each_kind(self):
         wk = REPO / "lib" / "wk"
         bench = loader_keys(*(p for d in ("boot", "sysimage") for p in sorted((wk / d).glob("*.py"))), wk / "reach.py")
-        bridge = loader_keys(*sorted((wk / "bridge").glob("*.py")), wk / "fleet.py")
-        for kinds, known in ((fleet.BENCH_KINDS, bench), (("bridge",), bridge), (fleet.PLACE_KINDS, set(places.CONF_ENV))):
+        for kinds, known in ((fleet.BENCH_KINDS, bench), (fleet.PLACE_KINDS, set(places.CONF_ENV))):
             with self.subTest(kinds=kinds):
                 self.assert_one_field_set(conf_files("machines", kinds), known)
 
     def test_image_configs_per_builder(self):
         text = (REPO / "lib" / "wk" / "images.py").read_text()
-        known = set(re.findall(r"\b(?:CFG_|IMG_|YOC_|BR_|FET_|PMO_)[A-Z0-9_]+\b", text))
+        known = set(re.findall(r"\b(?:CFG_|IMG_|YOC_|BR_|FET_)[A-Z0-9_]+\b", text))
         # Facts about one configuration, not fields its builder group is missing.
         optional = {"CFG_NEEDS", "BR_KERNEL_DEB_URL", "BR_KERNEL_DEB_SHA256", "BR_KERNEL_RELEASE",
                     "YOC_PORT_TARGET_FROM", "YOC_MACHINE", "YOC_MULTILIB", "YOC_MULTILIB_TUNE"}

@@ -18,11 +18,11 @@ class TestQuietSiblings(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp(prefix="wk-test-quiet-"))
         self.addCleanup(shutil.rmtree, str(self.dir), True)
 
-    def _machine(self, name, net="wifi", bridge="", bench=True):
+    def _machine(self, name, net="wifi", bench=True):
         (self.dir / f"{name}.conf").write_text(
             f'ssh="{name}-rescue"\n'
             + (f'bench_ssh="{name}-bench"\n' if bench else "")
-            + f'net={net}\nbridge="{bridge}"\n'
+            + f'net={net}\n'
             'kind=board\ndriver=pi-sd\ndevice=/dev/mmcblk0\nroot=/dev/mmcblk0p2\n'
             f'note="{name}, a test fixture"\n'
         )
@@ -53,11 +53,6 @@ class TestQuietSiblings(unittest.TestCase):
         self._machine("moose", net="cable")
         got = self._run("rpi4", [("rpi3-rescue", False), ("rpi3-bench", False), ("moose-rescue", False)])
         self.assertEqual(got, (1, 1))
-
-    def test_a_board_behind_a_different_bridge_is_not_a_sibling(self):
-        self._machine("rpi3", net="wifi", bridge="phone-a")
-        self._machine("rpi4", net="wifi", bridge="phone-b")
-        self.assertEqual(self._run("rpi4", [("rpi3-rescue", False)]), (0, 0))
 
     def test_no_tailnet_view_claims_nothing(self):
         self._machine("rpi3")

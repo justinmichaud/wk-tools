@@ -30,8 +30,8 @@
 #
 #   --all   also ask every build machine in machines/ for its build tools,
 #           commit identity, build variables, credential copies and provisioning
-#           (one that does not answer is unreachable, never broken); and every
-#           bridge phone's battery charge cap and this Mac's `pmset -g batt`.
+#           (one that does not answer is unreachable, never broken); and this
+#           Mac's `pmset -g batt`.
 #
 #   --probe-store   the store's key=value facts alone, for the host that asks
 #                   the podman VM to run this where the store is

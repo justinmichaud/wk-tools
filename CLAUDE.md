@@ -4,6 +4,9 @@ This file binds every change to **this repository**. Two other audiences have
 their own files: `claude/CLAUDE.md` is deployed inside a workspace,
 `claude/CLAUDE-host.md` to a host that drives `wk`. Neither repeats this one.
 
+`docs/future/` is not part of the tree: it lists what has no user yet, and
+no agent reads or works on it.
+
 Where the design lives: README.md is the one document — architecture,
 setup, and every supported workflow by example. Nothing else in the tree
 describes the design, and where any file disagrees with it, the
@@ -128,9 +131,8 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
   the input that produces it and rebuilding, never by patching the running copy.
 - **A node is reached by its tailnet name, and how to reach it is not written
   down.** No address, `.local` name, MAC or `ProxyJump` is stored, in
-  `dotfiles/ssh/config` or in code. The two things that cannot hold a tailnet
-  identity — moose's BMC (through its bridge phone) and Igalia's build boxes
-  (through the company gateway) — are the only ssh-config entries. A board the
+  `dotfiles/ssh/config` or in code. Igalia's build boxes (through the company
+  gateway) cannot hold a tailnet identity and are the only ssh-config entries. A board the
   tailnet cannot name is found by enumeration (`find_mac`, lib/wk/reach.py),
   and what it finds is not written down. There is no mDNS.
 

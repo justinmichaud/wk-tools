@@ -500,7 +500,7 @@ class TestStatusArmedTransition(unittest.TestCase):
     """status.armed_transition: an armed machine's line shows the system, who and when; a record its boot spent reads
     desync; the refusal of a mutating command is TestBootOrder's."""
 
-    FIELDS = dict(role="workstation", probeable="yes", mode="host", bridge="", armed="img-1", media="usb",
+    FIELDS = dict(role="workstation", probeable="yes", mode="host", armed="img-1", media="usb",
                   reprovision="", tailnet="", direct="", armed_by="tolken", armed_at="2026-01-01T00:00:00Z")
 
     def text(self, rec):

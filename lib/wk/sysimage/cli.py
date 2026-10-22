@@ -4,12 +4,12 @@ import re
 
 from wk import act, fleet, images, job, pgo, record
 from wk.kv import ConfError
-from wk.sysimage import buildroot, disk, guestbase, macvolume, pmos, task, write as writemod, yocto
+from wk.sysimage import buildroot, disk, guestbase, macvolume, write as writemod, yocto
 from wk.sysimage import ls as lsmod
 
 SHA = re.compile(r"^[0-9a-f]{40}$")
 UNKNOWN = "unknown image preset '%s'.\n    'wk sysimage presets' lists every one."
-BUILDERS = ("yocto", "buildroot", "pmos", "fetch", "mac-volume", "guest")
+BUILDERS = ("yocto", "buildroot", "mac-volume", "guest")
 
 
 def wsname(argv, env=None):
@@ -82,12 +82,10 @@ class Sysimage:
         if not spec:
             act.die("usage: wk sysimage build <image-preset> [options]; see wk sysimage -h")
         p = self.buildable(spec)
-        make = {"fetch": lambda: task.Fetch(self.machine, p, self.env),
-                "mac-volume": lambda: macvolume.MacVolume(self.machine, p, self.env, self.clock),
+        make = {"mac-volume": lambda: macvolume.MacVolume(self.machine, p, self.env, self.clock),
                 "guest": lambda: guestbase.Base(self.reg.load("vm"), self.clock),
                 "buildroot": lambda: buildroot.Buildroot(self.reg, p, spec, self.clock),
-                "yocto": lambda: yocto.Yocto(self.reg, p, spec, self.clock),
-                "pmos": lambda: pmos.Pmos(self.reg, p, spec, self.clock)}
+                "yocto": lambda: yocto.Yocto(self.reg, p, spec, self.clock)}
         return make[p["IMG_BUILDER"]]().build(rest)
 
     def webkit(self, spec, rest):

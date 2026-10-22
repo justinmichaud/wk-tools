@@ -17,8 +17,7 @@ build is deployed under `/WebKit/WebKit` (an ext4 disk on `/dev/sda1` mounted at
 ## 0. Reach the board (always do this first)
 
 **The board is named by the fleet, not by an address you ask for.** `machines/rpi3.conf`
-carries its ssh name, and the workstation's `dotfiles/ssh/config` carries the jump through the
-tailnet bridge that fronts these boards. Use the name: `SSH="ssh rpi3"`. Log in as **root** (no
+carries its ssh name. Use the name: `SSH="ssh rpi3"`. Log in as **root** (no
 password, key-based).
 
 **From inside a workspace this may not work at all, and that is the sandbox, not a fault.** A

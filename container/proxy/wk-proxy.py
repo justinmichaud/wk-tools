@@ -57,6 +57,7 @@ ALLOWED_HOSTS = {
     "archive.ubuntu.com": (80, 443),
     "security.ubuntu.com": (80, 443),
     "ddebs.ubuntu.com": (80, 443),
+    "apt.llvm.org": (80, 443),
     "agentclientprotocol.com": (443,),
 
     "webkit.org": (80, 443),

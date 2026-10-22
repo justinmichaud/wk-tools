@@ -13,7 +13,7 @@ Image = namedtuple("Image", "builder ws path")   # path None: an image workspace
 
 ROW = "%-40s %-8s %-10s %-10s %-9s %-8s %s"
 HEADER = ("WORKSPACE", "BOARD", "WHERE", "BUILDER", "STATE", "SIZE", "BUILT")
-HOST_BUILDERS = ("mac-volume", "guest", "fetch", "pmos")
+HOST_BUILDERS = ("mac-volume", "guest")
 
 
 class Unknown(Exception):
@@ -88,7 +88,7 @@ def host_presets(env):
 
 def builder_outputs(reg, clock, p):
     """A host builder's marker, read off reg.machine/reg.env, the one path holds and path also ask; Unknown when unreadable."""
-    from wk.sysimage import guestbase, macvolume, pmos, task
+    from wk.sysimage import guestbase, macvolume
     if p["IMG_BUILDER"] == "mac-volume":
         return macvolume.MacVolume(reg.machine, p, reg.env, clock).outputs()
     if p["IMG_BUILDER"] == "guest":
@@ -97,10 +97,6 @@ def builder_outputs(reg, clock, p):
         except LookupError:
             return []
         return guestbase.Base(vm, clock).outputs()
-    if p["IMG_BUILDER"] == "fetch":
-        return task.Fetch(reg.machine, p, reg.env).outputs()
-    if p["IMG_BUILDER"] == "pmos":
-        return pmos.outputs(reg, p)
     return None
 
 

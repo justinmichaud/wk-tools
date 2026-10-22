@@ -47,9 +47,9 @@ LINE_RULES = {
         lambda p, l: re.search(r"^[^#]*trap .*EXIT", l) and p.name != "common.sh" and sources_common(p)),
     "a bash file parses JSON": (
         shell_files,
-        lambda p, l: any(r.search(l) for r in JSON_PARSERS) and p.relative_to(REPO).as_posix() != "bridge/bin/wk-bridge-netwatch"),
+        lambda p, l: any(r.search(l) for r in JSON_PARSERS)),
     "a tailscale key is passed through argv": (
-        under("cmd", "bench", "bridge", "boot", "image", "lib"),
+        under("cmd", "bench", "boot", "image", "lib"),
         lambda p, l: re.search(r"--auth-?key", l) and code(l) and "file:" not in l),
     "a cross-machine rsync carries the local umask (no --chmod)": (
         shell_files,
@@ -167,31 +167,6 @@ class TestMachineRegistry(WkTest):
         self.assertEqual(bad, [], "machine confs that do not stand alone")
         listed = sorted(line.split()[0] for line in cli.listing(REPO, env).splitlines())
         self.assertEqual(listed, sorted(names), "wk boot's listing and machines/ disagree")
-
-
-class TestBridgeDeclarations(WkTest):
-    def test_bridge_kconfig_delta_is_declarable(self):
-        bad = []
-        for prof in ("bridge-pinephone", "bridge-librem5"):
-            p = images.quiet_load(prof)
-            if p is None or not p["PMO_KCONFIG"]:
-                continue
-            if "/" not in p["PMO_KERNEL_APORT"]:
-                bad.append("%s: PMO_KCONFIG with no PMO_KERNEL_APORT path" % prof)
-            bad += ["%s: '%s' malformed" % (prof, o) for o in p["PMO_KCONFIG"].split()
-                    if not re.match(r"^CONFIG_\w+=[ymn]$", o)]
-        self.assertEqual(bad, [], "kernel config deltas that would fail mid-build")
-
-    def test_bridge_image_carries_role_packages(self):
-        provision = (REPO / "bridge" / "provision.sh").read_text(errors="replace")
-        req_m = re.search(r'(?m)^REQUIRED="(.*)"$', provision)
-        self.assertIsNotNone(req_m, "could not read the package lists out of bridge/provision.sh")
-        required = req_m.group(1).split()
-        bridges = [p for p in map(images.load, images.names()) if p["IMG_BUILDER"] == "pmos"]
-        self.assertTrue(bridges, "no pmos image preset in image/presets")
-        for p in bridges:
-            missing = [r for r in required if r not in p["PMO_PACKAGES"].split(",")]
-            self.assertEqual(missing, [], f"bridge/provision.sh needs these and {p['IMG_PRESET']} does not carry them: {missing}")
 
 
 class TestBuildLocations(WkTest):

@@ -45,29 +45,3 @@ Host tolken-bench
   UserKnownHostsFile /dev/null
   ServerAliveInterval 30
   ServerAliveCountMax 6
-
-Host moosebmc
-  HostName 10.99.0.2
-  User root
-  Port 2200
-  ProxyJump librem5-oob
-
-# Both bridge phones roam between two APs on one SSID, and a roam stalls TCP long enough to kill an idle session while the phone itself never wavered -- ServerAliveInterval below is the fix.
-Host tailnet-bridge-generic
-  HostKeyAlias tailnet-bridge-generic
-
-Host tailnet-bridge-moose-bmc
-  HostKeyAlias tailnet-bridge-moose-bmc
-
-Host tailnet-bridge-generic tailnet-bridge-moose-bmc
-  User user
-  ServerAliveInterval 15
-  ServerAliveCountMax 4
-  StrictHostKeyChecking accept-new
-  ConnectTimeout 10
-
-# This phone is not a provisioned bridge, so password authentication is still on it and a hop that refuses to ask fails for the wrong reason: BatchMode no, written out because ssh's default is indistinguishable from an omission.
-Host librem5-oob
-  StrictHostKeyChecking accept-new
-  ConnectTimeout 10
-  BatchMode no

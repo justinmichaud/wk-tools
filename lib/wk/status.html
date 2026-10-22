@@ -229,7 +229,7 @@ const VERDICT = {
 };
 function summary(doc) {
   let ws = 0, attn = 0, running = 0, failed = 0, stale = 0, full = 0, drift = 0,
-      unpushed = 0, away = 0, oldrole = 0, bench = 0;
+      unpushed = 0, away = 0, bench = 0;
   for (const m of doc.machines) {
     for (const g of m.methods) for (const w of g.workspaces) {
       ws++;
@@ -248,7 +248,6 @@ function summary(doc) {
     if (String(f.mode || "").startsWith("bench")) bench++;
     if (String(f.mode || "").startsWith("unreachable") || String(f.mode || "").startsWith("no answer")) away++;
   }
-  for (const b of doc.bridges || []) if (b.role_insync === false) oldrole++;
   const bits = [
     [attn,     "bad",    n => `${n} workspace${n>1?"s":""} needing a person`],
     [failed,   "bad",    n => `${n} failed`],
@@ -257,7 +256,6 @@ function summary(doc) {
     [running,  "busy",   n => `${n} running`],
     [unpushed, "busy",   n => `${n} unpushed commit${n>1?"s":""}`],
     [drift,    "busy",   n => `${n} wk-tools ${n>1?"copies":"copy"} behind`],
-    [oldrole,  "busy",   n => `${n} bridge role${n>1?"s":""} older than the repo`],
     [away,     "idle",   n => `${n} board${n>1?"s":""} not answering`],
     [bench,    "accent", n => `${n} board${n>1?"s":""} in bench mode`],
   ];
@@ -349,25 +347,6 @@ function render(doc) {
     parts.push(`</div></section>`);
   }
 
-  if (doc.bridges && doc.bridges.length) {
-    parts.push(`<section class="machine"><div class="mhead"><h2>tailnet bridges</h2>
-      <span class="tag">probed: the segment, the role, and its own health check</span></div>
-      <table><tr><th>bridge</th><th>device</th><th>segment</th><th>state</th><th>role</th><th>health</th></tr>`);
-    for (const b of doc.bridges) {
-      const role = b.role_insync === undefined ? ""
-        : b.role_insync ? chip("this repository's", "good")
-        : chip("older — wk machine setup " + b.name, "bad");
-      parts.push(`<tr><td class="name">${ESC(b.name)}</td><td>${ESC(b.device)}</td><td>${ESC(b.segment)}</td>
-        <td>${chip(b.state || "?")}</td><td class="wide">${role}</td>
-        <td class="wide dim">${ESC(b.health || "")}</td></tr>`);
-      const extra = [];
-      if (b.note) extra.push(`<div class="note">${ESC(b.note)}</div>`);
-      const bm = meta(b);
-      if (extra.length || bm) parts.push(`<tr class="note"><td colspan="6" class="wide">${extra.join("")}${bm}</td></tr>`);
-      for (const n of (b.notes || [])) parts.push(`<tr class="note"><td colspan="6" class="wide"><div class="note warn">${ESC(n.text)}</div></td></tr>`);
-    }
-    parts.push(`</table></section>`);
-  }
   document.getElementById("app").innerHTML = parts.join("");
 }
 const LIVE = __LIVE__;

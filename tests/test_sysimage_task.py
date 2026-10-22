@@ -431,9 +431,9 @@ class TestTheBuilderIsTheImagePresets(TaskTest):
         self.assertEqual([c[0] for c in cycle.call_args_list], [(["--slot", "base"],)])
         self.assertEqual((yb.call_args[0], yw.call_args[0]), ((["--stage", "image"],), (["--slot", "base"],)))
 
-    def test_a_fetch_or_pmos_image_takes_no_slot(self):
+    def test_a_host_built_image_takes_no_slot(self):
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            self.sysimage().webkit("bridge-pinephone", ["--slot", "base"])
+            self.sysimage().webkit("macos-guest-base", ["--slot", "base"])
         self.assertIn("only a buildroot or yocto image takes WebKit slots", err.getvalue())
 
 
@@ -541,13 +541,6 @@ class TestFetch(TaskTest):
     def test_the_cache_is_the_store_s_where_this_machine_holds_it(self):
         self.assertEqual(task.cache_dir(self.w.env), os.path.join(self.w.env["WK_STORE"], "cache", "images"))
 
-    def test_the_fetch_builder_s_dry_run_fetches_nothing(self):
-        os.environ["WK_DRY_RUN"] = "1"
-        p = dict(images.FIELDS, IMG_PRESET="f", FET_URL=self.URL, FET_SHA256=self.PIN, FET_NOTE="an image")
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            task.Fetch(self.w, p, self.w.env).build([])
-        self.assertIn("would fetch image f\n  from        %s\n              not cached -- would download" % self.URL, err.getvalue())
-        self.assertEqual([e for e in self.w.effects if e[0] != "run"], [])
 
 
 if __name__ == "__main__":
