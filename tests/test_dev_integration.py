@@ -434,7 +434,9 @@ class PlaceSteps:
         while time.monotonic() < deadline and self.inside("cat %s 2>/dev/null" % left).out.strip() == "":
             time.sleep(5)
         said = self.inside("cat %s; rm -f %s" % (left, left)).out
-        self.assertIn("no shell of yours is behind this caller", said, "a daemon left behind by the session pushed:\n%s" % tail(said))
+        # under the shared pid namespace a daemon the session left sits under conmon like wk's own run, and either is refused
+        self.assertRegex(said, "no shell of yours is behind this caller|not from a shell of yours",
+                         "a daemon left behind by the session pushed:\n%s" % tail(said))
 
     @step(6)
     def test_06_pi_answers(self):
