@@ -460,7 +460,7 @@ class Ssh(Machine):
         if self.channel:
             return self.channel(tty) + [remote]
         # The far sshd runs a command under a non-login shell, so ~/.local/bin and Homebrew are off its PATH.
-        return ["ssh"] + (["-t"] if tty else []) + self.opts + [self.dest, LOGIN + shlex.quote(remote)]
+        return ["ssh"] + ({"force": ["-tt"], True: ["-t"]}.get(tty, [])) + self.opts + [self.dest, LOGIN + shlex.quote(remote)]
 
     def _ssh(self, remote, input=None, timeout=None, how=None, stream=False):
         self._up()

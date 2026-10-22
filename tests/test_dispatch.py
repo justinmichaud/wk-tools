@@ -17,6 +17,7 @@ from tests.support import REPO, WkTest, clean_env, fake_workspace, stub_path
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, decl, dispatch, places, presets, project, repos, sshalias, store, workspace  # noqa: E402
 from wk.decl import Command  # noqa: E402
+from wk.machine import Ssh  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
 TABLES = [(name, m.COMMAND) for name, m in decl.commands(REPO)]
@@ -35,7 +36,7 @@ def dispatched(argv, macos=False, place="container", delegates=False, env=None, 
     def forward(*a):
         raise Handed("forward", list(a[-1]))
 
-    def delegate(t, cmd, args, readonly):
+    def delegate(t, cmd, args, readonly, session=False):
         raise Handed("delegate", args, readonly)
 
     patches = [mock.patch.dict(os.environ, clean_env(env, wk_root=False), clear=True),
@@ -142,6 +143,16 @@ class TestWhere(unittest.TestCase):
                 os.kill(os.getpid(), signal.SIGTERM)
                 return 143
         self.assertEqual((dispatch.relayed(Child()), Child.sent, signal.getsignal(signal.SIGTERM)), (143, [signal.SIGTERM], saved))
+
+    def test_a_session_is_forwarded_with_a_pty_its_callers_death_hangs_up_and_nothing_else_is(self):
+        rec = {"State": "running", "SSHConfig": {"Port": 5555, "IdentityPath": "/k", "RemoteUsername": "core"}}
+        reg = mock.Mock(load=lambda place: mock.Mock(wk_cmd=lambda words, env: "wk " + " ".join(words)))
+        with mock.patch.object(dispatch.shutil, "which", return_value="/bin/podman"), mock.patch.object(dispatch, "podman_vm", return_value=rec), \
+                mock.patch.object(dispatch, "registry", return_value=reg), mock.patch.object(dispatch, "tty", return_value=False):
+            for cmd, words, want in (("ai", ["claude", "ws1", "-p", "x"], ["ssh", "-tt"]), ("build", ["ws1", "jsc-release"], ["podman", "machine"])):
+                inv = types.SimpleNamespace(cmd=cmd, command=decl.parse(cmd, decl.load(REPO, cmd).COMMAND, words)[0])
+                self.assertEqual(dispatch.vm_argv(inv, words)[:2], want)
+        self.assertEqual(Ssh("box").argv("wk ai", tty="force")[:2], ["ssh", "-tt"])
 
     def test_the_dispatcher_asks_before_it_forwards_a_removal(self):
         how, status, _ = dispatched(["rm", "ws1"], macos=True, run=True, env={"WK_YES": "1"},
