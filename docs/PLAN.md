@@ -6,17 +6,17 @@ last step lands.
 
 ## Where we are
 
-Measured 2026-10-21 in a wk-tools workspace (`./wk selftest`).
+Measured 2026-10-22 06:00 MST on the host, after the night's cut (`./wk selftest`).
 
 | | |
 | --- | --- |
-| code | 36k non-blank lines of Python outside `tests/`, 6k of shell (what runs on a board, a phone, a bench install or in a place, and the setup stages); 25 commands, all Python |
-| tests | 52k lines, 248 modules, 3,963 tests in the lint and unit tiers, 127 in the live tier |
-| `wk selftest` (lint then unit) | 3,963 tests, 3.9 minutes, green; the lint tier alone 15 s |
-| the slowest unit test | 5.7 s, under a 30 s budget the runner enforces |
-| owed tests | 9 marked `owed` in the tree (two lint, one unit, six live-gated); the runner counts the 4 it ran |
-| the Owed table | every row names a test in the tree: 23 held by a `live`-marked body, 9 by an `owed` mark, and the rest by an `owed` stub in `tests/test_owed_live.py` that the live tier runs and fails until the behaviour is proven |
-| the last live run from the host | before the push rule became the caller's ancestry; `ToolsWorkspaceLive` and `DevIntegrationContainer` steps 5, 10 and 11 are owed a run |
+| code | 29.8k non-blank lines of Python outside `tests/` (26.7k in the budget rows: `lib/wk`, `lib/*.py`, `cmd/`, `wk`), 7.0k of shell (what runs on a board, a bench install or in a place, the helpers and the setup stages); 25 commands, each a table and one function |
+| tests | 42.4k lines, 137 modules, 3,163 unit and 94 lint tests, 166 in the live tier |
+| `wk selftest` (lint then unit) | 3,257 tests, 4.2 minutes, green; the lint tier alone 9 s |
+| the slowest unit test | 10.7 s (`test_crash_only`'s stage converge), under the 30 s budget the runner enforces |
+| owed tests | 27 in each tier: the budget rows (`lint.budgets`), the dry runs the kill-point table found not on the recorder, `lint.no_addresses`, `lint.one_wifi_reader` |
+| the Owed table | `tests/test_owed_live.py` is generated from it at import: one stub per `live`/`unit` name no test holds (89) |
+| the last live run from the host | 2026-10-22, lane 8 (see the night's memory): the push rule by the caller's ancestry is served to a person (GitHub's 422) and refused to wk's own run and an agent (412) |
 
 Why bugs come back:
 
