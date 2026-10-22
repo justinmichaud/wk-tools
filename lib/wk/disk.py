@@ -59,6 +59,13 @@ class Report:
             (self.row if add else self.note)(None if k == "??" else int(k), what, note)
 
 
+def machine_images(env, vm_name):
+    """(podman's machine directory, the raw disk images of `vm_name` in it)."""
+    data = env.get("XDG_DATA_HOME") or os.path.join(env.get("HOME", HOME), ".local", "share")
+    mdir = os.path.join(data, "containers", "podman", "machine")
+    return mdir, glob.glob(os.path.join(mdir, "*", vm_name + "-*.raw")) + glob.glob(os.path.join(mdir, "*", vm_name + ".raw"))
+
+
 def probe_store(store):
     """kb<TAB>label<TAB>note per store row; on macOS this runs in the VM and renders out here."""
     rows = [(kb(store.mirror_dir()), "the %s mirror" % project.get("CHECKOUT"), "git/%s -- refetchable (wk sync)" % project.get("MIRROR"))]
@@ -109,11 +116,10 @@ def machine_report(root, reg):
         ctr = reg.load("container")
         vm_name = store.podman_machine()
         rep.section("the podman VM (container workspaces)")
-        mdir = os.path.join(DATA, "containers", "podman", "machine")
-        images = glob.glob(os.path.join(mdir, "*", vm_name + "-*.raw")) + glob.glob(os.path.join(mdir, "*", vm_name + ".raw"))
+        mdir, images = machine_images(store.env, vm_name)
         ceiling = ((places.podman_vm(here, vm_name) or {}).get("Resources") or {}).get("DiskSize") or "?"
         for f in images:
-            rep.row(kb(f), "disk image", "sparse, %s GB ceiling; grows, never shrinks" % ceiling)
+            rep.row(kb(f), "disk image", "sparse, %s GB ceiling; 'wk gc' returns the blocks its filesystem freed" % ceiling)
         if not images:
             rep.line("??", "disk image", "not found under %s" % mdir)
         for f in glob.glob(os.path.join(mdir, "*", "cache")):

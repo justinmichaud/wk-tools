@@ -507,8 +507,35 @@ class TestTheVmHalf(GcTest):
         def wk(*args, env=None, quiet=False):
             calls.append((args, os.environ.get("WK_YES")))
             return (0, "".join(rubble.to_line(r) + "\n" for r in rows)) if "--rows" in args else (0, "")
-        self.w.container = types.SimpleNamespace(machine_state=lambda: "running" if running else "stopped", wk=wk, list=lambda: [])
+        self.w.container = types.SimpleNamespace(machine_state=lambda: "running" if running else "stopped", wk=wk, list=lambda: [],
+                                                 store_machine=self.w)
         return g, calls
+
+    def image(self, allocated_kb, used_kb):
+        """The machine's raw image on disk, `du` counting `allocated_kb`, its filesystem using `used_kb`."""
+        d = self.w.tmp / "data" / "containers" / "podman" / "machine" / "applehv"
+        d.mkdir(parents=True)
+        (d / ("%s-arm64.raw" % self.w.store.podman_machine())).write_text("")
+        self.w.env["XDG_DATA_HOME"] = str(self.w.tmp / "data")
+        self.w.react(["du", "-sk"], lambda a, f: Result(0, "%d\t%s\n" % (allocated_kb, a[2])))
+        self.w.answer(["df", "-k", "--output=used", "/"], out="Used\n%d\n" % used_kb)
+        self.w.answer(["sudo", "fstrim", "-av"], out="/: 1 GiB trimmed\n")
+
+    def test_the_blocks_the_images_filesystem_freed_are_a_row_fstrim_takes(self):
+        g, _ = self.mac([])
+        self.image(allocated_kb=3 << 20, used_kb=1 << 20)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            rows = [r for r in g.rows() if r.kind == "image"]
+            rc = g.run(())
+        self.assertEqual([(r.kb, r.flag, r.why) for r in rows], [(2 << 20, "", "")], err.getvalue())
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertIn(("sudo", "fstrim", "-av"), [e[1] for e in self.w.effects if e[0] == "run"])
+
+    def test_under_a_gigabyte_freed_is_no_row(self):
+        g, _ = self.mac([])
+        self.image(allocated_kb=(1 << 20) + 10, used_kb=1 << 20)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual([r for r in g.rows() if r.kind == "image"], [])
 
     def test_the_vms_rows_are_asked_once_and_its_wk_takes_them_with_the_answer(self):
         g, calls = self.mac([rubble.row("snapshot", "snapshot b1", 4, take=lambda: None)])

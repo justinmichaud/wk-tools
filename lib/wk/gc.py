@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from wk import act, images, pr, project, reach, rubble as rb, workspace
+from wk import act, disk, images, pr, project, reach, rubble as rb, workspace
 from wk.act import die, info, log, warn
 from wk.bench import mac as benchmac, seed
 from wk.bench.board import SLOTS_DIR
@@ -14,6 +14,8 @@ from wk.lock import Lock, rubble as rubble_of_locks
 from wk.machine import Ssh
 from wk.store import Store, in_vm, rubble as store_rubble
 from wk.sysimage import guestbase, task
+
+TRIM_FLOOR_KB = 1 << 20   # under a GB the row is noise
 
 
 def build_outputs(store, env):
@@ -98,12 +100,25 @@ class Gc:
                           why="not looked at -- the podman machine is stopped: 'wk start', then 'wk gc' again")]
         else:
             _, out = c.wk("gc", "--rows", quiet=True)
-            far = [r for r in (rb.from_line(l, "podman VM") for l in out.splitlines()) if r]
+            far = [r for r in (rb.from_line(l, "podman VM") for l in out.splitlines()) if r] + self.image_row(c)
         blocked = next((r.why for r in far if r.kind in ("mirror", "store") and r.why), "")
         guests = [n for n, _ in vm.list()] if vm else []
         if guests:
             blocked = "kept -- guest(s) %s clone from it: 'wk rm' them first" % " ".join(guests)
         return [r._replace(why=blocked) if r.kind == "mirror" and blocked and not r.why else r for r in rows] + far
+
+    def image_row(self, c):
+        """The machine's disk image keeps the blocks its filesystem freed until the guest discards them (95 GB of 232, measured 2026-10-22)."""
+        _, images = disk.machine_images(self.store.env, self.store.podman_machine())
+        r = c.store_machine.run(["df", "-k", "--output=used", "/"])
+        try:
+            freed = sum(rb.du_kb(self.here, f) or 0 for f in images) - int(r.out.split()[-1])
+        except (IndexError, ValueError):
+            return []
+        if not images or not r.ok or freed < TRIM_FLOOR_KB:
+            return []
+        return [rb.row("image", "the podman machine's disk image, holding blocks its filesystem freed", freed,
+                       take=lambda: c.store_machine.act_run(["sudo", "fstrim", "-av"]).ok)]
 
     def image_rows(self):
         r = self.here.run(["podman", "images", "--format", "json"])
