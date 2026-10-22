@@ -107,8 +107,7 @@ def main(name, opts, reg=None, clock=None):
         jobs = 1   # one driver, so one process to catch; at a breakpoint it is silent, so no watchdog and no record
         debug_flags = "--no-timeout" + (" --additional-env-var=%s" % preset.web_process_pause_env() if opts["lldb"] == "web" else "")
 
-    # mac-release-asan builds into Release-asan/, and only WEBKIT_OUTPUTDIR tells webkitdirs so.
-    out_env = "WEBKIT_OUTPUTDIR=%s" % preset.build_dir(src) if preset.buildsys == "xcode" else ""
+    out_env = "WEBKIT_OUTPUTDIR=" + preset.output_dir(src) if preset.output_dir(src) else ""
 
     info("JSC tests (%s, -j%d)" % (preset_name, jobs) if opts["suite"] == "jsc"
          else "layout tests (%s, %s, %d processes)" % (preset_name, render_desc, jobs))

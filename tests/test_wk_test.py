@@ -64,6 +64,8 @@ class TestDryRun(TestTest):
         self.assertIn("jsc-release", err)
         self.assertIn("run-javascriptcore-tests", err)
         self.assertEqual([], [e for e in self.w.effects if e[0] == "watch"])
+        self.assertNotIn("WEBKIT_OUTPUTDIR", err)
+        self.assertIn("WEBKIT_OUTPUTDIR=/src/WebKit/WebKitBuild/asan nice", self.run_(None, "--preset", "jsc-release-asan")[1])
 
     def test_a_path_given_to_the_jsc_suite_is_the_runners_filter(self):
         os.environ["WK_DRY_RUN"] = "1"

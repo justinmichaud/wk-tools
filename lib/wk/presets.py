@@ -35,11 +35,11 @@ PRESETS = {
     "jsc-release": {"type": "Release", "jsc_only": True, "args": "--release", "port": "--jsc-only",
                     "cmake": RELWITHDEBINFO + " -DENABLE_OFFLINE_ASM_ALT_ENTRY=0", "macos": APPLE_JSC},
     "jsc-release-asan": {"type": "Release", "jsc_only": True, "args": "--release --asan", "port": "--jsc-only",
-                         "cmake": RELWITHDEBINFO,
+                         "cmake": RELWITHDEBINFO, "variant": "-asan",
                          "macos": dict(APPLE_JSC, variant="-asan", args="--release ASAN=YES")},
     "gtk-debug": {"type": "Debug", "args": "--debug", "port": "--gtk"},
     "gtk-release": {"type": "Release", "args": "--release", "port": "--gtk", "cmake": RELWITHDEBINFO},
-    "gtk-release-asan": {"type": "Release", "args": "--release --asan", "port": "--gtk", "cmake": RELWITHDEBINFO},
+    "gtk-release-asan": {"type": "Release", "args": "--release --asan", "port": "--gtk", "cmake": RELWITHDEBINFO, "variant": "-asan"},
     "wpe-release": {"type": "Release", "args": "--release", "port": "--wpe", "cmake": RELWITHDEBINFO + " -DENABLE_WPE_PLATFORM=ON"},
     "mac-debug": {"type": "Debug", "args": "--debug", "apple": True},
     "mac-release": {"type": "Release", "args": "--release", "apple": True},
@@ -92,12 +92,14 @@ class Preset:
         self.disk_gb = spec.get("disk_gb") or resources.disk_gb(env)
 
     def build_subdir(self):
-        """The build tree under the checkout; the variant suffix keeps a sanitized or profile-guided Apple build out of the shared one."""
         if self.buildsys == "xcode":
             sdk = {"--ios-simulator": "-iphonesimulator", "--ios-device": "-iphoneos"}.get(self.port, "")
             return "WebKitBuild/%s%s%s" % (self.type, sdk, self.variant)
         port = {"--jsc-only": "JSCOnly/", "--wpe": "WPE/", "--gtk": "GTK/"}.get(self.port, "")
-        return "WebKitBuild/%s%s" % (port, self.type)
+        return "WebKitBuild/%s%s%s" % (self.variant[1:] + "/" if self.variant else "", port, self.type)
+
+    def output_dir(self, src):   # webkitdirs puts a CMake port's tree at <WEBKIT_OUTPUTDIR>/<port>/<type> whatever the sanitizer
+        return self.build_dir(src) if self.xcode() else "%s/WebKitBuild/%s" % (src, self.variant[1:]) if self.variant else ""
 
     def build_dir(self, src="/src/WebKit"):
         return "%s/%s" % (src, self.build_subdir())
@@ -250,9 +252,10 @@ def build_env(preset, src, jobs, nice, arch, ccache_dir, env, extra_cmake="", ex
     if arch in ARCH:
         a = ARCH[arch]
         out += ["WK_ARCH=" + arch, "WK_ARCH_WRAPPER=" + a["wrapper"], "WK_ARCH_CFLAGS=" + a["cflags"], "WK_ARCH_LDFLAGS=" + a["ldflags"]]
-    out_dir = preset.build_dir(src) if preset.xcode() else ""   # Xcode's DerivedData is per user, shared by every workspace on a machine
-    if out_dir:
-        out += ["WEBKIT_OUTPUTDIR=" + out_dir, "WK_DERIVED_DATA=%s/WebKitBuild/DerivedData" % src]
+    out_dir = preset.output_dir(src)
+    out += ["WEBKIT_OUTPUTDIR=" + out_dir] if out_dir else []
+    if preset.xcode():   # Xcode's DerivedData is per user, shared by every workspace on a machine
+        out.append("WK_DERIVED_DATA=%s/WebKitBuild/DerivedData" % src)
     if preset.pgo:
         out += ["WK_PGO=1", "WK_PGO_DIR=%s-profile" % out_dir, "WK_NO_COMPILE_COMMANDS=1", "WK_NO_COMPILATION_CACHE=1"]
     for v in ("WK_NO_COMPILE_COMMANDS", "WK_NO_COMPILATION_CACHE"):

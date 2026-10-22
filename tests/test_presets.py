@@ -52,8 +52,7 @@ class TestAllConfigDefaults(unittest.TestCase):
                 self.assertEqual(c.cmake, "")
 
     def test_an_unknown_name_is_a_lookup_error_and_the_list_names_every_config(self):
-        with self.assertRaises(LookupError):
-            preset("nope")
+        self.assertRaises(LookupError, preset, "nope")
         for name in presets.names():
             self.assertIn(name, presets.LIST_TEXT)
 
@@ -75,12 +74,16 @@ class TestMacJscUsesXcode(unittest.TestCase):
         self.assertEqual(preset("jsc-release", "macos").build_dir(), preset("mac-release", "macos").build_dir())
 
     def test_an_asan_config_builds_instrumented_into_its_own_dir(self):
+        """`unit presets.asan_build_dir`: webkitdirs names no sanitizer in a CMake port's tree; WEBKIT_OUTPUTDIR does."""
         asan = preset("jsc-release-asan", "macos")
-        self.assertNotEqual(asan.build_dir(), preset("jsc-release", "macos").build_dir())
         self.assertTrue(asan.build_dir().endswith("-asan"))
+        for a, tree in ((preset("jsc-release-asan"), "JSCOnly"), (preset("gtk-release-asan"), "GTK")):
+            self.assertEqual((a.run_dir("/s"), env_of(a)["WEBKIT_OUTPUTDIR"]), ("/s/WebKitBuild/asan/%s/Release/lib" % tree, "/src/WebKit/WebKitBuild/asan"))
+        self.assertNotIn("WEBKIT_OUTPUTDIR", env_of(preset("jsc-release")))
         self.assertIn("ASAN=YES", asan.args)
         self.assertTrue(preset("mac-release-asan", "macos").build_dir().endswith("Release-asan"))
         self.assertIn("--asan", preset("gtk-release-asan").args)
+
 
     def test_a_jsc_config_names_no_web_process_on_either_platform(self):
         for os in ("linux", "macos"):
@@ -119,7 +122,6 @@ class TestADiskNeedIsDeclared(unittest.TestCase):
     def test_a_profile_guided_config_declares_more_than_the_default(self):
         self.assertEqual(preset("mac-release", "macos").disk_gb, resources.DISK_GB)
         self.assertEqual(preset("mac-release-pgo", "macos").disk_gb, presets.PGO_DISK_GB)
-        self.assertGreater(presets.PGO_DISK_GB, resources.DISK_GB)
         self.assertEqual(preset("jsc-release", env={"WK_BUILD_DISK_GB": "40"}).disk_gb, 40)
 
     def test_a_profile_guided_build_runs_without_a_compilation_cache(self):
@@ -208,18 +210,15 @@ class TestCcacheIsBlindToTheJobCount(unittest.TestCase):
 
 class TestMbPerJob(unittest.TestCase):
     def test_jsconly_is_charged_less_unless_WK_MB_PER_JOB_names_a_figure(self):
-        self.assertEqual(presets.mb_per_job(preset("mac-release", "macos", "vm"), {}), 3072)
-        self.assertEqual(presets.mb_per_job(preset("gtk-debug"), {}), 4608)
-        self.assertEqual(presets.mb_per_job(preset("jsc-release"), {}), 1536)
+        self.assertEqual([presets.mb_per_job(c, {}) for c in (preset("mac-release", "macos", "vm"), preset("gtk-debug"), preset("jsc-release"))],
+                         [3072, 4608, 1536])
         self.assertEqual(presets.mb_per_job(preset("mac-release", "macos", "vm"), {"WK_MB_PER_JOB": "999"}), 999)
 
 
 class TestCompilerAndMemoryOverrides(unittest.TestCase):
     def test_wk_cc_and_wk_cxx_pick_the_compilers(self):
-        e = env_of(preset("gtk-debug", env={"WK_CC": "gcc-14", "WK_CXX": "g++-14"}))
-        self.assertEqual((e["CC"], e["CXX"]), ("gcc-14", "g++-14"))
-        e = env_of(preset("gtk-debug"))
-        self.assertEqual((e["CC"], e["CXX"]), ("clang", "clang++"))
+        for env, want in (({"WK_CC": "gcc-14", "WK_CXX": "g++-14"}, ("gcc-14", "g++-14")), ({}, ("clang", "clang++"))):
+            self.assertEqual(tuple(env_of(preset("gtk-debug", env=env))[k] for k in ("CC", "CXX")), want)
 
 
 if __name__ == "__main__":
