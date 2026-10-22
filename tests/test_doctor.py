@@ -13,7 +13,7 @@ from http.server import HTTPServer
 from pathlib import Path
 from unittest import mock
 
-from tests.support import NO_REGISTRY, REPO, SYSTEM_DIRS, WkTest, clean_env
+from tests.support import NO_REGISTRY, REAL_MACHINES, REPO, SYSTEM_DIRS, WkTest, clean_env
 from tests.test_credcheck import FakeAnthropic, FakeLiteLLM
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -606,6 +606,24 @@ class TestTheMachineOverlay(unittest.TestCase):
         (row,) = named()
         self.assertIn("(backed-up)", row)
         self.assertIn("wk gc names", row)
+
+
+class TestRpi5TuningIsBackedUp(unittest.TestCase):
+    """rpi5-setup.sh cannot re-make the NUMA kernel build or the ssh key beside it; the machine-local section declares both backed-up."""
+
+    def rows(self, name):
+        doc = fake_doctor(False, env={"WK_MACHINES_DIR": str(REAL_MACHINES), "WK_IN_VM": "1", "WK_ROW_LABEL": name})
+        return [r[1] for r in doc.machine_local() if r[2].startswith("backed-up")]
+
+    def test_the_rpi5_declares_its_key_and_kernel_build(self):
+        text = " ".join(self.rows("rpi5"))
+        self.assertIn("host/linux/rpi5/id_ed25519", text)
+        self.assertIn("~/kbuild", text)
+
+    def test_another_machine_declares_neither(self):
+        text = " ".join(self.rows("elsewhere"))
+        self.assertNotIn("id_ed25519", text)
+        self.assertNotIn("kbuild", text)
 
 
 if __name__ == "__main__":

@@ -1,32 +1,11 @@
-"""`wk status` rendering: wk.status's record stream merged into one document, drawn as text, JSON, a static page
-or a served one. `plan` names every job and its machine and `flush` ends one, so a machine is drawn when its
-last job has flushed."""
+"""`wk status` rendering: wk.status's record stream merged into one document, drawn as text or JSON. `plan` names every job and its machine
+and `flush` ends one, so a machine is drawn when its last job has flushed."""
 
-import http.server
 import json
 import os
 import sys
-import threading
-import time
-import webbrowser
-
-from wk import store
-from wk.resources import workspace_marker_path
 
 MARKERS = ("plan", "flush")
-
-
-def default_mode(env, isatty):
-    """The page at a terminal that has a browser to open, the table everywhere else."""
-    if env.get("WK_STATUS_VIEW"):
-        return env["WK_STATUS_VIEW"]
-    if not isatty or env.get("CI") or env.get("NO_COLOR"):
-        return "text"
-    if os.path.isfile(workspace_marker_path(env)):
-        return "text"
-    if (env.get("SSH_CONNECTION") or env.get("SSH_TTY")) and not env.get("DISPLAY"):
-        return "text"
-    return "web"
 
 
 def colour_wanted(stdout=None, env=None):
@@ -565,113 +544,3 @@ def render_text_stream(records, out, colour):
     out.write("\n")
     out.flush()
     return merger.doc
-
-
-PAGE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "status.html")
-
-
-def page(doc, live):
-    with open(PAGE, encoding="utf-8") as fh:
-        html = fh.read()
-    return (html.replace("__LIVE__", "true" if live else "false")
-            .replace("__SEV__", json.dumps({"good": GOOD, "busy": BUSY, "bad": BAD, "idle": IDLE}))
-            .replace("__DOC__", json.dumps(doc) if not live else "null"))
-
-
-def write_page(doc, out):
-    dest = out or os.path.join(os.environ.get("TMPDIR", "/tmp"), "wk-status.html")
-    with open(dest, "w", encoding="utf-8") as fh:
-        fh.write(page(doc, live=False))
-    return dest
-
-
-class Live:
-    """Re-walked on a timer; `lock` guards the document mid-swap and `busy` the right to walk."""
-
-    def __init__(self, root, interval):
-        self.root = root
-        self.interval = max(5, int(interval))
-        self.lock = threading.Lock()
-        self.busy = threading.Lock()
-        self.doc = {"machines": [], "fleet": [], "exit": 0}
-        self.stamp = 0
-        self.refreshing = False
-
-    def payload(self):
-        with self.lock:
-            return json.dumps({"doc": self.doc, "stamp": self.stamp, "interval": self.interval,
-                               "refreshing": self.refreshing}).encode()
-
-    def refresh_once(self):
-        if not self.busy.acquire(blocking=False):
-            return
-        try:
-            with self.lock:
-                self.refreshing = True
-            doc = None
-            try:
-                from wk import status   # status imports this module
-                doc = merge(status.Walk(self.root, name=store.ws_name() or None, fleet=True, devices=True).records())
-            except Exception as exc:
-                print("wk status --web: refresh failed: %s" % exc, file=sys.stderr)
-            with self.lock:
-                if doc is not None:
-                    self.doc = doc
-                    self.stamp = int(time.time())
-                self.refreshing = False
-        finally:
-            self.busy.release()
-
-    def loop(self):
-        while True:
-            started = time.time()
-            self.refresh_once()
-            time.sleep(max(1.0, self.interval - (time.time() - started)))
-
-
-def serve(root, doc, port, interval):
-    live = Live(root, interval)
-    with live.lock:
-        live.doc = doc
-        live.stamp = int(time.time())
-    body = page(None, live=True).encode()
-
-    class Handler(http.server.BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802
-            if self.path.startswith("/status.json"):
-                data, ctype = live.payload(), "application/json"
-            elif self.path in ("/", "/index.html"):
-                data, ctype = body, "text/html; charset=utf-8"
-            else:
-                self.send_error(404)
-                return
-            self.send_response(200)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(data)
-
-        def log_message(self, *_):
-            pass
-
-    try:
-        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", int(port)), Handler)
-    except OSError as exc:
-        print("wk status: cannot serve on 127.0.0.1:%s (%s).\n"
-              "    Another 'wk status --web' is probably still running -- its page is\n"
-              "    already live. Otherwise pick a port: wk status --web --port 0" % (port, exc.strerror or exc),
-              file=sys.stderr)
-        return 1
-    url = "http://127.0.0.1:%d/" % httpd.server_port
-    threading.Thread(target=live.loop, daemon=True).start()
-    print("wk status: serving %s (refreshing every %ds, ctrl-c to stop)" % (url, live.interval), file=sys.stderr)
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        print("", file=sys.stderr)
-    return 0

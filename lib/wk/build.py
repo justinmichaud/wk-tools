@@ -330,10 +330,6 @@ class Build:
                 ("would run", ("env %s %s %s" % (" ".join(preset_env), bit, " ".join(passthru))).rstrip())):
             if value:
                 log("  %-10s %s" % (key + ":", value))
-        if not t.exec(name, ["grep", "-q", "WK_DRY_RUN", bit]).ok:
-            warn("  the wk-tools in '%s' predates --dry-run's place half, so what it would run is not asked." % name)
-            log("  push this tree there first:  wk sync --tools %s" % t.name)
-            return
         line = self.far_line(preset_env, bit, passthru)
         if line is not None:
             log("  running:   %s" % line)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # wk bench run <workspace> <plan> [options] -- run a benchmark and keep the result defensible
-# wk: where=workspace repos=webkit name=required takes=1 values=plans preset=--preset verbs=plans,run,seed,ls,compare,report,export,precision,stage,staged,ab-summary,ab,deploy ready=yes group=workspaces needs python3 dryrun run,stage,staged,deploy,seed,report,compare,ab-summary readonly plans,ls,precision
+# wk: where=workspace repos=webkit name=required takes=1 values=plans preset=--preset verbs=plans,run,seed,ls,compare,report,export,precision,stage,staged,ab,deploy ready=yes group=workspaces needs python3 dryrun run,stage,staged,deploy,seed,report,compare readonly plans,ls,precision
 # wk: sub plans where=store name=none
 # wk: sub run,deploy name=required@2 takes=1 opts=--preset=,--count=,--browser=,--subtests=,--software,--browser-args=,--cores=,--kill,--system=,--slot=,--ab=,--ab-systems=,--rounds=,--max-rounds=,--detect=,--task=,--timeout=,--exclude-subtests=,--no-warmup-profile,--jit-tiers,--collect,--a-args=,--b-args=
 # wk: sub seed where=dynamic name=required@2 takes=1 opts=
@@ -11,7 +11,6 @@
 # wk: sub export where=local name=none takes=2 destructive=yes dryrun=yes opts=--to=
 # wk: sub stage where=host takes=1 opts=--to=,--preset=,--plan=,--payload=
 # wk: sub staged where=host opts=--id=,--plan=,--expect-display=,--count=,--subtests=,--browser-args=,--payload=,--profile=,--timeout=,--ls,--gates
-# wk: sub ab-summary where=host name=none takes=1 opts=--runs=,--root=,--out=
 # wk: sub ab where=host name=none takes=2 destructive=yes dryrun=yes opts=--devices=,--release=,--builder=,--bits=,--base=,--build-on=,--plan=,--rounds=,--count=,--timeout=,--task=,--kill,--detach,--systems=,--slot=,--patch=,--workspace=,--preset=,--max-rounds=,--detect=,--settle=,--a-args=,--b-args=,--plant,--rehearse,--allow-network-fetch,--preflight,--progress,--status,--collect
 #
 # <plan> is Tools/Scripts/run-benchmark's name for it; `wk bench plans` lists them.
@@ -93,8 +92,6 @@
 #       --gates                            ask every gate a run needs and run nothing
 #   wk bench precision <run-a> <run-b> [--detect PCT]   how fine a difference the rounds resolve
 #                                          and how many more it would take (default 0.3%)
-#   wk bench ab-summary --runs <tsv> [--root <dir>] [--out <file>]   a Mac A/B's verdict off its
-#                                          run map; --out also writes <file>-<plan>.html
 #   wk bench report <task> [--html] [--text]   the task's A/B per device and plan: Score and Time
 #                                          per subtest, Welch/FDR, histograms, variance, the
 #                                          commit each arm measured and each check's verdict;
@@ -183,8 +180,6 @@ def main(argv):
         return mac.staged(ROOT, reg, Clock(), staged_options(args), plans)
     if verb == "ab":
         return bench.ab(word, cli.options(args, cli.AB, plans=args.values("--plan"), preset=store.build_preset()), args.flag("--kill"))
-    if verb == "ab-summary":
-        return bench.ab_summary(args.value("--runs"), args.value("--root") or "/var/wk", args.value("--out"))
     if verb == "plans":
         return bench.plans()
 

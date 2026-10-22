@@ -1,6 +1,5 @@
 """An A/B's rounds and its back half: the stopping rule every system asks between rounds (--rounds the floor,
---detect the precision to resolve, --max-rounds the ceiling; lib/wk/bench/board_ab.py and scores.py), the A/B summary
-a Mac's benchmark install writes (report.ab_summary), and a planted Mac A/B read back -- --status, --progress,
+--detect the precision to resolve, --max-rounds the ceiling; lib/wk/bench/board_ab.py and scores.py), and a planted Mac A/B read back -- --status, --progress,
 --collect (lib/wk/bench/mac_ab.py's MacAB) -- against FakeMac and the fake clock."""
 import base64
 import contextlib
@@ -144,59 +143,6 @@ def ab_legs(values_a, values_b, plan="speedometer3", same=False):
     for i, (va, vb) in enumerate(zip(values_a, values_b), 1):
         out += [(str(i), "A", "sid-a", "a%d" % i, "clean", plan, va), (str(i), "B", "sid-a" if same else "sid-b", "b%d" % i, "clean", plan, vb)]
     return out
-
-
-class TestTheSummary(WkTest):
-
-    def summary(self, legs, out=""):
-        with scratch_dir() as root:
-            runs = volume(root, legs)
-            buf = io.StringIO()
-            with contextlib.redirect_stderr(io.StringIO()):
-                rc = report.ab_summary(str(runs), str(root), "2026-09-08T00:00:00Z", str(root / out) if out else "", out=buf)
-            written = {p.name: p.read_text() for p in root.iterdir() if p.is_file()}
-            return rc, buf.getvalue(), written
-
-    def test_each_plan_reports_its_precision_and_the_comparison_without_the_warmup(self):
-        rc, text, _ = self.summary(ab_legs(QUIET, QUIET[::-1]))
-        self.assertEqual(rc, 0)
-        self.assertIn("================ speedometer3 ================", text)
-        self.assertIn("    met=yes", text)
-        self.assertIn("comparing arm A against arm B", text)
-        self.assertIn("arm A: 6 run(s)", text)
-        self.assertIn("    n_a=6", text)
-
-    def test_a_scanned_leg_is_named_and_kept(self):
-        legs = ab_legs(QUIET, QUIET[::-1])
-        legs[2] = legs[2][:4] + ("scanned",) + legs[2][5:]
-        _, text, _ = self.summary(legs)
-        self.assertIn("round 1 arm A", text)
-        self.assertIn("arm A: 6 run(s)", text)
-
-    def test_one_staged_build_on_both_arms_is_called_an_a_a_control(self):
-        _, text, _ = self.summary(ab_legs(QUIET, QUIET, same=True))
-        self.assertIn("A/A control", text)
-
-    def test_one_arm_is_nothing_to_compare(self):
-        _, text, _ = self.summary([("1", "A", "sid-a", "a1", "clean", "speedometer3", 1.0)])
-        self.assertIn("nothing to compare", text)
-        self.assertNotIn("comparing", text)
-
-    def test_out_writes_the_same_text_and_a_page_per_plan(self):
-        _, text, written = self.summary(ab_legs(QUIET, QUIET[::-1]), out="summary.txt")
-        self.assertEqual(written["summary.txt"], text)
-        self.assertIn("summary-speedometer3.html", written)
-
-    def test_a_dry_run_writes_neither_the_text_nor_a_page(self):
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            _, text, written = self.summary(ab_legs(QUIET, QUIET[::-1]), out="summary.txt")
-        self.assertIn("comparing arm A against arm B", text)
-        self.assertEqual(written, {})
-
-    def test_the_command_refuses_a_missing_run_map(self):
-        from wk.bench import cli
-        bench = cli.Bench(REPO, places.Registry(REPO, env={"HOME": "/nonexistent"}, machine=Fake()), FakeClock())
-        self.assertIn("no run map", refused(bench.ab_summary, "/nonexistent/runs.tsv", "/var/wk", ""))
 
 
 @contextlib.contextmanager

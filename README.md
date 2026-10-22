@@ -327,7 +327,6 @@ wk pr bug-238 alice:eng/branch          # a fork's branch
 wk new review-1234 --pr 1234
 wk pr rebase                            # inside a workspace: fetch main, rebase onto it
 wk pr open bug-238                      # from the host: push the branch, open the PR
-wk pr report                            # from the host: your last 7 days on WebKit/WebKit (--since <date>)
 ```
 
 A PR head goes straight into the checkout, never through the mirror.
@@ -688,7 +687,7 @@ cd ~/Development/wk-tools && ./setup && wk sync
 ```
 
 Every machine the repo knows is in it. Nothing else is machine-specific but
-what `wk key backup` captures and the credentials, which are never in git. On
+the credentials, which are never in git. On
 macOS, `podman machine rm wk && ./setup` discards the container store
 (workspaces, snapshots) and nothing of the host's.
 
@@ -838,8 +837,8 @@ inside a container).
 `WK_SSH_TIMEOUT` (ssh's connect timeout on every hop, default 10).
 
 **Waiting and reporting** — `WK_READY_TIMEOUT`, `WK_READY_WAIT`,
-`WK_POLL_SECONDS`, `WK_HEARTBEAT_SECONDS`, `WK_STATUS_PORT`,
-`WK_STATUS_INTERVAL`, `WK_BROKER_SOCKET`, `WK_SCREEN_EXPECTED`,
+`WK_POLL_SECONDS`, `WK_HEARTBEAT_SECONDS`,
+`WK_BROKER_SOCKET`, `WK_SCREEN_EXPECTED`,
 `WK_BENCH_RUNNER_REF`.
 
 **The rest, one line each**

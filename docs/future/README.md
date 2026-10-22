@@ -26,7 +26,5 @@ lost. An item moves out of here into README.md and a test when it has a user.
   reach everything; the untrusted-router question for the camera; the MBP on
   public WiFi; a full port scan.
 - Delete the stray `refs/remotes/fork/dev/mya-1` on your WebKit fork.
-- Supply the three memory patches `wk bench mem` builds with as real diffs
-  (`container/bin/patches/` holds stubs).
 - The clangd LSP errors and jump-to-definition misses need a person in
   `wk zed` on a real checkout.

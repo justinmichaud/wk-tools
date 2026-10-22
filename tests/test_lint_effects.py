@@ -19,7 +19,6 @@ NOT_STATE = {
     "lib/wk/places.py": "the ProxyCommand exec that is the route",
     "lib/wk/tools.py": "removes its own temporary bundle",
     "lib/wk/boot/mac.py": "removes its own temporary tar",
-    "lib/wk/statusview.py": "the --html page asked for",
     "lib/wk/slot.py": "`python3 -m wk.slot`: a step's tool writing the output its caller named",
     "lib/wk/mac.py": "`python3 -`: the program a Machine runs on the Mac (autorun's `sudo wkmac display-mode --declare`); the effect is that act_run",
     "lib/wk/pgo.py": "`python3 -m wk.pgo`: a step's tool writing the output its caller named",

@@ -2,7 +2,7 @@
 #
 # wk status [<workspace> [--log]] -- what is happening, without guessing
 # wk: where=workspace name=optional here readonly group=workspaces
-# wk: opts --no-fleet,--no-devices,--records,--json,--text,--cli,--html=,--web,--port=,--interval=,--wait,--timeout=,--holds=,--log,--follow,-f,--all,-a,--gates,-g
+# wk: opts --no-fleet,--no-devices,--records,--json,--wait,--timeout=,--holds=,--log,--follow,-f,--all,-a,--gates,-g
 # wk: flag --log,--follow,-f,--all,-a,--gates,-g name=required here=no
 #
 # Reads the records builds and tasks write, not a process list.
@@ -19,16 +19,13 @@
 #      did not answer about its job's pid within WK_TASK_ASK_SECONDS
 #      (`unanswered`)
 #
-# At a terminal this opens the page (--web); a pipe, CI or an agent gets the
-# table (--text, or --cli). --json prints the merged document, --html=<file>
-# writes a static page (- for $TMPDIR/wk-status.html).
+# The table is the default; --json prints the merged document.
 #
 #   --holds <res>   the live tasks in this machine's store holding <res>
 #   --no-fleet      the workspaces alone; --no-devices drops boards
 #   --records       the records, one JSON object per line
 #   --wait          block while busy (exit 2), then report; --timeout=<s>
 #                   stops waiting without claiming the work stopped
-#   --port, --interval   the served page's port (0: any) and refresh seconds
 #
 #   <workspace> --log   its newest log (its build, an image stage, its creation),
 #                       normalised, with the first error and the last output
@@ -38,8 +35,6 @@
 #
 #   WK_WAIT_TIMEOUT, WK_WAIT_INTERVAL   --wait's defaults (0: forever; 5s)
 #   WK_FLEET_TIMEOUT    ceiling on one fleet-device probe (4s)
-#   WK_STATUS_PORT, WK_STATUS_INTERVAL   --port and --interval defaults (0, 20)
-#   WK_STATUS_VIEW      the view a bare `wk status` gets: text, web or json
 
 import json
 import os
@@ -99,18 +94,8 @@ def main(argv):
     no_fleet = args.flag("--no-fleet")
     if args.value("--holds") is not None:
         return holders(args.value("--holds"))
-    views = (("web", args.flag("--web")), ("html", args.value("--html") is not None),
-             ("text", args.flag("--text") or args.flag("--cli")), ("json", args.flag("--json")))
-    mode = next((v for v, on in views if on), None)
-    html_out = "" if args.value("--html") in (None, "-") else args.value("--html")
-    port = args.value("--port") or env.get("WK_STATUS_PORT") or "0"
-    interval = args.value("--interval") or env.get("WK_STATUS_INTERVAL") or "20"
     name = store.ws_name(env) or None
     wait = args.flag("--wait")
-    if mode is None:
-        mode = statusview.default_mode(env, sys.stdout.isatty())
-        if mode == "web" and (name or wait):
-            mode = "text"
     waited = None
     if wait:
         timeout = int(args.value("--timeout") or env.get("WK_WAIT_TIMEOUT") or 0)
@@ -121,21 +106,11 @@ def main(argv):
         for r in walk.records(markers=False):
             print(json.dumps(r, separators=(",", ":")))
         return verdict(waited, walk)
-    if mode == "text":
-        statusview.render_text_stream(walk.records(), sys.stdout, statusview.colour_wanted())
-        return verdict(waited, walk)
-    doc = statusview.merge(walk.records())
-    if mode == "json":
-        json.dump(doc, sys.stdout, indent=2)
+    if args.flag("--json"):
+        json.dump(statusview.merge(walk.records()), sys.stdout, indent=2)
         sys.stdout.write("\n")
-    elif mode == "html":
-        print(statusview.write_page(doc, html_out))
-    elif mode == "web":
-        rc = statusview.serve(ROOT, doc, port, interval)
-        if rc:
-            return rc
     else:
-        die("'%s' is not a view: --text, --json, --html or --web" % mode)
+        statusview.render_text_stream(walk.records(), sys.stdout, statusview.colour_wanted())
     return verdict(waited, walk)
 
 

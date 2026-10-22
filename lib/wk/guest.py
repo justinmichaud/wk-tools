@@ -225,23 +225,6 @@ class Host:
             self.machine.kill(pid, signal.SIGKILL)
         self.machine.remove(pidfile)
 
-    def spawned_inject(self):
-        pid = self.daemon_pid(self.path("github-inject.pid"))
-        if pid is None or "github-inject.py" not in self.machine.run(["ps", "-o", "command=", "-p", str(pid)]).out:
-            return None
-        return pid
-
-    def retire_spawned_inject(self):
-        pidfile = self.path("github-inject.pid")
-        if not self.machine.exists(pidfile):
-            return False
-        pid = self.spawned_inject()
-        if pid is None:
-            self.machine.remove(pidfile)
-            return False
-        self.stop(pid, pidfile)
-        return True
-
     def proxy_where(self):
         return ["-nP", "-iTCP@%s:%s" % (self.proxy_addr(), self.port()), "-sTCP:LISTEN"]
 
@@ -986,19 +969,6 @@ def credentials_converge(root, env, machine):
     return not Store(vm.env).macos_host or Host(vm).credentials_converge()
 
 
-def rubble(vm):
-    """The injector a `wk start` spawned, which launchd's replaces: './setup --stage inject' stops it."""
-    from wk.rubble import remover, row
-    host = Host(vm)
-    pidfile = host.path("github-inject.pid")
-    if not host.machine.exists(pidfile):
-        return []
-    pid = host.spawned_inject()
-    if pid is None:
-        return [row("inject", "the pidfile of a spawned injector that is gone", 0, take=remover(host.machine, pidfile))]
-    return [row("inject", "an injector 'wk start' spawned, not launchd's (pid %d)" % pid, None, "./setup --stage inject")]
-
-
 def inject_host(root, env):
     from wk import places
     return Host(places.Registry(root, env, Local()).load("vm"))
@@ -1047,16 +1017,14 @@ def inject_plist(host, label, log, path):
                            "StandardOutPath": log, "StandardErrorPath": log}).decode()
 
 
-INJECT_VERBS = {"inject-plist": 3, "inject-restart": 2, "broker-restart": 2, "inject-retire": 0}
+INJECT_VERBS = {"inject-plist": 3, "inject-restart": 2, "broker-restart": 2}
 
 if __name__ == "__main__":
     verb, args = (sys.argv[1:2] or [""])[0], sys.argv[2:]
     if INJECT_VERBS.get(verb) != len(args):
-        sys.exit("usage: python3 -m wk.guest inject-plist <label> <log> <PATH> | inject-restart <label> <plist> | broker-restart <label> <plist> | inject-retire")
+        sys.exit("usage: python3 -m wk.guest inject-plist <label> <log> <PATH> | inject-restart <label> <plist> | broker-restart <label> <plist>")
     h = inject_host(images.root(), os.environ)
     if verb == "inject-plist":
         sys.stdout.write(inject_plist(h, *args))
-    elif verb in ("inject-restart", "broker-restart"):
-        sys.exit(0 if (inject_restart if verb == "inject-restart" else broker_restart)(h, *args) else 1)
     else:
-        print("stopped" if h.retire_spawned_inject() else "none")
+        sys.exit(0 if (inject_restart if verb == "inject-restart" else broker_restart)(h, *args) else 1)

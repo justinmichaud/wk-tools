@@ -4,9 +4,9 @@ import os
 import threading
 
 from wk.machine import lib_argv
+from wk.quiet import DESKTOP
 
 WINDOWS = "bench/mac-window-probe.sh"
-DESKTOP = "bench/mac-quiet-desktop.sh"
 WATCH_SECONDS = 10
 ASK_SECONDS = 20   # one reading, a first probe build included
 UNASKED = ("the window server could not be asked: %s answered `?` (not macOS, no `cc` to build the probe with, "

@@ -34,11 +34,6 @@ class TestOwedLiveRows(unittest.TestCase):
         """`live bench.options_ab`"""
         self.fail("not yet proven: wk bench run --a-args/--b-args in alternating rounds, compared per subtest")
 
-    @support.owed('live pr.report: wk pr report against the real GitHub API')
-    def test_pr_report(self):
-        """`live pr.report`"""
-        self.fail("not yet proven: wk pr report against the real GitHub API")
-
     @support.owed('live boot[rpi4]: rpi4 boots its bench system reliably and --back reaches the rescue')
     def test_boot_rpi4(self):
         """`live boot[rpi4]`"""
@@ -168,11 +163,6 @@ class TestOwedLiveRows(unittest.TestCase):
     def test_handover_tools_level_buildbox4(self):
         """`live handover.tools_level[buildbox4]`"""
         self.fail("not yet proven: a hand-over refused at a differing wk-tools commit, --force crossing it")
-
-    @support.owed('live backup.roundtrip: wk key backup then ./setup round-trips with no spurious change')
-    def test_backup_roundtrip(self):
-        """`live backup.roundtrip`"""
-        self.fail("not yet proven: wk key backup then ./setup round-trips with no spurious change")
 
     @support.owed('live sudo.require[<machine>]: wk key sudo setup installs its rule and no machine holds a wider grant')
     def test_sudo_require_machine(self):
@@ -318,11 +308,6 @@ class TestOwedLiveRows(unittest.TestCase):
     def test_run_debug_symbols(self):
         """`live run.debug_symbols`"""
         self.fail("not yet proven: wk run --lldb symbolicates glibc, Mesa and GTK frames in a fresh workspace")
-
-    @support.owed('live bench.mem: wk bench mem builds with the memory patches and plots the WebProcess logs')
-    def test_bench_mem(self):
-        """`live bench.mem`"""
-        self.fail("not yet proven: wk bench mem builds with the memory patches and plots the WebProcess logs")
 
     @support.owed('live mya.checkpoint_restore: a container workspace holds CAP_CHECKPOINT_RESTORE for mya and its suites pass')
     def test_mya_checkpoint_restore(self):

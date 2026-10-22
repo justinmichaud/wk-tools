@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from wk import act, guest, images, pr, project, reach, rubble as rb, workspace
+from wk import act, images, pr, project, reach, rubble as rb, workspace
 from wk.act import die, info, log, warn
 from wk.bench import mac as benchmac, seed
 from wk.bench.board import SLOTS_DIR
@@ -83,7 +83,7 @@ class Gc:
         rows += workspace.rubble(listed, stored, self.here, self.root, pid is not None and self.here.alive(pid), self.clock)
         if self.host_half:
             rows += pr.rubble(self.store, self.here, lock)
-            rows += (guestbase.rubble(vm) + guest.rubble(vm) if vm else []) + self.board_rows() + self.remote_rows()
+            rows += (guestbase.rubble(vm) if vm else []) + self.board_rows() + self.remote_rows()
             if self.mac_host:
                 rows += benchmac.rubble(self.install())
         if self.host_half and not self.store_half:

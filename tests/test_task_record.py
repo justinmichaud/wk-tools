@@ -91,13 +91,6 @@ class TestTheRendererSaysWhatIsLeftAndWhatStopsIt(unittest.TestCase):
         self.assertNotIn("[!]", out)
         self.assertEqual(out.count("[x]"), 3, out)
 
-    def test_the_page_renders_the_same_plan(self):
-        cp = render([{"kind": "machine", "name": "tolken", "self": True},
-                     task_rec("yocto", "running", 3)], "html")
-        page = Path(cp.stdout.strip()).read_text()
-        self.assertIn("[&gt;]", page)
-        self.assertIn("wk sysimage build wpe --stage image --stop", page)
-
 
 if __name__ == "__main__":
     unittest.main()

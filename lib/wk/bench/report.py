@@ -369,62 +369,6 @@ def precision(a_spec, b_spec, goal, out=None):
     (out or sys.stdout).write("\n".join(lines) + "\n")
 
 
-def runs_map(path):
-    with open(path) as f:
-        return [record.map_row(l) for l in f if l.strip()]
-
-
-def ab_summary(runs, root, now, out_path="", out=None, machine=None):
-    """A Mac A/B's verdict per plan off its run map, warmup left out; a leg a software-update scan crossed is kept and named."""
-    out, machine = out or sys.stdout, machine or Local()
-    rows, sink = runs_map(runs), []
-
-    def emit(text=""):
-        out.write(text + "\n")
-        sink.append(text + "\n")
-
-    try:
-        labels = list(dict.fromkeys(r[1] for r in rows))
-        emit("A/B summary -- %s\nrun map: %s\n" % (now, runs))
-        scanned = ["    round %s arm %s" % (r[0], r[1]) for r in rows if r[4] == "scanned"]
-        if scanned:
-            emit("\n".join(["  WARNING: a software-update scan ran during these arms:"] + scanned)
-                 + "\n  Their numbers are included below. Treat a difference that depends on\n  them as unproven.\n")
-        if len(labels) < 2:
-            emit("only one arm ('%s') -- nothing to compare. Its runs are listed above." % (labels or [""])[0])
-            return 0
-        a, b = labels[:2]
-        if len(labels) > 2:
-            emit("note: %d arms; comparing '%s' against '%s' only" % (len(labels), a, b))
-        if {r[2] for r in rows if r[1] == a} & {r[2] for r in rows if r[1] == b}:
-            emit("  both arms ran the SAME staged build. This is an A/A control: what it\n  measures is the noise floor of this bench path, "
-                 "not a difference between\n  builds. A significant result here means the bench path is not yet quiet\n"
-                 "  enough to trust a real A/B at that magnitude.\n")
-        for plan in dict.fromkeys(r[5] for r in rows):
-            dirs = {l: [os.path.join(root, "results", r[3]) for r in rows if r[5] == plan and r[1] == l and r[0] != "0"] for l in labels}
-            emit("================ %s ================" % plan)
-            emit("\n".join("  arm %s: %d run(s)" % (l, len(dirs[l])) for l in labels) + "\n  precision:")
-            try:
-                for line in precision_lines(dirs[a], dirs[b], 0.3, warn=lambda m: emit("    " + m)):
-                    emit("    " + line)
-            except (ValueError, SystemExit) as e:
-                emit("    precision: %s" % e)
-            emit("    mde_pct is the smallest difference these rounds resolve; below it,\n"
-                 "    'not significant' means 'under this threshold', not 'absent'.\n\n  comparing arm %s against arm %s" % (a, b))
-            if dirs[a] and dirs[b]:
-                report = build_report(dirs[a], dirs[b])
-                if out_path:
-                    html = "%s-%s.html" % (os.path.splitext(out_path)[0], plan)
-                    machine.write(html, render_html(report, title="A/B summary: %s" % plan))
-                    emit("wrote %s" % html)
-                emit(render_text(report).rstrip("\n"))
-            emit()
-        return 0
-    finally:
-        if out_path:
-            machine.write(out_path, "".join(sink))
-
-
 def split_paths(spec):
     return [p.strip() for p in spec.split(",") if p.strip()]
 

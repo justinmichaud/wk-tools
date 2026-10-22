@@ -1,6 +1,5 @@
 """`wk boot` (lib/wk/boot/cli.py, lib/wk/boot/eeprom.py) against a board in memory: what --status reads back, each
-transition, the EEPROM boot order, killpoints[boot], and what `wk status` shows of an armed machine, in text and on
-the --web page."""
+transition, the EEPROM boot order, killpoints[boot], and what `wk status` shows of an armed machine."""
 import contextlib
 import hashlib
 import io

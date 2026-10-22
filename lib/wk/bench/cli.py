@@ -278,10 +278,6 @@ class Bench:
             return m.back() if any(o.get(k) for k in mac_ab.READS) else m.go()
         return ab.run(self.root, self.reg, self.clock, spec, o, kill)
 
-    def ab_summary(self, runs, root, out):
-        if not runs or not os.path.isfile(runs):
-            act.die("no run map at '%s' -- the A/B recorded nothing (--runs <runs.tsv>)" % runs)
-        return report.ab_summary(runs, root, self.clock.iso(), out, machine=self.machine)
 
 
 def unpack(files, into):

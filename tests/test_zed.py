@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, load_cmd, run
+from tests.support import DISPATCH_VARS, REPO, WkTest, load_cmd, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, sshalias  # noqa: E402
@@ -89,29 +89,6 @@ class TestContainerAlias(ContainerTest):
         self.assertEqual(before, (self.fake.files, self.fake.dirs))
 
 
-class TestToolsPlaceResolvedOnce(ContainerTest):
-    def setUp(self):
-        super().setUp()
-        self.fake.dirs.add(self.reg.load("container").store.ws_dir("demo"))
-        self.fake.answer(["podman", "exec", "wk-demo", "/opt/wk-tools/container/proxy/ensure-bridge.sh"], out="")
-
-    def test_locate_is_called_once(self):
-        calls = {"n": 0}
-        real_locate = places.Registry.locate
-
-        def counting_locate(reg_self, ws):
-            calls["n"] += 1
-            return real_locate(reg_self, ws)
-
-        with mock.patch.object(places.Registry, "locate", counting_locate), \
-                mock.patch.object(ZED.places, "Registry", return_value=self.reg), \
-                mock.patch.object(ZED.places, "zed_cli", return_value="/usr/bin/zed"), \
-                mock.patch.object(ZED, "emit") as emit:
-            ZED.main(["--tools", "demo"])
-        self.assertEqual(calls["n"], 1)
-        emit.assert_called_once_with(False, "/usr/bin/zed", "ssh://wk-demo/opt/wk-tools")
-
-
 class SshFake(Fake):
 
     def __init__(self):
@@ -188,13 +165,16 @@ class TestZedRoute(WkTest):
         self.assertNotEqual(cp.returncode, 0)
         self.assertNotIn("zed is not installed", cp.stdout)
 
-    def test_route_and_tools_together_are_refused(self):
-        cp = run("zed", "demo", "--route", "--tools")
-        self.assertNotEqual(cp.returncode, 0)
-        self.assertIn("--route describes a workspace", cp.stdout)
-
-
 class TestZedCli(unittest.TestCase):
+
+    def test_zed_starts_without_the_dispatcher_variables(self):
+        """Every terminal Zed opens inherits its environment."""
+        leaked = {k: "x" for k in DISPATCH_VARS}
+        with mock.patch.dict(os.environ, leaked), mock.patch.object(ZED, "Local") as local:
+            ZED.exec_clean(["zed", "ssh://h/src"])
+        argv, = local.return_value.exec.call_args.args
+        env = local.return_value.exec.call_args.kwargs["env"]
+        self.assertEqual((argv, [k for k in DISPATCH_VARS if k in env]), (["zed", "ssh://h/src"], []))
 
     def test_a_zed_on_path_wins(self):
         fake = Fake()

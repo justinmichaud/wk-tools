@@ -62,9 +62,6 @@ class Secrets:
     def push_key_path(self, fork):
         return os.path.join(self.store.keyring_push_dir(), "build_key_" + fork)
 
-    def key_at_rest(self, fork):
-        return self.machine.exists(self.push_key_path(fork))
-
     def pub_path(self, fork):
         return os.path.join(self.store.keyring_dir(), "build_key_%s.pub" % fork)
 
@@ -241,18 +238,6 @@ class Secrets:
             ok = guest.credentials_converge(self.root, self.env, self.machine) and ok
         return ok
 
-    def claude_login_migrate(self):
-        """Once, by rename: agent-rw, where the login was, is still mounted by an older podman machine, container or guest."""
-        old, new = os.path.join(self.store.keyring_agent_rw_dir(), ".credentials.json"), self.cred_path("claude-login")
-        if not self.machine.exists(old):
-            return "unchanged"
-        if self.machine.exists(new):
-            warn("%s is an older copy of the claude.ai login, readable where agent-rw is mounted; %s is the one the injector "
-                 "holds:  rm %s" % (old, new, old))
-            return "both"
-        self.ensure_dir(os.path.dirname(new), "0700")
-        return "moved" if self.machine.act_run(["mv", old, new]).ok else "failed"
-
     def ensure_dir(self, path, mode):
         if not self.made_dir(path):
             self.machine.mkdir(path)
@@ -373,16 +358,12 @@ def rows(table):
 def main(argv):
     parser = argparse.ArgumentParser(prog="python3 -m wk.secrets")
     sub = parser.add_subparsers(dest="verb", required=True)
-    for verb in ("push-keys", "agent-secrets", "push-converge", "claude-placeholder", "claude-login-migrate"):
+    for verb in ("push-keys", "agent-secrets", "push-converge", "claude-placeholder"):
         sub.add_parser(verb)
     sub.add_parser("box-alias-blocks")
     a = parser.parse_args(argv)
     if a.verb == "push-converge":
         return 0 if Secrets(images.root()).push_converge_machine() else 1
-    if a.verb == "claude-login-migrate":
-        said = Secrets(images.root()).claude_login_migrate()
-        print(said)
-        return 1 if said == "failed" else 0
     if a.verb == "claude-placeholder":
         sys.stdout.write(claudelogin.placeholder())
         return 0

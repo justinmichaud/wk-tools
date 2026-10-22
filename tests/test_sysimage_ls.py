@@ -194,12 +194,11 @@ class TestTheFleetWalk(WkTest):
             self.assertEqual(self.rows(d, [FakeDriver("container", here=True, side="stopped")], warned), [])
         self.assertIn("is stopped, so the images in its", warned[0])
 
-    def test_one_that_refuses_the_walk_names_the_remedy(self):
+    def test_one_that_refuses_the_walk_is_named(self):
         with scratch_dir() as d:
             warned = []
             self.rows(d, [FakeDriver("oldbox", rc=2, out="")], warned)
         self.assertIn("'oldbox' did not answer the listing", warned[0])
-        self.assertIn("wk sync --tools oldbox", warned[0])
 
     def test_one_with_no_store_of_its_own_is_not_asked(self):
         with scratch_dir() as d:

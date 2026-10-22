@@ -331,8 +331,7 @@ sudo() {
 '''
 
 _PRIV_FUNCS = ("_priv_companions", "_priv_state",
-               "_priv_explain", "_priv_repair", "_priv_converge", "_priv_retired",
-               "_priv_sweep_retired")
+               "_priv_explain", "_priv_repair", "_priv_converge")
 
 
 class TestOneConvergentInstallForAllThreeHelpers(WkTest):
@@ -479,33 +478,6 @@ class TestOneConvergentInstallForAllThreeHelpers(WkTest):
         self.assertEqual((REPO / "boot" / "check-boot-files.py").read_bytes(),
                          (self.fake / "libexec" / "wk-check-boot-files.py").read_bytes())
         self.assertEqual("ok ok", self.state("wk-card-priv"))
-
-    def test_a_pre_zzz_grant_reads_as_the_helper_being_in_force(self):
-        """It grants nothing (zz-<user>-passwd out-ranks it) yet `sudo -l` lists it."""
-        self.plant_binary()
-        (self.fake / "sudoers.d" / "wk-boot").write_text(self.rule())
-        self.assertEqual("ok ok", self.state())
-
-    def test_the_pre_zzz_grant_is_swept_before_any_helper_is_judged(self):
-        self.plant_binary()
-        old = self.fake / "sudoers.d" / "wk-boot"
-        old.write_text(self.rule())
-        cp = self.drive('_priv_sweep_retired </dev/null\n'
-                        '_priv_converge wk-boot-priv any "what it is for" </dev/null')
-        said = cp.stdout + cp.stderr
-        self.assertEqual(0, cp.returncode, said)
-        self.assertFalse(old.exists(), said)
-        self.assertIn("removed %s" % old, said)
-        self.assertEqual(self.rule(), self.sudoers().read_text())
-
-    def test_every_retired_name_is_derived(self):
-        cp = self.drive('_priv_retired </dev/null')
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-        listed = cp.stdout.split()
-        for short in ("wk-quiesce", "wk-card", "wk-boot"):
-            with self.subTest(retired=short):
-                self.assertIn(str(self.fake / "sudoers.d" / short), listed)
-        self.assertIn(str(self.fake / "libexec" / "wk-tftpd"), listed)
 
     def test_visudo_refusing_installs_no_rule_and_leaves_an_existing_one(self):
         self.plant_binary()

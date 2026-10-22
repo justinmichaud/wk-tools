@@ -474,7 +474,7 @@ class Driver:
         return self.store.podman_machine()
 
     def wk_cmd(self, args, env):
-        """The far side's own wk as one shell line; flags travel as environment, since an older wk there refuses an unknown one."""
+        """The far side's own wk as one shell line; the global flags and WK_CARRIED travel as environment."""
         pre, wk, env = self.wk_far(env)
         pre += "".join("%s=1 " % v for v in WK_FLAGS if env.get(v))
         pre += "".join("%s=%s " % (v, shlex.quote(env[v])) for v in WK_CARRIED if env.get(v))

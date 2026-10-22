@@ -225,16 +225,6 @@ class TestZedNames(WkTest):
         self.assertIn(f"no such workspace: {name}", out, out)
         self.assertNotIn("one name at a time", out, out)
 
-    def test_tools_takes_a_name_the_dispatcher_does_not_answer_for(self):
-        name = "nosuchws-" + rand_suffix()
-        cp = run("zed", "--tools", name)
-        out = cp.stdout + cp.stderr
-        self.assertNotEqual(cp.returncode, 0, out)
-        if "zed is not installed" in out:
-            self.skipTest("zed is not installed here, so the name is never reached")
-        self.assertIn(f"no machine or workspace named '{name}'", out, out)
-
-
 class TestFlagNameOverride(WkTest):
 
     def test_a_flag_can_require_the_workspace_the_command_does_not(self):

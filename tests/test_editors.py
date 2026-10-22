@@ -6,7 +6,7 @@ import subprocess
 import tomllib
 import unittest
 
-from tests.support import REPO, DISPATCH_VARS, run, stub_path
+from tests.support import REPO, stub_path
 
 HELIX_DIR = REPO / "container" / "helix"
 FIRSTRUN = REPO / "container" / "firstrun.sh"
@@ -89,22 +89,6 @@ class TestEditorInstallArch(unittest.TestCase):
                 self.assertEqual((curls, sudos), ([], []))
                 self.assertIn("armv7l", cp.stdout + cp.stderr)
                 self.assertIn("not installed", cp.stdout + cp.stderr)
-
-
-class TestZedInheritsNoDispatcherVariables(unittest.TestCase):
-    """Every terminal Zed opens inherits its environment, so `wk zed` starts it without the dispatcher's variables."""
-
-    def test_wk_zed_tools_starts_zed_without_wk_variables(self):
-        with stub_path({"zed": 'env > "$ZED_ENV_LOG"\n'}) as binp:
-            log = binp / "zed.env"
-            cp = run("zed", "--tools", env={
-                "PATH": f"{binp}:/usr/bin:/bin",
-                "ZED_ENV_LOG": str(log),
-                "WK_NAME": "leaked-ws", "WK_PLACE": "leaked-place", "WK_DRIVER": "remote",
-            })
-            self.assertEqual(cp.returncode, 0, cp.stdout)
-            env = dict(l.split("=", 1) for l in log.read_text().splitlines() if "=" in l)
-        self.assertEqual(sorted(k for k in DISPATCH_VARS if k in env), [])
 
 
 if __name__ == "__main__":

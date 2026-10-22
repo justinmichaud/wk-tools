@@ -1,8 +1,8 @@
 """The benchmark install running an A/B by itself, started at autologin by the launch agent `wk bench ab --devices <mac>`
 plants. No session on the driving machine survives the reboot into this install, so it drives itself; the tailnet node
 it brings up is how a run is watched. The bench volume is the firmware default, so however the job ends the machine is
-handed back or powered off; the state is advanced before a run and before the summary so a power cut repeats neither,
-and the watchdog is armed before the first step that can block."""
+handed back or powered off; the state is advanced before a run so a power cut repeats none, and the watchdog is armed
+before the first step that can block."""
 
 import json
 import os
@@ -294,7 +294,6 @@ class Autorun:
                 continue
             self.say("WATCHDOG FIRED -- nothing written for %ds; the run is not coming back" % quiet)
             self.state_set(phase="done", outcome="watchdog")
-            self.summarise()
             self.leave("watchdog: nothing written for %ds" % quiet)
             return
 
@@ -567,12 +566,6 @@ class Autorun:
                              "they do resolve" % (self.max_rounds, self.detect)}[kind])
         self.state_set("outcome", outcome)
 
-    def summarise(self):
-        self.say("summarising")
-        if self.logged(self.wk("bench", "ab-summary", "--root", self.root, "--runs", self.runs + "/runs.tsv",
-                               "--out", self.runs + "/summary.txt")) != 0:
-            self.say("(no summary -- 'wk bench ab-summary' failed; the results are still on the volume)")
-
     def body(self):
         self.begin()
         self.read_job()
@@ -602,7 +595,6 @@ class Autorun:
         self.rounds_loop()
         self.say("leaving the machine quiesced: quiet is this install's permanent state")
         self.state_set(phase="done", finished_at=self.clock.iso())
-        self.summarise()
         self.say("=== job finished ===")
         self.leave("job finished")
 

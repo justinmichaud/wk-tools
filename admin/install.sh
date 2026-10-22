@@ -155,47 +155,6 @@ _priv_converge() {   # <name> <platform> <what it is for>
     return 0
 }
 
-# What an older revision leaves behind: its root-owned file, and the pre-zzz name of each
-# grant.
-_priv_retired() {
-    local name sud
-    printf '%s\n' "$_libexec/wk-tftpd" /etc/sudoers.d/wk-netboot
-    while read -r name _; do
-        [ -n "$name" ] || continue
-        sud="$(wk_priv_sudoers "$name")"
-        printf '%s\n' "${sud%/*}/${sud##*/zzz-}"
-    done <<ROWS
-$(wk_priv_helpers)
-ROWS
-    return 0
-}
-
-# Swept before any helper is judged: zz-<user>-passwd out-ranks a pre-zzz grant of the same
-# path, so it grants nothing, and `sudo -l` lists it all the same -- left in place it reads
-# as the helper being in force and suppresses the repair that installs the rule that is.
-_priv_sweep_retired() {
-    local f stale=""
-    while read -r f; do
-        [ -n "$f" ] || continue
-        [ -e "$f" ] && stale="$stale $f"
-    done <<RETIRED
-$(_priv_retired)
-RETIRED
-    [ -n "$stale" ] || return 0
-    if ! sudo -n true 2>/dev/null && [ ! -t 0 ]; then
-        warn "retired privileged file(s) present:$stale"
-        log  "  removing them needs sudo; run:  ./setup --stage quiesce"
-        return 0
-    fi
-    info "removing retired privileged file(s) (requires sudo once)"
-    # shellcheck disable=SC2086
-    sudo rm -f $stale
-    changed "removed$stale"
-    return 0
-}
-
-_priv_sweep_retired
-
 while read -r _pname _pwhere _pwhat; do
     [ -n "$_pname" ] || continue
     _priv_converge "$_pname" "$_pwhere" "$_pwhat"

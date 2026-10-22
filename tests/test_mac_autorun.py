@@ -294,13 +294,6 @@ class TestTheJobRuns(unittest.TestCase):
         tty = w.calls("run_tty")
         self.assertTrue(all(tty[tty.index(leg) - 1] == pause for leg in w.legs()))
 
-    def test_the_state_is_done_before_the_summary_runs(self):
-        w = World()
-        seen = []
-        w.fake.react(WK + ["bench", "ab-summary"], lambda a, f: seen.append(w.state()["phase"]) or Result(0))
-        w.run()
-        self.assertEqual(["done"], seen)
-
     def test_the_install_converges_itself_before_the_display_gates(self):
         w = World()
         w.fake.dirs.add(ROOT + "/tailnet")
@@ -536,11 +529,10 @@ class TestTheWatchdog(unittest.TestCase):
             a.watchdog()
         return a
 
-    def test_silence_past_the_bound_summarises_and_powers_off(self):
+    def test_silence_past_the_bound_powers_off(self):
         w = World()
         self.watch(w, lambda a: int(w.clock.now()) - 1001)
         self.assertEqual(("done", "watchdog"), (w.state()["phase"], w.state()["outcome"]))
-        self.assertTrue([a for a in w.calls("run_tty") if "ab-summary" in a])
         self.assertEqual(1, len(w.power()))
 
     def test_a_log_still_being_written_is_left_running_until_the_job_is_done(self):

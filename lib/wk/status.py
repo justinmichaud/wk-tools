@@ -761,8 +761,7 @@ class Walk:
         recs = []
         if out.strip():
             r = Rec("raw", machine=gm, text=out.strip())
-            r.warn("this machine's wk did not answer in records -- its own words are above.\n      "
-                   "'wk sync --tools %s' pushes the current tooling." % gm)
+            r.warn("this machine's wk did not answer in records -- its own words are above.")
             recs.append(r.done())
         return recs, rc
 

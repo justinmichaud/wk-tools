@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 #
-# wk key check|setup|set|deploy|show|ensure|sudo|backup -- the credentials this machine holds, its sudo policy and its settings backup
-# wk: where=host name=none group=sources needs gh,gh-auth takes=1 default=check verbs=check,setup,deploy,show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,ensure,adopt,backup readonly check,show,pub,sshtest,fingerprints,verdict,give
-# wk: sub show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo,backup needs=
+# wk key check|setup|set|deploy|show|ensure|sudo -- the credentials this machine holds and its sudo policy
+# wk: where=host name=none group=sources needs gh,gh-auth takes=1 default=check verbs=check,setup,deploy,show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo destructive setup,deploy,--replace dryrun setup,deploy,set,sudo,ensure,adopt readonly check,show,pub,sshtest,fingerprints,verdict,give
+# wk: sub show,ensure,pub,sshtest,fingerprints,set,adopt,verdict,give,sudo needs=
 # wk: sub set,pub,sshtest,adopt,verdict,give takes=2
 # wk: sub set opts=--replace,--paste
 # wk: sub deploy,setup opts=--rotate
 # wk: sub sudo takes=2 opts=--on=,--all destructive=
-# wk: sub backup opts=--candidates
 #
 #   wk key setup [--rotate]   every credential this machine needs, and one working credential of each kind on
 #                     every workstation: the one its issuer accepts wins (a tie goes to this machine) and is put on
@@ -39,10 +38,6 @@
 #                     checked by `visudo -c` before and after. Exits 0 when that policy holds, 1 otherwise
 #                       --on <machine>  the same, on a configured machine
 #                       --all           every configured machine, and this one
-#   wk key backup [--candidates]
-#                     write this host's desktop settings back into the repo, never a credential:
-#                     host/macos/defaults.conf and symbolichotkeys.plist, or host/linux/config.dconf
-#                       --candidates  macOS, read-only: every `defaults` value off Apple's default and not yet kept
 #
 # For another workstation or `wk status` to call:
 #   wk key pub <key>         that deploy key's public half
@@ -64,22 +59,20 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import backup, decl, sudo  # noqa: E402
+from wk import decl, sudo  # noqa: E402
 from wk.key import cli  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Local, is_macos  # noqa: E402
+from wk.machine import Local  # noqa: E402
 from wk.places import Registry  # noqa: E402
 
 
-def main(argv, env=None, reg=None, machine=None, macos=None):
+def main(argv, env=None, reg=None):
     args = decl.Args(decl.Decl(__file__), argv)
     words = args.positionals
     verb = words[0]
     if verb == "sudo":
         return sudo.main(words[1:], args.value("--on"), args.flag("--all"),
                          reg or Registry(ROOT, os.environ if env is None else env, Local()), env=env)
-    if verb == "backup":
-        return backup.main(ROOT, args.flag("--candidates"), machine or Local(), is_macos() if macos is None else macos)
     return cli.main(ROOT, verb, words[1] if len(words) > 1 else "", rotate=args.flag("--rotate"),
                     replace=args.flag("--replace"), paste=args.flag("--paste"))
 

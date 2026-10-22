@@ -368,12 +368,6 @@ class TestDryRun(BuildTest):
         self.assertIn("would run: exec ws python3 -I -c", err)
         self.assertEqual(dry.pids, {os.getpid()})
 
-    def test_a_stale_far_copy_is_named_rather_than_asked(self):
-        os.environ["WK_DRY_RUN"] = "1"
-        self.w.answer(["exec", "ws", "grep", "-q", "WK_DRY_RUN"], rc=1)
-        rc, err = self.run_()
-        self.assertIn("push this tree there first:  wk sync --tools box", err)
-
 
 class TestKill(BuildTest):
     def test_nothing_running_says_so_and_is_0(self):

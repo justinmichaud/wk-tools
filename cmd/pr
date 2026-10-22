@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 #
 # wk pr [<workspace>] <user>:<branch>|<n>|wpe:<n> -- check out a PR head, from either project
-# wk: where=workspace repos=webkit name=optional@2 takes=1 ready=yes group=sources dryrun verbs=checkout,rebase,open,report default=checkout readonly report
+# wk: where=workspace repos=webkit name=optional@2 takes=1 ready=yes group=sources dryrun verbs=checkout,rebase,open default=checkout
 # wk: sub open where=host name=optional@2 takes=0 opts=--draft,--web needs=gh,gh-auth
-# wk: sub report where=host name=none takes=1 opts=--since= needs=gh,gh-auth
 # wk: sub rebase name=optional@2 takes=0
 #
 #   wk pr justinmichaud:eng/non-cocoa-fuzz-Frame-cache-evicted-or-unparsed-frames-dereferenced
@@ -11,7 +10,6 @@
 #   wk pr wpe:1234                             # WPEWebKit's pull request #1234
 #   wk pr rebase [<workspace>]                 # rebase the current branch onto origin/main
 #   wk pr open <workspace> [--draft] [--web]   # push the branch and open it as a PR
-#   wk pr report [--since <YYYY-MM-DD>]        # your week on WebKit/WebKit
 #
 # <user>:<branch> is a fork's branch; both projects are tried, and a branch existing in both is
 # refused by name. A bare number is a WebKit/WebKit pull request, `wpe:<number>` a WPEWebKit one.
@@ -32,13 +30,7 @@
 #
 #   --draft   open it as a draft
 #   --web     open the browser's new-PR form instead of creating it directly
-#
-# 'report' lists, through gh, the pull requests you created and updated on WebKit/WebKit, and
-# others' you reviewed or commented on. Host only.
-#
-#   --since <date>   the first day it covers (default: seven days ago)
 
-import datetime
 import os
 import re
 import shlex
@@ -167,9 +159,6 @@ def main(argv):
     name = store.ws_name()
     args = decl.Args(decl.Decl(__file__), argv)
     verb, rest = args.positionals[0], args.positionals[1:]
-    if verb == "report":
-        today = datetime.date.today()
-        return pr.weekly(Local(), pr.since_date(args.value("--since"), today), today, sys.stdout)
     reg = places.Registry(ROOT)
     if verb == "rebase":
         name = name or (rest[0] if rest else "")

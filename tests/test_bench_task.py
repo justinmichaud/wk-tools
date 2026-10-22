@@ -288,7 +288,7 @@ class TestTheFleetListing(WkTest):
     def test_one_that_does_not_answer_the_listing_is_named(self):
         warned = []
         self.listing(self.tmp, [FakeDriver("moose", rc=2)], warned).rows()
-        self.assertIn("wk sync --tools moose", warned[0])
+        self.assertIn("'moose' did not answer the listing", warned[0])
 
     def test_one_with_no_store_of_its_own_is_not_asked(self):
         quiet = [FakeDriver("c", kind="container", side="none"), FakeDriver("far", side="unreachable")]

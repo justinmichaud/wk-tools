@@ -129,23 +129,6 @@ class TestBranchRepos(unittest.TestCase):
         self.assertEqual(len(self.ask(WebKit="cafe", WPEWebKit="beef")[1]), 2)
 
 
-class TestGitSyncFork(Wired):
-
-    def current_lines(self):
-        script = (REPO / "container" / "bin" / "git-sync-fork").read_text().splitlines()
-        first = next(i for i, l in enumerate(script) if l.startswith("url="))
-        last = next(i for i, l in enumerate(script) if l.startswith("current="))
-        self.assertLess(first, last, "git-sync-fork reads the URL before it asks")
-        return "\n".join(script[first:last + 1])
-
-    def test_it_reads_the_forks_head_not_the_mirrors(self):
-        # fetch_config already made a `remote.fork` section (its fetch refspec), so the URL is set rather than the remote added.
-        subprocess.run(["git", "config", "remote.fork.url", str(self.fork)], cwd=self.src, check=True, capture_output=True)
-        self.assertTrue((self.dir / "fork").exists(), "the direct spelling must resolve")
-        cp = self.in_src(f'remote=fork\nbranch=main\n{self.current_lines()}\necho "$current"')
-        self.assertEqual(cp.stdout.strip(), self.fork_main, cp.stderr)
-
-
 class TestTheDirectSpellingEscapesEveryWiredRewrite(unittest.TestCase):
 
     def setUp(self):

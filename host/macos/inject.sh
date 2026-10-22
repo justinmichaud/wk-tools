@@ -7,14 +7,6 @@ _log="$(wk_state_dir)/inject.log"
 ensure_dir "$HOME/Library/LaunchAgents"
 ensure_dir "$(wk_state_dir)"
 
-case "$(wk_py wk.guest inject-retire)" in
-    stopped) changed "stopped the injector 'wk start' spawned; launchd keeps it now" ;;
-esac
-case "$(wk_py wk.secrets claude-login-migrate)" in
-    moved) changed "moved the claude.ai login out of agent-rw, beside the keyring" ;;
-    failed) die "could not move the claude.ai login out of agent-rw (above)" ;;
-esac
-
 _plist_new=$(mktemp)
 wk_py wk.guest inject-plist "$_label" "$_log" "/opt/podman/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" > "$_plist_new" \
     || die "could not write the injector's LaunchAgent (above)"

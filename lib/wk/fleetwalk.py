@@ -19,8 +19,7 @@ def place_rows(reg, name, subcmd, what, label_for, warn):
     rc, out = driver.wk(subcmd, "ls", "--continued",
                         env=dict(reg.env, WK_ROW_LABEL=label_for(driver, name), WK_NO_DELEGATE="1"), quiet=True)
     if rc != 0:
-        warn("'%s' did not answer the listing, so the %s in its store are not\n"
-             "    here. Its wk-tools predates a listing that walks the fleet:  wk sync --tools %s" % (name, what, name))
+        warn("'%s' did not answer the listing, so the %s in its store are not here." % (name, what))
     return [l for l in out.replace("\r", "").splitlines() if l.strip()]
 
 

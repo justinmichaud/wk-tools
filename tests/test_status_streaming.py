@@ -1,4 +1,4 @@
-"""Streaming behaviour of `wk status --text`: the renderer (wk.statusview)."""
+"""Streaming behaviour of `wk status`: the renderer (wk.statusview)."""
 import contextlib
 import io
 import json
@@ -181,7 +181,7 @@ class TestARemotesMarkersStayItsOwn(WkTest):
 
     def test_a_flush_in_a_remotes_records_does_not_draw_its_block_early(self):
         with scratch_dir(prefix="wk-test-machines-") as machdir, stub_path({"ssh": _MARKER_LEAKING_SSH}) as binp:
-            cp = run("status", "--text", "--no-devices", env={
+            cp = run("status", "--no-devices", env={
                 "WK_MACHINES_DIR": str(machdir), "WK_PLACE": "remote", "WK_REMOTE_HOST": "fake-leaky-" + rand_suffix(4),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "WK_PROBE_SECONDS": "1"}, timeout=60)
         self.assertEqual(cp.returncode, 0, cp.stdout)
@@ -196,7 +196,7 @@ class TestEveryWorkspaceIsInTheListing(WkTest):
         ls = run("ls", "--json", timeout=120)
         self.assertEqual(ls.returncode, 0, ls.stdout)
         names = [w["name"] for w in json.loads(ls.stdout)["workspaces"]]
-        st = run("status", "--text", "--no-devices", env={"NO_COLOR": "1"}, timeout=180)
+        st = run("status", "--no-devices", env={"NO_COLOR": "1"}, timeout=180)
         self.assertIn(st.returncode, (0, 2, 4), st.stdout)
         for n in names:
             self.assertRegex(st.stdout, r"(?m)^\s+%s\s" % n, f"'{n}' missing from a bare 'wk status':\n{st.stdout}")

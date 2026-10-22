@@ -1,8 +1,5 @@
-"""A PR head taken into a checkout, and a branch pointed at its fork: git argv through a place's exec; and the week's
-activity on WebKit/WebKit, read through gh's JSON."""
+"""A PR head taken into a checkout, and a branch pointed at its fork: git argv through a place's exec."""
 
-import datetime
-import json
 import re
 
 from wk import act, git
@@ -239,50 +236,3 @@ def resolved_or_planned(machine, mirror, dest, what, fetch):
         return PLANNED_COMMIT
     fetch()
     return mirror_rev(machine, mirror, dest)
-
-
-REPORT_REPO = "WebKit/WebKit"
-PR_FIELDS = "number,title,url,state,createdAt,updatedAt,author"
-
-
-def gh_json(machine, argv):
-    r = machine.run(["gh"] + argv)
-    if not r.ok:
-        die("gh %s failed: %s" % (" ".join(argv[:2]), (r.err or r.out).strip()))
-    return json.loads(r.out)
-
-
-def since_date(given, today):
-    if not given:
-        return (today - datetime.timedelta(days=7)).isoformat()
-    try:
-        return datetime.date.fromisoformat(given).isoformat()
-    except ValueError:
-        die("--since takes a date as YYYY-MM-DD (got '%s')" % given)
-
-
-def weekly(machine, since, today, out):
-    """The person's pull requests created and updated since `since`, and the others' they reviewed or commented on."""
-    login = gh_json(machine, ["api", "user"])["login"]
-
-    def mine(qualifier):
-        return gh_json(machine, ["pr", "list", "--repo", REPORT_REPO, "--author", login, "--state", "all",
-                                 "--search", "%s:>=%s" % (qualifier, since), "--json", PR_FIELDS, "--limit", "1000"])
-
-    def theirs(role):
-        found = gh_json(machine, ["search", "prs", "--repo", REPORT_REPO, "--" + role, login, "--updated", ">=" + since,
-                                  "--json", PR_FIELDS, "--limit", "1000"])
-        return [p for p in found if (p.get("author") or {}).get("login") != login]
-
-    created = mine("created")
-    updated = [p for p in mine("updated") if p["number"] not in {c["number"] for c in created}]
-    reviewed = theirs("reviewed-by")
-    commented = [p for p in theirs("commenter") if p["number"] not in {r["number"] for r in reviewed}]
-    out.write("@%s on %s, %s to %s (week %s)\n" % (login, REPORT_REPO, since, today.isoformat(), today.strftime("%V")))
-    for title, prs in (("pull requests created", created), ("pull requests updated", updated),
-                       ("reviewed", reviewed), ("commented on", commented)):
-        out.write("\n%s: %d\n" % (title, len(prs)))
-        for p in sorted(prs, key=lambda p: p["number"]):
-            who = "" if title.startswith("pull") else " (%s)" % (p.get("author") or {}).get("login", "?")
-            out.write("  #%-6d %-7s %s%s\n          %s\n" % (p["number"], p["state"].lower(), p["title"], who, p["url"]))
-    return 0

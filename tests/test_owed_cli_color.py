@@ -50,7 +50,7 @@ class TestEndToEndTextModeHasNoEscBytes(WkTest):
             name = f"demo-{rand_suffix()}"
             (root / "ws" / name).mkdir(parents=True)
             (root / "ws" / name / ".wk-ready").touch()
-            cp = run("status", name, "--text", timeout=30, env={
+            cp = run("status", name, timeout=30, env={
                 "WK_PLACE": "remote", "WK_REMOTE_HOST": "fake-reachable-machine", "WK_REMOTE_ROOT": str(root),
                 "PATH": f"{binp}:{os.environ.get('PATH', '/usr/bin:/bin')}", "WK_PROBE_SECONDS": "1"})
         self.assertEqual(cp.returncode, 0, cp.stdout)

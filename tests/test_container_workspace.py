@@ -120,8 +120,8 @@ class TestContainerWorkspaceLifecycle(WkTest):
         cp = run("ls")
         self.assertIn(self.name, cp.stdout, f"'wk ls' does not list {self.name}: {cp.stdout}")
 
-        cp = run("status", self.name, "--text", "--no-fleet")
-        self.assertIn(cp.returncode, (0, 2), f"'wk status {self.name} --text --no-fleet' exited {cp.returncode}: {cp.stdout + cp.stderr}")
+        cp = run("status", self.name, "--no-fleet")
+        self.assertIn(cp.returncode, (0, 2), f"'wk status {self.name} --no-fleet' exited {cp.returncode}: {cp.stdout + cp.stderr}")
 
         cp = run("build", self.name, "jsc-release", "--dry-run")
         self.assertEqual(cp.returncode, 0, f"'wk build {self.name} jsc-release --dry-run' failed: {cp.stdout + cp.stderr}")

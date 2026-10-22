@@ -10,7 +10,7 @@ from unittest import mock
 from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import priv, status, statusview  # noqa: E402
+from wk import priv, status  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
@@ -46,16 +46,6 @@ class TestPrivilegedHelpersAreAskedOfPython(unittest.TestCase):
 
 
 class TestStatusIsReadFromTheLibrary(unittest.TestCase):
-    def test_the_web_view_refreshes_without_a_wk_subprocess(self):
-        walk = mock.Mock()
-        walk.records.return_value = [{"kind": "machine", "name": "m"}]
-        live = statusview.Live(str(REPO), 5)
-        with mock.patch.object(subprocess, "run", no_subprocess), mock.patch.object(status, "Walk", return_value=walk) as W, \
-                mock.patch.object(statusview, "merge", return_value={"machines": ["m"]}):
-            live.refresh_once()
-        self.assertEqual({"machines": ["m"]}, live.doc)
-        self.assertTrue(W.call_args.kwargs["fleet"])
-
     def test_start_shows_status_without_a_wk_subprocess(self):
         start = load_cmd("start")
         ctr = mock.Mock()

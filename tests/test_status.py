@@ -28,8 +28,6 @@ def render(records, mode="text"):
     doc = statusview.merge(records)
     if mode == "json":
         out = json.dumps(doc, indent=2) + "\n"
-    elif mode == "html":
-        out = statusview.write_page(doc, os.path.join(tempfile.mkdtemp(prefix="wk-status-page-"), "status.html")) + "\n"
     else:
         buf = io.StringIO()
         statusview.render_text_stream(iter(records), buf, False)
@@ -238,27 +236,6 @@ class TestBump(unittest.TestCase):
         self.assertEqual(w, 2)
         for c in ("", "abc", "7", "-1", "255"):
             self.assertEqual(status.bump(0, c), 4, c)
-
-
-class TestDefaultView(unittest.TestCase):
-    """A bare `wk status` opens the page at a terminal that can show one, and prints the table everywhere else."""
-
-    def test_the_mode_by_terminal_and_environment(self):
-        no = "/nonexistent"
-        for env, tty, want in (({}, False, "text"), ({"HOME": no}, True, "web"),
-                               ({"WK_STATUS_VIEW": "json", "NO_COLOR": "1"}, True, "json"),
-                               ({"WK_STATUS_VIEW": "json"}, False, "json"),
-                               ({"CI": "1", "HOME": no}, True, "text"), ({"NO_COLOR": "1", "HOME": no}, True, "text"),
-                               ({"SSH_CONNECTION": "x", "HOME": no}, True, "text"),
-                               ({"SSH_TTY": "/dev/pts/1", "HOME": no}, True, "text"),
-                               ({"SSH_CONNECTION": "x", "DISPLAY": ":0", "HOME": no}, True, "web")):
-            with self.subTest(env=env, tty=tty):
-                self.assertEqual(statusview.default_mode(env, tty), want)
-
-    def test_a_workspace_stays_out_of_the_browser(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, ".wk-workspace").write_text("name=ws\n")
-            self.assertEqual(statusview.default_mode({"HOME": tmp}, True), "text")
 
 
 class TestWaitAndTimeout(unittest.TestCase):
@@ -724,13 +701,11 @@ class TestRendersPartial(unittest.TestCase):
         self.assertNotIn("disk", out)
         self.assertNotIn("load", out)
 
-    def test_json_and_html_are_the_one_merged_document(self):
+    def test_json_is_the_merged_document(self):
         recs = [machine_rec("m"), {"kind": "workspace", "machine": "m", "method": "container", "name": "ws", "state": "running", "ws": "present"},
                 {"kind": "exit", "code": 2}]
         doc = json.loads(render(recs, "json").stdout)
         self.assertEqual(doc["exit"], 2)
-        page = Path(render(recs, "html").stdout.strip()).read_text()
-        self.assertIn(json.dumps(doc), page)
 
     def test_an_unreadable_record_is_reported_and_the_rest_still_render(self):
         err = io.StringIO()
@@ -780,18 +755,6 @@ class TestTheSelfLineIsSpacedOneWay(unittest.TestCase):
         lines = out.getvalue().split("\n")
         self.assertEqual(lines[0], statusview.self_line_text("here", "workstation", "host", False))
         self.assertEqual(lines[1:3], statusview.render_machine_block(merger.doc["machines"][0], False)[:2])
-
-
-class TestTheServedPage(unittest.TestCase):
-    def test_port_and_interval_come_from_the_flag_else_the_env_else_any_port_every_20s(self):
-        cmd = load_cmd("status")
-        walk = types.SimpleNamespace(records=lambda markers=True: iter(()), worst=0)
-        for argv, env, want in (([], {}, ("0", "20")), ([], {"WK_STATUS_PORT": "8080", "WK_STATUS_INTERVAL": "5"}, ("8080", "5")),
-                                (["--port=9", "--interval=7"], {"WK_STATUS_PORT": "8080"}, ("9", "7"))):
-            with mock.patch.object(cmd, "Walk", return_value=walk), mock.patch.object(cmd.statusview, "serve", return_value=0) as serve, \
-                    mock.patch.dict(os.environ, env):
-                self.assertEqual(0, cmd.main(["--web"] + argv))
-            self.assertEqual(serve.call_args[0][2:], want, argv)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Boot drivers: the interface (driver.py), the Pi arrangements (pi.py), the Macs (mac.py) and a board in memory (fake.py)."""
+"""Boot drivers: the interface (driver.py), the Pi arrangements (pi.py) and the Macs (mac.py)."""
 
 
 def drivers():

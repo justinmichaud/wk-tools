@@ -370,7 +370,7 @@ class PlaceSteps:
         action = workspace_action(self.record())
         made = action == "new"
         if action == "broken":
-            self.fail("'%s' is broken; wk says:\n%s" % (self.ws, tail(wk("status", self.ws, "--text", timeout=300).out)))
+            self.fail("'%s' is broken; wk says:\n%s" % (self.ws, tail(wk("status", self.ws, timeout=300).out)))
         if action == "new":
             self.wk_ok("new", self.ws, *self.conf["new"], timeout=int(self.left()))
             action = workspace_action(self.record())

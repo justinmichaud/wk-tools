@@ -250,35 +250,6 @@ class TestWhoHoldsTheLogin(WkTest):
         self.assertEqual("False", cp.stdout.strip(), cp.stderr)
 
 
-class TestTheLoginMovesOutOfAgentRw(WkTest):
-    def secrets(self):
-        from wk.secrets import Secrets
-        from tests.support import clean_env
-        return Secrets(str(REPO), env=clean_env({"WK_STORE": str(self.tmp / "store"),
-                                                  "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets")}))
-
-    def test_it_is_renamed_once_beside_the_keyring(self):
-        s = self.secrets()
-        old = self.tmp / "store" / "agent-rw" / ".credentials.json"
-        old.parent.mkdir(parents=True)
-        old.write_text("LOGIN\n")
-        self.assertEqual("moved", s.claude_login_migrate())
-        new = Path(s.cred_path("claude-login"))
-        self.assertEqual(("LOGIN\n", False), (new.read_text(), old.exists()))
-        self.assertEqual(0o700, new.parent.stat().st_mode & 0o777)
-        self.assertEqual("unchanged", s.claude_login_migrate())
-
-    def test_a_second_copy_is_named_and_neither_is_touched(self):
-        s = self.secrets()
-        old = self.tmp / "store" / "agent-rw" / ".credentials.json"
-        new = Path(s.cred_path("claude-login"))
-        for p, text in ((old, "OLD\n"), (new, "NEW\n")):
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(text)
-        self.assertEqual("both", s.claude_login_migrate())
-        self.assertEqual(("OLD\n", "NEW\n"), (old.read_text(), new.read_text()))
-
-
 class TestTheLoginDocument(WkTest):
     def test_the_placeholder_holds_no_token_and_never_expires_for_the_cli(self):
         oauth = json.loads(claudelogin.placeholder())["claudeAiOauth"]

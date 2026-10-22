@@ -378,29 +378,6 @@ class TestTheDaemons(GuestTest):
         self.assertTrue(ok, err)
         self.assertNotIn("not running", err)
 
-    def test_an_injector_wk_start_spawned_is_named_by_gc_and_stopped_by_setup(self):
-        pidfile = self.vmdir + "/github-inject.pid"
-        self.w.pids.add(555)
-        self.w._set_file(pidfile, "555\n")
-        self.w.answer(["ps", "-o", "command=", "-p", "555"], out="/usr/bin/python3 /t/container/proxy/github-inject.py\n")
-        self.assertEqual([("inject", None, "./setup --stage inject")], [(r.kind, r.take, r.flag) for r in guest.rubble(self.vm)])
-        self.assertTrue(quiet(self.host().retire_spawned_inject)[0])
-        self.assertIn(("kill", 555, 15), self.w.effects)
-        self.assertNotIn(pidfile, self.w.files)
-        self.assertEqual([], guest.rubble(self.vm))
-        self.assertFalse(quiet(self.host().retire_spawned_inject)[0])
-
-    def test_a_pidfile_naming_another_process_stops_nothing_and_gc_takes_it(self):
-        pidfile = self.vmdir + "/github-inject.pid"
-        self.w.pids.add(556)
-        self.w._set_file(pidfile, "556\n")
-        self.w.answer(["ps", "-o", "command=", "-p", "556"], out="/usr/bin/vim\n")
-        (row,) = guest.rubble(self.vm)
-        self.assertIsNotNone(row.take)
-        self.assertFalse(quiet(self.host().retire_spawned_inject)[0])
-        self.assertNotIn(("kill", 556, 15), self.w.effects)
-        self.assertNotIn(pidfile, self.w.files)
-
     def test_the_launch_agent_names_the_injectors_files_and_the_login_it_holds(self):
         import plistlib
         doc = plistlib.loads(guest.inject_plist(self.host(), "com.wk.inject", "/log", "/bin").encode())

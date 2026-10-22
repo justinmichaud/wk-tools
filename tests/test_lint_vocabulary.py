@@ -34,7 +34,7 @@ TARGET_DOMAINS = {
                                                "tests/test_yocto_stage.py", "tests/test_board_local_conf.py",
                                                "tests/test_buildroot_ws.py"),
     "a systemd target": ("boot/firstboot/", "host/units/", "host/linux/rpi5/"),
-    "where a copy or a credential lands": ("tests/test_backup.py", "tests/test_boot_priv.py", "lib/wk/key/creds.py"),
+    "where a copy or a credential lands": ("tests/test_boot_priv.py", "lib/wk/key/creds.py"),
 }
 RETIRED = {
     "say 'image workspace' (image_ws), or the precise word for the meaning": re.compile(r"(?i)\blanes?\b"),

@@ -35,7 +35,7 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
                 "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_PROBE_SECONDS": "1",
             }
-            cp = run("status", name, "--text", env=env, timeout=30)
+            cp = run("status", name, env=env, timeout=30)
             self.assertEqual(cp.returncode, 0, cp.stdout)
             self.assertIn("remote", cp.stdout, cp.stdout)
             self.assertIn(name, cp.stdout, cp.stdout)
@@ -51,7 +51,7 @@ class TestFleetWalkNamedFormRendersAFakedMachine(WkTest):
                 "WK_SSH_TIMEOUT": "2",
                 "WK_PROBE_SECONDS": "1",
             }
-            cp = run("status", name, "--text", env=env, timeout=30)
+            cp = run("status", name, env=env, timeout=30)
             self.assertEqual(cp.returncode, 4, cp.stdout)
             self.assertIn("unreachable", cp.stdout, cp.stdout)
             self.assertIn("remote", cp.stdout, "the unreachable place is named")
@@ -91,10 +91,10 @@ class TestFleetWalkBareFormMultiMachine(WkTest):
                 "PATH": f"{binp}:{os.environ['PATH']}",
                 "WK_PROBE_SECONDS": "1",
             }
-            cp = run("status", "--text", env=env, timeout=45)
+            cp = run("status", env=env, timeout=45)
             self.assertEqual(cp.returncode, 0, cp.stdout)
             for n in names:
-                self.assertIn(n, cp.stdout, f"'{n}' missing from a bare 'wk status --text':\n{cp.stdout}")
+                self.assertIn(n, cp.stdout, f"'{n}' missing from a bare 'wk status':\n{cp.stdout}")
 
 
 def registry(names, holding, ws):
