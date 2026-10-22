@@ -121,6 +121,12 @@ class TestTheDispatcherRunsIt(SetupTest):
             with self.subTest(**kw):
                 self.assertEqual(([], ""), self.converge(**kw))
 
+    def test_a_brokered_run_never_runs_it_and_says_so(self):
+        with mock.patch.dict(os.environ, {"WK_BROKERED": "1"}):
+            runs, err = self.converge()
+        self.assertEqual([], runs)
+        self.assertIn("setup is behind (behind); it runs with the next command typed on it, not under the broker", err)
+
     def test_a_dry_run_says_it_would(self):
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
             runs, err = self.converge()
