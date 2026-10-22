@@ -48,10 +48,10 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
   already says it, the comment goes. Help text states what a flag does, not why
   the alternative was rejected. Duplicated prose is deleted, not synchronised.
   The ceiling is **15% of a file's non-blank lines**, and a file above it is
-  trimmed, not defended. A `cmd/*` file's leading block is not a comment for
-  this purpose -- it is what `wk <cmd> -h` prints (`explain_cmd`, the
-  dispatcher) -- and it is held to the help-text rule instead: what a flag
-  does, not why the alternative was rejected. What earns a line is what a reader cannot re-derive
+  trimmed, not defended. A `cmd/*` module's docstring is not a comment for
+  this purpose -- it is what `wk <cmd> -h` prints, with the table's option
+  lines -- and it is held to the help-text rule instead: what a flag does,
+  not why the alternative was rejected. What earns a line is what a reader cannot re-derive
   from the code in a minute: an external constraint, a measurement, a hardware
   or firmware fact, the one line naming why a construct has to be that way.
   What does not: a restatement of the code, the case against a rejected
@@ -106,7 +106,8 @@ rewritten file resumes a running process mid-word. Check `wk status` first.
    record are not state changes.
 9. **The dispatcher refuses what a command does not declare.** Options
    (`opts`), positionals (`takes`) and passthrough tails are declared in the
-   `# wk:` lines; an option or argument outside them is refused with the
+   command's table (`COMMAND = Command(...)`, `lib/wk/decl.py`); an option or
+   argument outside them is refused with the
    usage line before anything runs. No command parses argv defensively for
    itself.
 

@@ -717,7 +717,7 @@ exist.
      (`lib/wk/sysimage/`; `rm` is a tombstone). Bench's and sysimage's
      `Listing` share one fleet walk (`lib/wk/fleetwalk.py`; each `Listing`
      keeps its own `store_rows` and row-label rule); `ls.human_bytes` is the
-     one byte formatter; `cmd/sysimage`'s `# wk:` line takes `outside`, so
+     one byte formatter; `cmd/sysimage`'s table says `outside`, so
      the dispatcher refuses `wk sysimage` inside any workspace.
      `ls` also lists the mac-volume and guest builders (5.32, 5.34), through
      `ls.host_presets`/`ls.builder_outputs` -- the one `builder_outputs`
@@ -1167,9 +1167,10 @@ exist.
      `machine.Fake`, `FakeClock`, `Exited`, `Killed`), `tests/killpoints.py`
      as the table-driven kill-point/dry-run/final-state module, one
      conformance mixin per contract. Everything after depends on it.
-   7.2 ∥ **The command table and the dispatcher.** The `# wk:` DSL, the
-     argv arithmetic and the cmd bootstrap go; `cmd/*` are tables plus one
-     function; `completion` and help come from the table.
+   7.2 ∥ **The command table and the dispatcher.** *Landed 2026-10-22* (`decl.Command`/`Opt`; every `cmd/<name>`
+     is a docstring, a table and `main(args, inv)`; one importlib load per command, in process; help, completion
+     and the refusals come from the table; a child forward relays signals). Rows: dispatcher 769 of 800, cmd
+     2,032 of 500 (the bodies of ai, test, run, pr, gui and stop, and the docstrings that are the help).
    7.3 ∥ **`Machine` and the `Driver` contract.** *Landed 2026-10-22* (`Driver.CONTRACT`/`FIELDS` checked by
      `TestTheContract` over Container, Vm, LocalWorkspace, Remote and `Peer`; `Ssh.podman`/`Ssh.tart` are the one
      `Ssh`; one copy path; one readiness wait `wait_ready`; one git probe `git.probe`; the fakes live in
