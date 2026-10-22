@@ -120,8 +120,8 @@ class TestContainerWorkspaceLifecycle(WkTest):
         cp = run("ls")
         self.assertIn(self.name, cp.stdout, f"'wk ls' does not list {self.name}: {cp.stdout}")
 
-        cp = run("status", self.name, "--no-fleet")
-        self.assertIn(cp.returncode, (0, 2), f"'wk status {self.name} --no-fleet' exited {cp.returncode}: {cp.stdout + cp.stderr}")
+        cp = run("status", self.name)
+        self.assertIn(cp.returncode, (0, 2), f"'wk status {self.name}' exited {cp.returncode}: {cp.stdout + cp.stderr}")
 
         cp = run("build", self.name, "jsc-release", "--dry-run")
         self.assertEqual(cp.returncode, 0, f"'wk build {self.name} jsc-release --dry-run' failed: {cp.stdout + cp.stderr}")
@@ -161,7 +161,7 @@ class TestCancellingARealBuild(WkTest):
 
     def _build_task(self):
         """(`wk status --records` result, the build's task record or the workspace row's build sub)."""
-        cp = run("status", self.name, "--records", "--no-fleet", timeout=300)
+        cp = run("status", self.name, "--records", timeout=300)
         task, sub = None, None
         for line in cp.stdout.splitlines():
             if not line.startswith("{"):
