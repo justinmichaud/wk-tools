@@ -4,7 +4,7 @@ import json
 import os
 import sys
 
-from wk import act, fleet, images, reach, record as wkrecord
+from wk import act, fleet, images, reach
 from wk.boot import drivers, open_driver
 from wk.kv import ConfError, kv, kv_file
 from wk.machine import Local, is_macos
@@ -12,6 +12,7 @@ from wk.store import Store
 
 CONF_DEFAULTS = {"role": "workstation", "os": "any"}
 BROKER_VERBS = {"arm": "arm", "status": "status", "keep": "keep", "back": "release", "disarm": "disarm"}
+TRIES, WAIT, POLL, ARM_RETRY = 3, 420, 12, 15
 
 
 def load_conf(root, name, env):
@@ -121,7 +122,7 @@ class Boot:
         if mode.startswith("bench"):
             act.log("%s: bench mode -- system %s (booted %s)" % (name, mode[6:], self.booted))
             self.evidence()
-            if self.d.arming == "command":
+            if self.d.sticky:
                 act.log("  the job it was armed for hands the machine back when it ends.")
             else:
                 act.log("  a plain reboot returns it to host mode: wk boot %s --back" % name)
@@ -145,7 +146,7 @@ class Boot:
                      % (name, image, who, "the record carries no boot id" if not rec["armed_boot_id"] else "the machine reports no boot id"))
             act.log("  treat it as armed; clear it with: wk boot %s --disarm" % name)
             return 2
-        if self.d.arming == "command":
+        if self.d.sticky:
             act.warn("%s is ARMED for '%s' %s" % (name, image, who))
             act.log("  a plain reboot enters bench mode; cancel with: wk boot %s --disarm" % name)
             return 0
@@ -171,16 +172,11 @@ class Boot:
         if act.dry_run():
             act.log("would create /run/wk-keep-running on %s" % self.name)
             return 0
-        if not self.d.sudo("keep.sh", mutates=True).ok:
+        if not self.d.keep():
             act.die("could not claim %s: /run/wk-keep-running was not created" % self.name)
         act.info("%s claimed: the self-return watchdog will not reboot it" % self.name)
         act.warn("nothing will hand this machine back on its own now -- 'wk boot %s --back' does" % self.name)
         return 0
-
-    def reboot(self, armed):
-        rc = self.d.reboot(armed=armed)
-        if rc:
-            raise act.Refused(rc)
 
     def back(self):
         mode = self.read_state()
@@ -191,97 +187,85 @@ class Boot:
             return 0
         if mode == "host":
             self.d.record_clear()
-        self.reboot(False)
+        self.d.reboot()
         act.info("%s is rebooting; the one-shot is spent, so it lands in host mode" % self.name)
         return 0
 
     def disarm(self):
         self.read_state()
-        if not self.rec["image"] and self.d.arming != "medium":
+        if not self.rec["image"] and not self.d.on_medium:
             act.log("%s has no arming record" % self.name)
             return 0
         if act.dry_run():
             act.log("would disarm %s (its normal boot order, or its medium parked) and clear the record" % self.name)
             return 0
-        if self.d.arming != "one-shot":
-            self.d.disarm()
-        elif not self.spent:
-            self.d.arm("", self.d.order_normal)
+        self.d.disarm(spent=bool(self.spent))
         self.d.record_clear()
         act.info("%s disarmed; its next reboot is a normal one" % self.name)
         if self.d.disarm_note():
             act.log(self.d.disarm_note())
         return 0
 
-    def record_write(self, image, device, order):
-        rc = self.d.record_write(image, self.c("image_preset"), device, order)
-        if rc:
-            act.die("could not write the arming record on %s" % self.name, rc)
-
     def arm(self, want=""):
-        mode, arming, name = self.read_state(), self.d.arming, self.name
-        if mode == "unreachable" and arming != "guest":
-            act.die("%s is not reachable over ssh in host mode, so there is nothing to arm." % name)
-        if mode.startswith("bench") and not self.d.arm_from_bench:
-            act.die("%s is already in bench mode (system %s), and only its rescue arms it:  wk boot %s --back"
-                    % (name, mode[6:], name))
-        part = ""
-        if arming == "command":
-            image = want or self.c("volume")
-            if not image:
-                act.die("%s has no benchmark volume configured (volume)" % name)
-        elif arming == "guest":
-            image = want or self.d.facts().get("guest", "")
-            if not image:
-                act.die("%s has no guest configured" % name)
-        else:
-            part, image = self.d.select_system(want)
-        watchdog = ""
-        if arming in ("one-shot", "medium"):
-            watchdog = (images.quiet_load(self.c("image_preset"), self.env) or {}).get("IMG_WATCHDOG", "")
+        self.d.armable(self.read_state())
+        part, image = self.d.choose(want)
+        steps = self.d.arm_sequence(part, image)
         if act.dry_run():
-            act.log(self.arm_plan(image, watchdog) + "\ndry run -- nothing was armed.")
+            act.log("\n".join(["would arm %s for system %s" % (self.name, image)] + ["  " + what for what, _ in steps])
+                    + "\ndry run -- nothing was armed.")
             return 0
-        act.info("arming %s for system %s" % (name, image))
-        if arming == "guest":
-            self.d.arm(part, "")
-            act.info("%s is in bench mode: guest '%s' is running and carries its marker" % (name, image))
-            act.log("  'wk boot %s --back' stops it." % name)
-            return 0
-        if arming == "one-shot":
-            self.record_write(image, self.c("device"), self.d.order_image)
-            self.d.arm(part, self.d.order_image)
-        elif arming == "command":
-            self.d.arm(part, "")
-            self.record_write(image, self.c("volume"), "")
-        else:
-            self.record_write(image, self.c("device"), "")
-            self.d.arm(part, "")
-        self.reboot(True)
-        act.info("%s is rebooting into system %s" % (name, image))
-        if watchdog:
-            act.log("  it returns by itself in %ss unless claimed:\n    wk boot %s --keep     claim it\n"
-                    "    wk boot %s --back     hand it back now" % (watchdog, name, name))
-        else:
-            act.log("  the job it was armed for returns it:  wk boot %s --status" % name)
-        act.log("  if it never appears, its own account of that boot says why: wk boot %s --diag" % name)
+        act.info("arming %s for system %s" % (self.name, image))
+        for _, step in steps:
+            step()
         return 0
 
-    def arm_plan(self, image, watchdog):
-        d, name, arming = self.d, self.name, self.d.arming
-        head = "would arm %s\n" % name
-        if arming == "guest":
-            return head + "  guest        %s (%s)\n  then         start the guest and wait for its marker" % (image, d.ch.state() or "unknown")
-        record_at = d.facts()["record"]
-        if arming == "command":
-            attached = "(attached)" if d.volume_present() else "(NOT attached -- arming would refuse)"
-            return head + ("  volume       %s %s\n  record       %s\n  then         prove the way back, bless it, read it back, reboot\n"
-                           "  now          %s" % (image, attached, record_at, d.firmware_default()))
-        order = ("untouched; the arming is %s's own boot partition" % self.c("device") if arming == "medium"
-                 else "%s (one-shot; the normal order %s is untouched)" % (d.order_image, d.order_normal))
-        return head + ("  system       %s (on %s)\n  boot order   %s\n  record       %s on %s\n"
-                       "  then         reboot; the watchdog returns it in %ss unless claimed"
-                       % (image, self.c("device"), order, record_at, name, watchdog or "?"))
+    # -- the one retry rule: a board A/B's legs, and anything else that needs a system running
+    def wait(self, clock, host=False):
+        d = self.d
+        return clock.wait_until(lambda: d.probe() != "unreachable" and (d.ch.side == "host" or not host), WAIT, POLL)
+
+    def attempt(self, transition):
+        try:
+            return transition() == 0
+        except act.Refused:
+            return False
+
+    def enter(self, want, clock):
+        """The machine running system `want`, read from its own marker after up to TRIES armings; False when it will not
+        come up so. One arming only from its rescue goes back there first."""
+        d, name = self.d, self.name
+        for attempt in range(1, TRIES + 2):
+            if d.probe() == "unreachable":
+                act.info("%s is not answering yet; waiting for it before deciding" % name)
+                self.wait(clock)
+            kind, _, ident = d.mode.partition(" ")
+            if kind == "bench" and ident == want:
+                act.info("%s is running %s (verified from its own marker)" % (name, want))
+                return True
+            if ident:
+                act.info("%s answers as %s (%s), not %s" % (name, ident, kind, want))
+            back = kind == "bench" and not d.arm_from_bench
+            step = self.back if back else lambda: self.arm(want)
+            if act.dry_run():
+                self.attempt(step)
+                if back:
+                    act.log("  then arm %s from its rescue and boot it" % want)
+                return False
+            if attempt > TRIES:
+                return False
+            act.info("%s: arming and booting system %s (attempt %d of %d)" % (name, want, attempt, TRIES))
+            if back:
+                act.info("%s: it arms only from its rescue; going back to it first" % name)
+            if not self.attempt(step):
+                act.warn("could not %s (attempt %d)" % ("send %s back to its rescue" % name if back else "arm %s on %s" % (want, name), attempt))
+                clock.sleep(ARM_RETRY)
+                continue
+            self.wait(clock, host=back)
+
+    def release(self, clock):
+        """Back on its rescue with its arming record cleared there."""
+        if not (self.attempt(self.back) and self.wait(clock, host=True) and self.attempt(self.disarm)):
+            act.warn("%s was not handed back; 'wk boot %s --status' says where it is, --disarm and --back return it" % (self.name, self.name))
 
 
 def fleet_probe(root, name, env):
@@ -338,16 +322,6 @@ def broker_request(root, verb, words, env, machine, typed):
     if not machine.exists(client):
         act.die("this workspace's wk-tools has no broker client (%s):  wk sync --tools container   on the workstation" % client)
     return machine.run_tty(["env", "WK_BROKER_SOCKET=" + sock, "python3", client, verb] + words).rc
-
-
-def hold(root, name, action, env):
-    """The two transitions that move the board out from under whatever is measuring on it, claimed fleet-wide."""
-    records = wkrecord.Records(env=env)
-    t = wkrecord.hold(records, lambda r: wkrecord.fleet_holders(r, wkrecord.fleet_stores(root, env, records.machine)),
-                      name, "boot", name, "kill %d" % os.getpid(), "", ["%s %s" % (action, name)], os.getpid(), env)
-    if t is not None:
-        os.environ["WK_DEVICE_HELD"] = "device:" + name
-    return t
 
 
 def main(argv, env=None):

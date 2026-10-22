@@ -10,7 +10,7 @@ from tests.support import REAL_MACHINES, REPO, WkTest, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import images, places, reach, screen  # noqa: E402
-from wk.boot.mac import GuestChannel  # noqa: E402
+from wk.boot.mac import MacGuest  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Fake, Local, lib_argv  # noqa: E402
@@ -104,7 +104,8 @@ class TestPlaceLib(WkTest):
 
 class TestBootMacGuest(unittest.TestCase):
     def test_wk_bench_guest_overrides_the_guest_workspace_name(self):
-        self.assertEqual(GuestChannel(REPO, {}, env={"WK_BENCH_GUEST": "my-custom-guest"}).ws, "my-custom-guest")
+        env = {"WK_BENCH_GUEST": "my-custom-guest"}
+        self.assertEqual(MacGuest(REPO, {}, MacGuest.channel(REPO, {}, env=env, via=Fake())).guest(), "my-custom-guest")
 
 
 class TestPlacesContainer(unittest.TestCase):

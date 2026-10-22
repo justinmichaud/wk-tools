@@ -1,4 +1,4 @@
-"""An image build's stage as a task with `wk build`'s record, detach, watchdog and stop; and the pinned download a builder fetches."""
+"""One image-build lifecycle: a builder's stage as a task with `wk build`'s record, detach, watchdog and stop."""
 
 import hashlib
 import os
@@ -53,33 +53,27 @@ def fetch_pinned(machine, url, dest, sha):
     return "" if machine.act_run(["mv", part, dest]).ok else "could not keep %s" % dest
 
 
-def fetch_base(machine, url, sha, env):
-    cache = cache_dir(env)
-    dest = os.path.join(cache, os.path.basename(url))
-    machine.mkdir(cache)
-    why = fetch_pinned(machine, url, dest, sha)
-    if why:
-        die(why)
-    return dest
-
-
 def check_commit(commit):
     if not re.match(r"^[0-9a-f]{40}$", commit):
         die("--commit takes a full sha (40 hex digits), got '%s'" % commit)
 
 
-def opt(flag, value):
-    return [flag, value] if value else []
+def show(title, rows, did="built"):
+    """The one dry-run report; with no `did`, the caller's own steps follow it and it ends them."""
+    log("would " + title)
+    for label, value in rows:
+        log("  %-12s %s" % (label, value))
+    if did:
+        log("dry run -- nothing was %s." % did)
+    return 0
 
 
 def off_wall(path):
     """PATH without every directory under container/bin, so no configure step records a wall as the tool it found."""
-    keep = [d for d in path.split(":") if d and not re.search(r"/container/bin(/|$)", d)]
-    return ":".join(keep)
+    return ":".join(d for d in path.split(":") if d and not re.search(r"/container/bin(/|$)", d))
 
 
 def in_workspace(tools, label, argv):
-    """`argv` run in a workspace through `main stage`: off the wall, declared a wk build, its pid announced."""
     return isolated_module(tools + "/lib", "wk.sysimage.task") + ["stage", label, "--"] + list(argv)
 
 
@@ -109,7 +103,6 @@ class Stage:
         self.recs = job.records_of(driver, clock, self.here)
         self.ws_dir = driver.store.ws_dir(ws)
         self.log = os.path.join(self.ws_dir, "home", "%s-%s.log" % (kind, stage))
-        self.label = kind
         self.watchdog = {}
 
     def refuse_busy(self, held=None):
@@ -121,11 +114,9 @@ class Stage:
 
     def detach(self, argv, what):
         pid = job.detached(self.here, self.recs, self.clock, self.kind, self.ws, argv,
-                             os.path.join(self.ws_dir, "detached-%s.log" % self.stage), what)
+                           os.path.join(self.ws_dir, "detached-%s.log" % self.stage), what)
         info("running detached in '%s' as pid %d -- this end can go away" % (self.ws, pid))
-        log("  follow:  wk status %s --log -f" % self.ws)
-        log("  state:   wk status %s" % self.ws)
-        log("  stop it: %s" % self.kill)
+        log("  follow:  wk status %s --log -f\n  state:   wk status %s\n  stop it: %s" % (self.ws, self.ws, self.kill))
         return 0
 
     def size(self, max_jobs=None, mb=MB_PER_JOB):
@@ -151,12 +142,11 @@ class Stage:
         return t
 
     def run(self, task, argv, pattern):
-        log("  log: %s" % self.log)
-        log("  stop: %s" % self.kill)
-        watcher = job.PidWatch(self.driver, self.ws, task, self.log, self.label, pattern, job.pid_tries(self.env))
+        log("  log: %s\n  stop: %s" % (self.log, self.kill))
+        watcher = job.PidWatch(self.driver, self.ws, task, self.log, self.kind, pattern, job.pid_tries(self.env))
         watcher.start()
         try:
-            cmd, cwd = self.driver.build_argv(self.ws, in_workspace(self.driver.tools(self.ws), self.label, argv))
+            cmd, cwd = self.driver.build_argv(self.ws, in_workspace(self.driver.tools(self.ws), self.kind, argv))
             rc = job.watch(cmd, self.log, self.here, self.clock, self.env, cwd, **self.watchdog)
         except job.Interrupted as e:
             watcher.stop()
@@ -169,6 +159,7 @@ class Stage:
         return self.verdict(task, rc)
 
     def verdict(self, task, rc):
+        """The child's own "stage 'x' done" line, not its exit status: make and the helper exit 0 having done nothing."""
         try:
             with open(self.log, errors="replace") as f:
                 text = f.read()
@@ -199,16 +190,44 @@ class Stage:
 
 
 class ContainerBuilder:
-    """A builder in a container workspace made from its own host image; a subclass is its data and its stages."""
+    """A builder in a container workspace made from its own host image. A subclass is its data -- its options, its
+    dry-run rows -- and its stages; `build` is the one lifecycle every one of them runs through; ls.OUTPUTS its images."""
 
-    KIND = TITLE = SPEC = BASE_IMAGE = BASE_VAR = ""
-    NEEDS = NOT_HERE = IMAGE_NOTE = SURVIVES = PATTERN = ""
+    KIND = TITLE = SPEC = BASE_IMAGE = BASE_VAR = PATTERN = ""
+    NEEDS = NOT_HERE = IMAGE_NOTE = SURVIVES = USAGE = ""
+    FLAGS, VALUED = ("--detach", "--stop"), ("--workspace",)
+    verb = "build"
 
     def __init__(self, reg, preset, spec, clock):
         self.reg, self.p, self.spec, self.clock = reg, preset, spec, clock
         self.name = preset["IMG_PRESET"]
         self.here, self.env, self.root = reg.machine, reg.env, str(reg.root)
         self.store = Store(self.env)
+
+    def build(self, rest):
+        o = self.parse(rest)
+        driver = self.driver()
+        ws = o.get("--workspace") or images.image_ws(self.name, self.env)
+        st = self.stage(driver, ws, o["stage"])
+        if act.dry_run():
+            return show(*self.report(driver, st, ws, o))
+        if o.get("--stop"):
+            return self.stop(driver, st, ws, o)
+        self.refuse(driver, st, ws, o)
+        if o.get("--detach"):
+            return st.detach([os.path.join(self.root, "wk"), "sysimage", self.verb, self.spec]
+                             + [a for a in rest if a != "--detach"], self.what(o))
+        self.staged(st, **self.plan(driver, st, ws, o))
+        return self.done(driver, ws, o)
+
+    def parse(self, rest):
+        return dict(options(rest, self.FLAGS, self.VALUED, self.USAGE % self.name), stage="image")
+
+    def stop(self, driver, st, ws, o):
+        return st.stop()
+
+    def refuse(self, driver, st, ws, o):
+        st.refuse_busy()
 
     def driver(self):
         try:
@@ -227,14 +246,17 @@ class ContainerBuilder:
         return base, "localhost/wk-%s-host:%s-%s" % (self.KIND, base.rsplit(":", 1)[-1], digest)
 
     def stage(self, driver, ws, stage):
-        return Stage(self.reg, driver, ws, self.KIND, stage, self.kill_cmd(ws, stage), self.clock)
+        flag = "" if ws == images.image_ws(self.name, self.env) else " --workspace " + ws
+        return Stage(self.reg, driver, ws, self.KIND, stage, self.kill_cmd(flag, stage), self.clock)
+
+    def kill_cmd(self, flag, stage):
+        return "wk sysimage build %s%s --stop" % (self.spec, flag)
 
     def cache(self, what):
         return os.path.join(self.store.store_dir(), "cache", self.KIND, what)
 
-    def sync(self, driver, ws):
-        if not driver.sync_tools(ws):
-            die("pushing wk-tools into '%s' failed -- the reason is above" % ws)
+    def du(self, path):
+        return du(self.here, path, "not created yet")
 
     def staged(self, st, sized, plan, steps, say, argv, at=None, subject="", mb=None, need_gb=None, what=None):
         """Under a record of `plan` holding the workspace: each of `steps` is a plan step (or, with `at`, all come
@@ -259,24 +281,10 @@ class ContainerBuilder:
         info(say)
         st.run(t, argv(), self.PATTERN)
 
-    def ws_flag(self, ws):
-        return "" if ws == images.image_ws(self.name, self.env) else " --workspace " + ws
-
-    def ws_of(self, o):
-        return o.get("--workspace") or images.image_ws(self.name, self.env)
-
-    def detach(self, st, verb, rest, what):
-        return st.detach([os.path.join(self.root, "wk"), "sysimage", verb, self.spec] + [a for a in rest if a != "--detach"], what)
-
-    def du(self, path):
-        return du(self.here, path, "not created yet")
-
-    def ensure_ws(self, driver, ws, base, tag):
-        """The image first, so an edited Containerfile changes the wanted tag on every run."""
+    def ensure_ws(self, driver, ws):
+        base, tag = self.host_image()
         podman = driver.podman()
-        if self.here.run(podman + ["image", "exists", tag]).ok:
-            act.debug("workspace image %s already built" % tag)
-        else:
+        if not self.here.run(podman + ["image", "exists", tag]).ok:
             info("building the %s workspace image %s (one layer on %s)" % (self.TITLE, tag, base))
             log(self.IMAGE_NOTE % {"spec": self.SPEC})
             spec = os.path.join(self.root, self.SPEC)
@@ -287,10 +295,10 @@ class ContainerBuilder:
             if not self.here.run_tty(["env", "WK_SDK_IMAGE=" + tag, os.path.join(self.root, "wk"), "new", ws, "--on", driver.name]).ok:
                 die("could not create workspace '%s'" % ws)
             return
-        was = self.here.run(podman + ["container", "inspect", driver.ctr(ws), "--format", "{{.ImageName}}"])
-        if was.ok and was.out.strip() and was.out.strip() != tag:
+        was = self.here.run(podman + ["container", "inspect", driver.ctr(ws), "--format", "{{.ImageName}}"]).out.strip()
+        if was and was != tag:
             die("workspace '%s' was made from %s, and %s now wants %s.\n    Remake it -- %s:\n"
-                "        wk rm %s && wk sysimage build %s" % (ws, was.out.strip(), self.SPEC, tag, self.SURVIVES, ws, self.spec))
+                "        wk rm %s && wk sysimage build %s" % (ws, was, self.SPEC, tag, self.SURVIVES, ws, self.spec))
 
 
 def stage_main(label, argv, environ=None):
@@ -302,15 +310,11 @@ def stage_main(label, argv, environ=None):
 
 
 def main(argv):
-    verb, a = (argv[0], argv[1:]) if argv else ("", [])
-    try:
-        if verb == "stage" and len(a) > 2 and a[1] == "--":
-            stage_main(a[0], a[2:])
-        else:
-            die("usage: python3 -m wk.sysimage.task stage <label> -- <argv>", 2)
-    except Refused as e:
-        return e.status
-    return 0
+    if len(argv) > 3 and argv[0] == "stage" and argv[2] == "--":
+        stage_main(argv[1], argv[3:])
+        return 0
+    sys.stderr.write("usage: python3 -m wk.sysimage.task stage <label> -- <argv>\n")
+    return 2
 
 
 if __name__ == "__main__":

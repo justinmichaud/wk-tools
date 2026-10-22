@@ -1,4 +1,5 @@
-"""`--ab-systems`'s boot per leg (lib/wk/bench/board_ab.py's AB.boot): a leg runs on the system the running system's marker names, or not at all."""
+"""`--ab-systems` (lib/wk/bench/board_ab.py): a leg runs on the system the running system's marker names, or not at all,
+and the subtests a narrow arm cannot run are excluded from both."""
 import contextlib
 import io
 import os
@@ -10,124 +11,24 @@ from tests.test_bench_board import BOARD, BoardTest, pipeline_registry
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.bench import board_ab, cli  # noqa: E402
+from wk.boot import cli as bootcli  # noqa: E402
 from wk.boot.driver import part  # noqa: E402
 from wk.boot.pi import Rpi5Usb  # noqa: E402
-from wk.machine import Result  # noqa: E402
 
-SYS_A, SYS_B = part("/dev/sda", 2), part("/dev/sda", 4)
+class TestTheLegsSystem(BoardTest):
+    """Each leg boots its system through Boot.enter (tests/test_boot_cmd.py's TestEnter holds the retry rule)."""
 
-
-class ArmsFromBench(Rpi5Usb):
-    """A board whose arming is taken where it stands, as pi-sd's is."""
-    arm_from_bench = True
-
-
-class SystemBootTest(BoardTest):
-    def ab(self, driver=Rpi5Usb, running=SYS_A):
+    def test_a_leg_whose_system_will_not_come_up_is_lost_and_nothing_runs(self):
         w = self.world()
         w.board.write_system(part("/dev/sda", 3), "sys-b")
-        w.board.running = running
-        self.landed = []
-        reboot = w.board.reboot
-
-        def logged(tryboot=False):
-            r = reboot(tryboot)
-            if self.misroute and w.board.running == SYS_B:
-                self.misroute -= 1
-                w.board.running = SYS_A
-            self.landed.append(w.board.running)
-            return r
-        w.board.reboot, self.misroute = logged, 0
-        d = driver(REPO, w.board.conf, w.board)
-        self.w = w
-        with w.patches():
-            return board_ab.AB(str(REPO), pipeline_registry(w), "ws", "jetstream3", {"system": BOARD, "ab_systems": "sys-a,sys-b"},
-                               w.clock, cli.ab_report, driver=d)
-
-    def boot(self, ab, want):
+        w.board.stuck = True
         err = io.StringIO()
-        with self.w.patches(), contextlib.redirect_stderr(err):
-            ok = ab.boot(want)
-        self.err = err.getvalue()
-        return ok
-
-    def armings(self):
-        return sum(1 for e in self.w.board.effects if e[:2] == ("card_priv", "autoboot"))
-
-
-class TestTheLegsSystem(SystemBootTest):
-    def test_the_board_reaches_the_legs_system_from_wherever_it_stands(self):
-        """On it already, armed where it stands, back to its rescue first, from the rescue, or armed again after a wrong landing."""
-        for driver, running, misroute, want, landed, armings in (
-                (Rpi5Usb, SYS_A, 0, "sys-a", [], 0), (ArmsFromBench, SYS_A, 0, "sys-b", [SYS_B], 1),
-                (Rpi5Usb, SYS_A, 0, "sys-b", ["rescue", SYS_B], 1), (Rpi5Usb, "/dev/mmcblk0p2", 0, "sys-b", [SYS_B], 1),
-                (ArmsFromBench, SYS_A, 2, "sys-b", [SYS_A, SYS_A, SYS_B], 3)):
-            with self.subTest(driver=driver.__name__, running=running, misroute=misroute, want=want):
-                ab = self.ab(driver=driver, running=running)
-                self.misroute = misroute
-                self.assertTrue(self.boot(ab, want), self.err)
-                self.assertEqual(self.landed, [self.w.board.conf["root"] if x == "rescue" else x for x in landed])
-                self.assertEqual(self.armings(), armings)
-
-    def test_a_failed_back_transition_is_retried_not_ignored(self):
-        ab = self.ab()
-        real_transition, calls = ab.transition, []
-
-        def flaky(verb, want=""):
-            if verb == "back":
-                calls.append(1)
-                if len(calls) == 1:
-                    return False
-            return real_transition(verb, want)
-        ab.transition = flaky
-        self.assertTrue(self.boot(ab, "sys-b"), self.err)
-        self.assertIn("could not send", self.err)
-        self.assertEqual(self.landed, [self.w.board.conf["root"], SYS_B])
-        self.assertEqual(2, len(calls))
-
-    def test_the_last_arming_is_read_before_the_leg_is_given_up(self):
-        ab = self.ab(driver=ArmsFromBench)
-        self.misroute = board_ab.SYSTEM_TRIES - 1
-        self.assertTrue(self.boot(ab, "sys-b"), self.err)
-        self.assertEqual(self.armings(), board_ab.SYSTEM_TRIES)
-
-    def test_a_board_that_never_lands_loses_the_leg_after_the_last_try(self):
-        ab = self.ab(driver=ArmsFromBench)
-        self.misroute = 99
-        self.assertFalse(self.boot(ab, "sys-b"))
-        self.assertIn("the leg is lost", self.err)
-        self.assertEqual(self.armings(), board_ab.SYSTEM_TRIES)
-        self.assertFalse(self.w.board.kept)
-
-    def test_an_arming_that_will_not_take_is_retried_after_a_pause_and_bounded(self):
-        ab = self.ab(driver=ArmsFromBench)
-        self.w.board.stuck = True
-        self.assertFalse(self.boot(ab, "sys-b"))
-        self.assertEqual(self.w.clock.slept.count(board_ab.ARM_RETRY), board_ab.SYSTEM_TRIES)
-        self.assertEqual(self.landed, [])
-
-    def test_a_board_between_systems_is_waited_for_not_counted(self):
-        ab = self.ab()
-        back = self.w.clock.now() + 100
-        answer = self.w.board.answer
-        self.w.board.answer = lambda side, argv, input=None: (answer(side, argv, input) if self.w.clock.now() >= back
-                                                              else Result(255, "", "ssh: connect: no route"))
-        self.assertTrue(self.boot(ab, "sys-a"), self.err)
-        self.assertIn("not answering yet", self.err)
-        self.assertEqual((self.landed, self.armings()), ([], 0))
-        self.assertIn(board_ab.POLL, self.w.clock.slept)
-
-    def test_a_dry_run_arms_nothing(self):
-        for driver, said in ((ArmsFromBench, "would arm testboard"), (Rpi5Usb, "would reboot testboard back")):
-            with self.subTest(driver=driver.__name__):
-                ab = self.ab(driver=driver)
-                os.environ["WK_DRY_RUN"] = "1"
-                try:
-                    self.assertFalse(self.boot(ab, "sys-b"))
-                finally:
-                    del os.environ["WK_DRY_RUN"]
-                self.assertIn(said, self.err)
-                self.assertEqual((self.landed, self.armings()), ([], 0))
+        with w.patches(), contextlib.redirect_stderr(err):
+            ab = board_ab.AB(str(REPO), pipeline_registry(w), "ws", "jetstream3", {"system": BOARD, "ab_systems": "sys-a,sys-b"},
+                             w.clock, cli.ab_report, driver=Rpi5Usb(REPO, w.board.conf, w.board))
+            self.assertFalse(ab.arm_leg(1, {"round": "1", "arm": "b"}))
+        self.assertIn("would not come up as sys-b in %d attempts; the leg is lost" % bootcli.TRIES, err.getvalue())
+        self.assertFalse(w.board.kept)
 
 
 class TestTheWidth(unittest.TestCase):

@@ -14,17 +14,14 @@ from unittest import mock
 
 from tests.killpoints import converges
 from tests.support import REPO, WkTest, requires_machine, run as wk_run
-from tests.test_boot_driver import SLOTS_OF, board, conf_for
-from tests.test_mac_volume import mac_board
+from tests.fake_boot import board
 
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act, doctor  # noqa: E402
-from wk.boot import drivers  # noqa: E402
 from wk.boot import cli, eeprom  # noqa: E402
-from wk.boot.driver import part  # noqa: E402
-from tests.fake_boot import FakeBoard  # noqa: E402
-from wk.machine import Fake, Killed, Result  # noqa: E402
+from wk.clock import FakeClock  # noqa: E402
+from wk.machine import Fake, Result  # noqa: E402
 
 PI_KINDS = ("pi-sd", "pi-tryboot", "rpi5-usb")
 
@@ -59,7 +56,7 @@ class TestStatus(unittest.TestCase):
     def test_armed_and_not_yet_rebooted_is_2(self):
         fake, d, b = pi("rpi5-usb")
         d.probe()
-        d.record_write("sys-a", "p", "/dev/sda", d.order_image)
+        d.record_write("sys-a")
         rc, err = run(b.status)
         self.assertEqual(rc, 2, err)
         self.assertIn("ARMED", err)
@@ -68,8 +65,8 @@ class TestStatus(unittest.TestCase):
     def test_a_record_the_boot_spent_is_0_and_names_the_clear(self):
         fake, d, b = pi("rpi5-usb")
         run(b.arm)
-        d.probe()
-        d.reboot()
+        run(b.back)
+        fake.record = "image=sys-a\narmed_boot_id=boot-1\n"
         rc, err = run(b.status)
         self.assertEqual(rc, 0, err)
         self.assertIn("a spent arming record remains", err)
@@ -93,7 +90,7 @@ class TestStatus(unittest.TestCase):
 
     def test_a_sticky_firmware_default_is_returned_by_its_job(self):
         """The Mac's next boot enters what the evidence line names; a reboot does not undo it."""
-        fake, d = mac_board("mac-volume")
+        fake, d = board("mac-volume")
         fake.enter_bench()
         rc, err = run(boot_over(fake, d).status)
         self.assertEqual(rc, 0, err)
@@ -135,7 +132,7 @@ class TestArm(unittest.TestCase):
         self.assertEqual(d.probe(), "bench sys-b")
 
     def test_a_mac_arming_writes_no_watchdog_and_offers_none(self):
-        fake, d = mac_board("mac-volume")
+        fake, d = board("mac-volume")
         rc, err = run(boot_over(fake, d).arm)
         self.assertEqual(rc, 0, err)
         self.assertNotIn("--keep", err)
@@ -203,7 +200,7 @@ class TestBackAndDisarm(unittest.TestCase):
     def test_back_from_host_mode_clears_the_record_first(self):
         fake, d, b = pi("rpi5-usb")
         d.probe()
-        d.record_write("sys-a", "p", "/dev/sda", d.order_image)
+        d.record_write("sys-a")
         rc, err = run(b.back)
         self.assertEqual(rc, 0, err)
         self.assertIsNone(fake.record)
@@ -213,9 +210,8 @@ class TestBackAndDisarm(unittest.TestCase):
             with self.subTest(kind=kind):
                 fake, d, b = pi(kind)
                 d.probe()
-                p, ident = d.select_system("")
-                d.record_write(ident, "p", "", d.order_image)
-                d.arm(p, d.order_image)
+                for _, step in d.arm_sequence(*d.select_system(""))[:-1]:
+                    step()
                 rc, err = run(b.disarm)
                 self.assertEqual(rc, 0, err)
                 self.assertIsNone(fake.record)
@@ -243,37 +239,17 @@ class TestDiag(unittest.TestCase):
         self.assertIn("--back", err)
 
 
-class KillBoard(FakeBoard):
-    """A FakeBoard whose driving process dies before its `stop_after`-th effect, as tests/killpoints.py asks."""
-
-    stop_after, applied = None, 0
-
-    def call(self, fn, *args, input=None, mutates=False):
-        if mutates:
-            if self.stop_after is not None and self.applied >= self.stop_after:
-                raise Killed(fn)
-            self.applied += 1
-        return FakeBoard.call(self, fn, *args, input=input, mutates=mutates)
-
-
 class TestKillpoints(unittest.TestCase):
     """killpoints[boot]: a `wk boot` killed after any effect and run again reaches the state one run does."""
 
     def world(self, kind, start=None):
         def make():
-            conf = conf_for(kind)
-            fake = KillBoard(conf)
-            fake.rescue("rescue-1" if conf["role"] == "bench-device" else "")
-            for n, ident in zip(SLOTS_OF[kind], ("sys-a",)):
-                fake.write_system(part(conf["device"], n), ident, failsafe=drivers()[kind].failsafe)
+            fake, d = board(kind)
             if start:
-                run(getattr(self.boot(fake), start))
+                run(getattr(boot_over(fake, d), start))
             fake.applied = 0
-            return types.SimpleNamespace(fake=fake)
+            return types.SimpleNamespace(fake=fake, d=d)
         return make
-
-    def boot(self, fake):
-        return boot_over(fake, drivers()[fake.conf["driver"]](REPO, fake.conf, fake))
 
     def state(self, w):
         f = w.fake
@@ -281,7 +257,7 @@ class TestKillpoints(unittest.TestCase):
 
     def flow(self, action):
         def run_once(w):
-            got, err = run(getattr(self.boot(w.fake), action))
+            got, err = run(getattr(boot_over(w.fake, w.d), action))
             if got != 0 and not err.count("already in bench mode"):
                 raise AssertionError(err)
         return run_once
@@ -291,6 +267,99 @@ class TestKillpoints(unittest.TestCase):
             for action, start in (("arm", None), ("back", "arm"), ("disarm", None)):
                 with self.subTest(kind=kind, action=action):
                     converges(self, self.world(kind, start), self.flow(action), self.state)
+
+
+class TestEnter(unittest.TestCase):
+    """Boot.enter, the one retry rule (a board A/B's legs): the machine running the system its own marker names, or a
+    False after the last arming is read."""
+
+    def world(self, kind="rpi5-usb", running="sys-a", from_bench=False):
+        fake, d = board(kind, ("sys-a", "sys-b"))
+        d.arm_from_bench = from_bench
+        if running:
+            run(boot_over(fake, d).arm, running)
+        fake.effects.clear()
+        self.landed, self.misroute, restart = [], 0, fake.restart
+
+        def logged(tryboot=False):
+            r = restart(tryboot)
+            if self.misroute and fake.running == "/dev/sda4":
+                self.misroute -= 1
+                fake.running = "/dev/sda2"
+            self.landed.append(fake.running)
+            return r
+        fake.restart, self.fake, self.clock = logged, fake, FakeClock()
+        return boot_over(fake, d)
+
+    def enter(self, b, want):
+        return run(b.enter, want, self.clock)
+
+    def armings(self):
+        return sum(1 for e in self.fake.effects if e[:2] == ("card", "autoboot"))
+
+    def test_the_machine_reaches_the_system_from_wherever_it_stands(self):
+        """On it already, armed where it stands, back to its rescue first, from the rescue, or armed again after a wrong landing."""
+        for from_bench, running, misroute, want, landed, armings in (
+                (False, "sys-a", 0, "sys-a", [], 0), (True, "sys-a", 0, "sys-b", ["/dev/sda4"], 1),
+                (False, "sys-a", 0, "sys-b", ["rescue", "/dev/sda4"], 1), (False, "", 0, "sys-b", ["/dev/sda4"], 1),
+                (True, "sys-a", 2, "sys-b", ["/dev/sda2", "/dev/sda2", "/dev/sda4"], 3)):
+            with self.subTest(from_bench=from_bench, running=running, misroute=misroute, want=want):
+                b = self.world(running=running, from_bench=from_bench)
+                self.misroute = misroute
+                ok, err = self.enter(b, want)
+                self.assertTrue(ok, err)
+                self.assertEqual(self.landed, [self.fake.conf["root"] if x == "rescue" else x for x in landed])
+                self.assertEqual(self.armings(), armings)
+
+    def test_a_failed_back_is_retried_not_ignored(self):
+        b = self.world()
+        back, calls = b.back, []
+        b.back = lambda: calls.append(1) or (act.die("no") if len(calls) == 1 else back())
+        ok, err = self.enter(b, "sys-b")
+        self.assertTrue(ok, err)
+        self.assertIn("could not send", err)
+        self.assertEqual((self.landed, len(calls)), ([self.fake.conf["root"], "/dev/sda4"], 2))
+
+    def test_the_last_arming_is_read_before_it_gives_up_and_a_never_landing_one_is_bounded(self):
+        for misroute, ok in ((cli.TRIES - 1, True), (99, False)):
+            with self.subTest(misroute=misroute):
+                b = self.world(from_bench=True)
+                self.misroute = misroute
+                self.assertEqual(self.enter(b, "sys-b")[0], ok)
+                self.assertEqual(self.armings(), cli.TRIES)
+                self.assertFalse(self.fake.kept)
+
+    def test_an_arming_that_will_not_take_is_retried_after_a_pause_and_bounded(self):
+        b = self.world(from_bench=True)
+        self.fake.stuck = True
+        self.assertFalse(self.enter(b, "sys-b")[0])
+        self.assertEqual((self.clock.slept.count(cli.ARM_RETRY), self.landed), (cli.TRIES, []))
+
+    def test_a_machine_between_systems_is_waited_for_not_counted(self):
+        b = self.world()
+        back, answer = self.clock.now() + 100, self.fake.reply
+        self.fake.reply = lambda side, argv, input=None: (answer(side, argv, input) if self.clock.now() >= back
+                                                           else Result(255, "", "ssh: connect: no route"))
+        ok, err = self.enter(b, "sys-a")
+        self.assertTrue(ok, err)
+        self.assertIn("not answering yet", err)
+        self.assertEqual((self.landed, self.armings()), ([], 0))
+        self.assertIn(cli.POLL, self.clock.slept)
+
+    def test_a_dry_run_arms_nothing(self):
+        for from_bench, said in ((True, "would arm rpi5"), (False, "would reboot rpi5 back")):
+            with self.subTest(from_bench=from_bench):
+                b = self.world(from_bench=from_bench)
+                ok, err = run(b.enter, "sys-b", self.clock, env={"WK_DRY_RUN": "1"})
+                self.assertFalse(ok)
+                self.assertIn(said, err)
+                self.assertEqual((self.landed, self.armings()), ([], 0))
+
+    def test_release_hands_it_back_with_its_record_cleared(self):
+        b = self.world()
+        ok, err = run(b.release, self.clock)
+        self.assertTrue(self.fake.on_rescue(), err)
+        self.assertIsNone(self.fake.record)
 
 
 class EepromTest(unittest.TestCase):
@@ -349,13 +418,13 @@ class TestBootOrder(EepromTest):
         rc, err = self.order(bo, "sd-first")
         self.assertEqual(rc, 0, err)
         self.assertIn("nothing to write", err)
-        self.assertNotIn(("r_sudo", "eeprom.sh"), fake.effects)
+        self.assertEqual(fake.effects, [])
 
     def test_a_board_armed_for_a_reboot_is_not_written_under(self):
         """status.armed_transition: a mutating command aimed at an armed machine refuses."""
         fake, bo = self.rig(kind="rpi5-usb")
         bo.d.probe()
-        bo.d.record_write("sys-a", "p", "/dev/sda", bo.d.order_image)
+        bo.d.record_write("sys-a")
         rc, err = self.order(bo, "usb-first")
         self.assertEqual(rc, (act.Refused, 1), err)
         self.assertIn("is armed for system 'sys-a'", err)
@@ -404,7 +473,7 @@ class TestTheRecoveryPath(EepromTest):
             def mangled(src, dest):
                 with open(src, "rb") as f:
                     fake.bootfs[dest] = b"x" + f.read()
-            for side in fake.sides.values():
+            for side in fake.machines.values():
                 side.copy_in = mangled
         return fake, bo
 
@@ -420,7 +489,7 @@ class TestTheRecoveryPath(EepromTest):
 
     def test_a_dry_copy_to_the_board_records_it_and_lands_nothing(self):
         fake, bo = self.rig()
-        side = fake.sides["m_ssh"]
+        side = fake.machines["host"]
         src = os.path.join(self.store, "rpi-eeprom", eeprom.COMMIT, "recovery.bin")
         with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
             side.copy_in(src, "/boot/recovery.bin")
@@ -486,9 +555,8 @@ class TestFleetProbe(unittest.TestCase):
                 mock.patch.object(cli, "open_driver", return_value=d), \
                 mock.patch.object(cli.reach, "Reach", return_value=types.SimpleNamespace(
                     fleet_line=lambda m: "rpi5 100.0.0.1 (up)", without_tailnet=lambda m: "")):
-            fake.channel = "none"
             d.probe()
-            d.record_write("sys-a", "p", "/dev/sda", d.order_image)
+            d.record_write("sys-a")
             fields = cli.fleet_probe(REPO, "rpi5", {})
         self.assertEqual((doctor.fleet_mode(fields["probeable"], fields["mode"]), fields["armed"]), ("host mode", "sys-a"))
         self.assertTrue(fields["armed_by"])

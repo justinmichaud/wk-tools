@@ -43,7 +43,8 @@ class BootOrder:
         self.name, self.host = d.c("name"), d.c("ssh") or d.c("name")
 
     def eeprom(self, do, sudo=False, mutates=False, input=None, **params):
-        return self.d.ch.call("r_sudo" if sudo else "r_ssh", self.d.ob("eeprom.sh", WK_DO=do, **params), input=input, mutates=mutates)
+        argv = self.d.ob("eeprom.sh", WK_DO=do, **params).argv()
+        return (self.d.ch.sudo if sudo else self.d.ch.run)(argv, input=input, mutates=mutates)
 
     def said(self, r):
         return r.out.replace("\r", "").rstrip("\n")
@@ -142,7 +143,7 @@ class BootOrder:
         return cache
 
     def board(self):
-        m = self.d.ch.machine(self.d.ch.fn_of(self.d.ch.channel))
+        m = self.d.ch.machine()
         if isinstance(m, Result):
             act.die("cannot reach %s to stage the EEPROM update: %s" % (self.host, m.err))
         return m

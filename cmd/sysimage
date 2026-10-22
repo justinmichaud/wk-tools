@@ -9,8 +9,8 @@
 # wk: sub build,webkit,disks,holds,path takes=2
 # wk: sub holds opts=--slot=,--commit=,--preset=,--workspace=,--toolchain
 # wk: sub path opts=--workspace=
-# wk: sub build opts=--workspace=,--detach,--stop,--stage=,--commit=,--slot=,--preset=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
-# wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--preset=,--pgo-profile=,--keep-work,--chromium,--local-layer,--no-local-layer,--tailnet,--no-tailnet
+# wk: sub build opts=--workspace=,--detach,--stop,--stage=,--commit=,--slot=,--preset=,--pgo-profile=,--create,--fetch,--install,--provision,--repair,--build-pkg,--all,--version=,--refresh,--rebuild,--rm
+# wk: sub webkit opts=--workspace=,--detach,--stop,--commit=,--slot=,--preset=,--pgo-profile=
 # wk: sub write opts=--from=,--disk=,--image-preset=,--machine=,--rescue,--grow,--no-grow
 #
 # An image is a whole machine built from an image preset in this repo
@@ -28,8 +28,7 @@
 #   presets                      every image preset, and what it builds
 #   build <image-preset> [options]
 #                                build from the spec. Per builder:
-#       yocto       --workspace, --detach, --stop, --keep-work, --chromium,
-#                   --local-layer|--no-local-layer, --tailnet|--no-tailnet,
+#       yocto       --workspace, --detach, --stop,
 #                   --stage layers|fetch|image|toolchain|webkit|pgo-mix
 #                   (default image; pgo-mix takes --slot)
 #       buildroot   --workspace, --detach, --stop

@@ -6,7 +6,7 @@ import os
 import tempfile
 import zipfile
 
-from wk import act, record as wkrecord
+from wk import act, fleet, record as wkrecord
 from wk.act import die, info
 from wk.bench import ab, board, board_ab, mac_ab, pipeline, plans, record, report, seed, systems
 from wk.lock import Lock, holder_pid
@@ -189,14 +189,10 @@ class Bench:
         d = record.homes_at(self.machine, self.reg.store.records_dir()).get(task)
         if d:
             return self.machine, d
-        for name in self.reg.walk():
-            try:
-                t = self.reg.load(name)
-            except LookupError:
+        for a in fleet.each(self.reg, ["bench", "ls", "--continued"]):
+            if a.side != "answering" or not a.driver.task_store():
                 continue
-            if t.probe()[0] != "answering" or not t.task_store():
-                continue
-            m, root = t.task_store()
+            m, root = a.driver.task_store()
             far = record.homes_at(m, root).get(task)
             if far:
                 return m, far

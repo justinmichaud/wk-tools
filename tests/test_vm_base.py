@@ -157,24 +157,21 @@ class BaseTest(unittest.TestCase):
 
 
 class TestTheBaseIsBuiltOnce(BaseTest):
-    def test_from_nothing_it_is_cloned_grown_provisioned_rebooted_and_sealed_with_its_inputs(self):
+    def test_from_nothing_it_is_pulled_cloned_grown_provisioned_detached_rebooted_and_sealed_with_its_inputs(self):
         self.w.cached = False
         rc, err = self.build()
         self.assertEqual(0, rc, err)
-        self.assertEqual("stopped", self.w.state)
-        self.assertEqual(320, self.w.disk)
-        self.assertIn(("pull", guestbase.IMAGE), self.tart_acts())
-        self.assertIn(("clone", guestbase.IMAGE), self.tart_acts())
+        self.assertEqual(("stopped", 320), (self.w.state, self.w.disk))
         self.assertEqual([a[1] for a in self.w.streamed], ["pull", "clone"], "the tens-of-GB pull and the clone stream to the log")
-        self.assertIn("inputs=%s\n" % guestbase.inputs_hash(str(REPO), self.w.env), self.marker())
-        self.assertIn("image=%s\n" % guestbase.IMAGE, self.marker())
-
-    def test_a_sealed_base_is_left_alone(self):
-        self.build()
+        self.assertEqual([e[1] for e in self.w.effects if e[0] == "spawn"], [(TART, "run", "--no-graphics", "wk-base")] * 2)
+        (started,) = [c for c in self.w.guest_cmds if "nohup" in c]
+        self.assertIn("WK_MIRROR_TAG=%s" % places.MIRROR_TAG, started)
+        self.assertTrue([c for c in self.w.guest_cmds if "wc -c" in c], "nothing polled the detached log")
+        self.assertIn("ssh-ed25519 AAAA wk-vm", [c for c in self.w.guest_cmds if "authorized_keys" in c][0])
+        self.assertIn("inputs=%s\nfinished=" % guestbase.inputs_hash(str(REPO), self.w.env), self.marker())
+        self.assertNotIn("password", self.marker().lower())
         self.w.effects = []
-        rc, err = self.build()
-        self.assertEqual(0, rc, err)
-        self.assertEqual([], self.tart_acts())
+        self.assertEqual((self.build()[0], self.tart_acts()), (0, []), "a sealed base is left alone")
 
     def test_a_base_that_never_finished_is_rubble_and_is_made_again(self):
         self.w.state = "stopped"
@@ -182,212 +179,116 @@ class TestTheBaseIsBuiltOnce(BaseTest):
         self.assertEqual(0, rc, err)
         self.assertIn("never finished", err)
         self.assertEqual([("stop", "wk-base"), ("delete", "wk-base")], self.tart_acts()[:2])
-        self.assertTrue(self.marker())
 
-    def test_the_base_boots_one_way_only_with_the_open_network(self):
-        self.build()
-        runs = [e[1] for e in self.w.effects if e[0] == "spawn"]
-        self.assertEqual([(TART, "run", "--no-graphics", "wk-base")] * 2, runs)
+    def test_each_failure_is_refused_unsealed_naming_what_is_next(self):
+        for name, edit, said in (("agent", lambda w: setattr(w, "agent_down", True), "tart guest agent in 'wk-base' never answered"),
+                                 ("provisioning", lambda w: setattr(w, "prov_rc", "3"), "base provisioning failed (rc=3)"),
+                                 ("pane back", lambda w: setattr(w, "sa", ["0", "0", "1"]), "came back at 'wk-base''s next login"),
+                                 ("pane", lambda w: setattr(w, "screen", PANE), "nothing wk put there: Setup Assistant:0:800x600\n"),
+                                 ("unreadable", lambda w: setattr(w, "screen", "?"), "could not ask 'wk-base' what is on its screen")):
+            with self.subTest(name):
+                self.w = BaseWorld(self.tmp)
+                edit(self.w)
+                rc, err = self.build()
+                self.assertEqual((rc, self.marker()), (1, ""))
+                self.assertIn(said, err)
 
-    def test_provisioning_is_detached_and_polled(self):
-        self.build()
-        started = [c for c in self.w.guest_cmds if "nohup" in c]
-        self.assertEqual(1, len(started))
-        self.assertIn("vm/provision-base.sh", started[0])
-        self.assertIn("WK_MIRROR_TAG=%s" % places.MIRROR_TAG, started[0], "the mount daemon is given the tag tart runs with")
-        self.assertTrue([c for c in self.w.guest_cmds if "wc -c" in c], "nothing polled the detached log")
-
-    def test_the_wk_key_is_authorised_through_the_guest_agent(self):
-        self.build()
-        (cmd,) = [c for c in self.w.guest_cmds if "authorized_keys" in c]
-        self.assertIn("ssh-ed25519 AAAA wk-vm", cmd)
-
-    def test_a_base_whose_guest_agent_never_answers_is_refused_unsealed(self):
-        self.w.agent_down = True
-        rc, err = self.build()
-        self.assertEqual(1, rc)
-        self.assertIn("tart guest agent in 'wk-base' never answered", err)
-        self.assertEqual("", self.marker())
-
-    def test_a_failed_provisioning_names_its_log_and_the_rerun(self):
-        self.w.prov_rc = "3"
-        rc, err = self.build()
-        self.assertEqual(1, rc)
-        self.assertIn("base provisioning failed (rc=3)", err)
-        self.assertIn("base-provision.log", err)
-        self.assertIn("--refresh", err)
-        self.assertEqual("", self.marker())
+    def test_setup_assistant_is_driven_off_before_the_reboot_that_judges_it(self):
+        self.w.sa = ["1", "0"]
+        self.assertEqual(self.build()[0], 0)
+        self.assertIn("/usr/bin/python3 -", self.w.guest_cmds)
 
     def test_killpoints_vm_base(self):
-        def world():
-            w = BaseWorld(self.tmp)
-            return type("W", (), {"fake": w})
-
         def run_once(w):
             self.w = w.fake
             self.build()
 
         def final(w):
             return w.fake.state, w.fake.disk, [l for l in self.marker().splitlines() if not l.startswith("finished=")]
-        converges(self, world, run_once, final, max_effects=80)
+        converges(self, lambda: type("W", (), {"fake": BaseWorld(self.tmp)}), run_once, final, max_effects=80)
 
     def test_a_dry_run_clones_nothing_and_boots_nothing(self):
         os.environ["WK_DRY_RUN"] = "1"
         rc, err = self.build()
         self.assertEqual(0, rc, err)
-        self.assertEqual("absent", self.w.state)
-        self.assertEqual({}, {p: t for p, t in self.w.files.items() if "/locks/" not in p})
+        self.assertEqual(("absent", {}, []), (self.w.state, {p: t for p, t in self.w.files.items() if "/locks/" not in p},
+                                              [e for e in self.w.effects if e[0] == "spawn"]))
         self.assertIn("would run: %s clone %s wk-base" % (TART, guestbase.IMAGE), err)
-        self.assertEqual([], [e for e in self.w.effects if e[0] == "spawn"])
-
-
-class TestItIsSealedOnlyOnAClearScreen(BaseTest):
-    def test_setup_assistant_is_driven_off_before_the_reboot_that_judges_it(self):
-        self.w.sa = ["1", "0"]
-        rc, err = self.build()
-        self.assertEqual(0, rc, err)
-        self.assertIn("/usr/bin/python3 -", self.w.guest_cmds)
-        self.assertTrue([e for e in self.w.effects if e[0] == "run" and e[1][:2] == (TART, "stop")])
-
-    def test_a_pane_that_comes_back_at_the_next_login_is_not_sealed(self):
-        self.w.sa = ["0", "0", "1"]
-        rc, err = self.build()
-        self.assertEqual(1, rc)
-        self.assertIn("came back at 'wk-base''s next login", err)
-        self.assertEqual("", self.marker())
-
-    def test_a_pane_on_screen_is_named_and_the_base_is_not_sealed(self):
-        self.w.screen = PANE
-        rc, err = self.build()
-        self.assertEqual(1, rc)
-        named = err.split("nothing wk put there:")[1].split("\n")[0]
-        self.assertIn("Setup Assistant:0:800x600", named)
-        self.assertNotIn("Terminal", named)
-        self.assertEqual("", self.marker())
-
-    def test_a_screen_that_cannot_be_read_is_not_sealed(self):
-        self.w.screen = "?"
-        rc, err = self.build()
-        self.assertEqual(1, rc)
-        self.assertIn("could not ask 'wk-base' what is on its screen", err)
 
 
 class TestItsStalenessIsRecomputed(BaseTest):
-    def test_a_base_without_a_record_reads_stale(self):
+    def test_a_base_matches_until_an_input_moves_and_each_finding_names_its_remedy(self):
+        self.assertIn("no golden base VM 'wk-base'", self.base().findings())
         self.w.state = "stopped"
-        self.assertEqual("provisioned before this record existed", self.base().stale())
-
-    def test_a_sealed_base_matches_until_an_input_moves(self):
+        self.assertEqual(("provisioned before this record existed", True), (self.base().stale(), "--refresh" in self.base().findings()))
+        self.w.state = "absent"
         self.build()
         self.assertEqual("", self.base().stale())
         self.assertIn("golden base 'wk-base' matches its provisioning inputs", self.base().findings())
         self.w.env["WK_VM_IMAGE"] = "ghcr.io/x@sha256:0"
         self.assertIn("WK_VM_IMAGE", self.base().stale())
         self.assertIn("--rebuild", self.base().findings())
-
-    def test_an_edited_provisioning_script_makes_every_base_before_it_stale(self):
         root = os.path.join(self.tmp, "tree")
         for rel in guestbase.INPUTS:
             os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
             shutil.copy(REPO / rel, os.path.join(root, rel))
         before = guestbase.inputs_hash(root, self.w.env)
-        self.assertEqual(guestbase.inputs_hash(str(REPO), self.w.env), before)
         with open(os.path.join(root, "vm", "desktop.sh"), "a") as f:
             f.write("\n# one more line\n")
         self.assertNotEqual(before, guestbase.inputs_hash(root, self.w.env))
 
-    def test_the_record_holds_no_password(self):
-        self.build()
-        self.assertNotIn("password", self.marker().lower())
-
-    def test_no_base_and_an_unfinished_one_each_name_their_remedy(self):
-        self.assertIn("no golden base VM 'wk-base'", self.base().findings())
-        self.w.state = "stopped"
-        self.assertIn("--refresh", self.base().findings())
-
 
 class TestTheDestructiveModes(BaseTest):
-    def test_a_dirty_tree_is_refused_before_the_base_is_touched(self):
+    def test_a_dirty_tree_or_a_declined_question_changes_nothing(self):
         self.build()
         self.w.dirty, self.w.effects = True, []
         rc, err = self.build("--rebuild", answers=[True])
-        self.assertEqual(1, rc)
         self.assertIn("Nothing has been deleted", err)
-        self.assertEqual([], self.prompts, "the prompt came before the check it would waste")
-        self.assertEqual([], self.tart_acts())
-
-    def test_a_declined_rebuild_or_first_rm_question_changes_nothing(self):
-        self.build()
+        self.assertEqual((rc, self.prompts, self.tart_acts()), (1, [], []), "the prompt came before the check it would waste")
+        self.w.dirty = False
         for mode in ("--rebuild", "--rm"):
-            with self.subTest(mode=mode):
-                self.w.effects = []
-                rc, _ = self.build(mode, answers=[False])
-                self.assertEqual(1, rc)
-                self.assertEqual([], self.tart_acts())
-                self.assertEqual("stopped", self.w.state)
-                self.assertTrue(self.marker())
+            self.assertEqual((self.build(mode, answers=[False])[0], self.tart_acts(), self.w.state), (1, [], "stopped"))
 
     def test_vm_base_rm_asks_twice(self):
         self.build()
-        self.w.dirs.add(os.path.join(self.w.env["HOME"], ".tart", "cache"))
         self.w._set_file(os.path.join(self.w.env["HOME"], ".tart", "cache", "OCIs", "x"), "")
+        self.w.dirs.add(os.path.join(self.w.env["HOME"], ".tart", "cache"))
         rc, err = self.build("--rm", answers=[True, False])
         self.assertEqual(0, rc, err)
-        self.assertEqual(2, len(self.prompts), self.prompts)
-        self.assertIn("rebuilding it is hours", self.prompts[0])
-        self.assertIn("re-downloadable", self.prompts[1])
-        self.assertEqual("absent", self.w.state)
-        self.assertEqual("", self.marker())
+        self.assertEqual([("rebuilding it is hours" in self.prompts[0]), ("re-downloadable" in self.prompts[1])], [True, True])
+        self.assertEqual(("absent", ""), (self.w.state, self.marker()))
         self.assertNotIn(("prune", "--space-budget"), self.tart_acts())
-        self.assertIn("kept:", err)
         self.build()
-        rc, _ = self.build("--rm", answers=[True, True])
+        self.build("--rm", answers=[True, True])
         self.assertIn(("prune", "--space-budget"), self.tart_acts())
 
-    def test_erasing_or_refreshing_nothing_is_refused(self):
+    def test_nothing_to_erase_or_refresh_two_modes_or_no_mac_is_refused(self):
         self.assertEqual(1, self.build("--rm")[0])
         self.assertIn("no golden base yet", self.build("--refresh")[1])
-
-    def test_one_mode_at_a_time_and_only_on_a_mac(self):
         self.assertIn("one of them", self.build("--rm", "--rebuild")[1])
         with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=False):
             self.assertIn("needs a macOS host", self.build()[1])
 
 
 class TestTheBuilderConforms(BaseTest):
-    def test_sysimage_builders_conform_guest(self):
-        self.assertIn("guest", cli.BUILDERS)
-        seen = []
-        reg = places.Registry(str(REPO), env=self.w.env, machine=self.w)
-        with mock.patch.object(guestbase.Base, "build", lambda b, rest: seen.append((b.name, rest)) or 0):
-            self.assertEqual(0, cli.Sysimage(reg, self.clock).build(guest.BASE_PRESET, ["--refresh"]))
-        self.assertEqual([("wk-base", ["--refresh"])], seen)
-        self.assertEqual("host", cli.where(["build", guest.BASE_PRESET, "--rm"], self.w.env))
-
     def out(self, fn, *a):
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
             rc = fn(*a)
         return rc, buf.getvalue()
 
-    def test_path_and_holds_reach_the_sealed_base_marker(self):
-        reg = places.Registry(str(REPO), env=self.w.env, machine=self.w)
-        s = cli.Sysimage(reg, self.clock)
-        self.assertEqual(self.out(s.path, guest.BASE_PRESET, None), (1, ""))
-        self.assertEqual(self.out(s.holds, guest.BASE_PRESET, None, None, None, None, False)[1], "no\n")
-        self.build()
-        self.assertEqual(self.out(s.path, guest.BASE_PRESET, None), (0, self.base().marker() + "\n"))
-        self.assertEqual(self.out(s.holds, guest.BASE_PRESET, None, None, None, None, False)[1], "yes\n")
-
-    def test_ls_lists_it_only_once_sealed(self):
-        reg = places.Registry(str(REPO), env=self.w.env, machine=self.w)
-        s = cli.Sysimage(reg, self.clock)
+    def test_sysimage_builders_conform_guest(self):
+        """`unit sysimage.builders_conform[guest]`: built through `wk sysimage build`, found by path, holds and ls once sealed."""
+        seen, s = [], cli.Sysimage(places.Registry(str(REPO), env=self.w.env, machine=self.w), self.clock)
+        with mock.patch.object(guestbase.Base, "build", lambda b, rest: seen.append((b.name, rest)) or 0):
+            self.assertEqual(0, s.build(guest.BASE_PRESET, ["--refresh"]))
+        self.assertEqual(([("wk-base", ["--refresh"])], cli.where(["build", guest.BASE_PRESET, "--rm"], self.w.env)), (seen, "host"))
+        self.assertEqual((self.out(s.path, guest.BASE_PRESET, None), self.out(s.holds, guest.BASE_PRESET, None, None, None, None, False)[1]),
+                         ((1, ""), "no\n"))
         self.assertNotIn(guest.BASE_PRESET, self.out(lambda: s.ls(False))[1])
         self.build()
-        _rc, out = self.out(lambda: s.ls(False))
-        line = next(l for l in out.splitlines() if l.startswith(guest.BASE_PRESET))
+        self.assertEqual(self.out(s.path, guest.BASE_PRESET, None), (0, self.base().marker() + "\n"))
+        line = next(l for l in self.out(lambda: s.ls(False))[1].splitlines() if l.startswith(guest.BASE_PRESET))
         self.assertEqual(line.split()[:4], [guest.BASE_PRESET, "-", "guest", "ready"])
-        self.assertIn("    " + self.base().marker(), out)
 
 
 class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):

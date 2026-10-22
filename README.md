@@ -664,9 +664,18 @@ The GitHub token and Bugzilla key are held by the injector
 (`container/proxy/github-inject.py`), which terminates TLS for those two hosts
 (and Claude's three, for the claude.ai login) and puts the credential on the
 request. It listens twice: a write goes through only on the writing socket.
-The egress proxy asks the push service whether the connecting process is a
-person's (the same rule), and sends any other to the reading socket, where a write is refused with 412 and a read is
-unchanged. A push service that does not answer is a no.
+In a container the toolchain reaches the egress proxy through a loopback
+bridge each exec starts as its own child (`container/proxy/ensure-bridge.sh`
+hands the command its port as `http_proxy`), so the process on the proxy's
+socket is that bridge, under the command the exec became. The egress proxy
+asks the push service whether that process is a person's (the same rule), and
+sends any other to the reading socket, where a write is refused with 412 and a
+read is unchanged. A push service that does not answer is a no. A bridge dies
+with its command, so a process left behind reaches nothing, and it serves only
+that command's own process tree -- a person's bridge none with an agent
+between, since the proxy would take its writes for that person's; a command run under
+sudo, whose sockets the bridge cannot read, is given its own:
+`sudo /opt/wk-tools/container/proxy/ensure-bridge.sh apt-get ...`.
 
 **Housekeeping**
 
@@ -819,6 +828,10 @@ own records and mirror go under `~/.local/state/wk` and its keyring under
 **The container place** — `WK_SDK`, `WK_SDK_IMAGE`, `WK_CONTAINER_USER`,
 `WK_TOOLS_SRC`, `WK_MACHINE`, `WK_MIRROR` (the mirror's path
 inside a container).
+The SDK checkout is a clone of the fork `SDK_REPO` at the commit `SDK_PIN`
+(both in `lib/wk/project.json`; the fork's `wk` branch carries wk's edits to
+the SDK's scripts on top of upstream), and `./setup --stage sdk` and `wk new`
+check out the pin; moving it is a new `SDK_PIN`.
 
 **The macOS guest** — `WK_VM_IMAGE`, `WK_VM_BASE`, `WK_VM_USER`,
 `WK_VM_PASSWORD`, `WK_VM_CPUS`, `WK_VM_MEM_MB`, `WK_VM_BASE_CPUS`,

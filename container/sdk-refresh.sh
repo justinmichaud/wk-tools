@@ -1,31 +1,34 @@
 #!/usr/bin/env bash
+# The one clone-and-pin step: <checkout> is the fork <repo> at commit <pin>.
 set -euo pipefail
 
-SDK="${1:?usage: sdk-refresh.sh <checkout>}"
+SDK="${1:?usage: sdk-refresh.sh <checkout> <repo> <pin>}"
+REPO="${2:?usage: sdk-refresh.sh <checkout> <repo> <pin>}"
+PIN="${3:?usage: sdk-refresh.sh <checkout> <repo> <pin>}"
 
-[ -d "$SDK/.git" ] || { echo "not an SDK checkout: $SDK" >&2; exit 1; }
-
-cd "$SDK"
-
-_refuse() {
-    echo "could not reach the webkit-container-sdk checkout's remote ($SDK) --
-'wk new' needs the network for the image pull that follows anyway, so there
-is nothing useful to fall back to. Retry once the network is back." >&2
+_unreachable() {
+    echo "could not reach $REPO for the webkit-container-sdk checkout ($SDK) --
+'wk new' needs the network for the image pull that follows anyway. Retry once the network is back." >&2
     exit 1
 }
 
-# Fetch before `set-head -a`: it resolves against refs/remotes/origin/* already here and errors on a renamed default branch until a fetch has made the new ref; the patches go back on because a stock wkdev-create refuses wk's --network/--isolated/--additional-flags (WK_SDK_PATCHER is the test seam).
-git fetch --quiet --prune origin || _refuse
-git remote set-head origin -a >/dev/null 2>&1 || _refuse
-
-_tree() { { git rev-parse HEAD; git diff HEAD; git status --porcelain --untracked-files=all; } | cksum; }
-_before=$(_tree)
-git reset --hard --quiet "$(git symbolic-ref --short refs/remotes/origin/HEAD)"
-git clean -qfd
-
-_rc=0
-_said=$(bash "${WK_SDK_PATCHER:-$(dirname "$0")/sdk-patches/apply.sh}" "$SDK" 2>&1) || _rc=$?
-if [ "$_rc" -ne 0 ] || [ "$(_tree)" != "$_before" ]; then
-    [ -z "$_said" ] || printf '%s\n' "$_said" >&2
+if [ ! -d "$SDK/.git" ] && [ -z "$(ls -A "$SDK" 2>/dev/null)" ]; then
+    mkdir -p "$(dirname "$SDK")"
+    git clone -q "$REPO" "$SDK" || _unreachable
 fi
-exit "$_rc"
+[ -d "$SDK/.git" ] || { echo "not an SDK checkout: $SDK" >&2; exit 1; }
+
+cd "$SDK"
+_origin=$(git remote get-url origin 2>/dev/null || true)
+if [ "$_origin" != "$REPO" ]; then
+    if [ -n "$_origin" ]; then git remote set-url origin "$REPO"; else git remote add origin "$REPO"; fi
+    echo "origin moved to $REPO"
+fi
+
+if [ "$(git rev-parse HEAD)" = "$PIN" ] && [ -z "$(git status --porcelain --untracked-files=all)" ]; then
+    exit 0
+fi
+git cat-file -e "$PIN^{commit}" 2>/dev/null || git fetch --quiet origin || _unreachable
+git cat-file -e "$PIN^{commit}" 2>/dev/null || { echo "$PIN is not a commit of $REPO: SDK_PIN in lib/wk/project.json names a commit the fork does not have." >&2; exit 1; }
+git checkout --quiet --force --detach "$PIN"
+git clean -qfd

@@ -3,24 +3,29 @@ the variables naming that proxy get into a workspace's and a macOS guest's shell
 import asyncio
 import contextlib
 import errno
+import functools
 import importlib.util
 import io
 import json
 import os
+import shlex
 import shutil
 import socket
 import ssl
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
 
 from tests.support import REPO, WkTest
+from tests.test_push_service import Proc
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places as wk_places  # noqa: E402
+from wk import places as wk_places, pushgate  # noqa: E402
 from wk.machine import Fake  # noqa: E402
 
 PROXY = REPO / "container" / "proxy" / "wk-proxy.py"
@@ -259,6 +264,8 @@ class TestTheProxyPicksTheInjectorsSocket(unittest.TestCase):
                     asyncio.run(self.m.Proxy(self.m.Policy(self.tmp)).open_upstream(host, 443, False, _Peer(a)))
                 self.assertEqual([want], calls)
                 self.assertEqual(host in self.m.WRITE_HOSTS, bool(asked), "only a host a write can reach asks")
+                if asked:
+                    self.assertEqual([{"pid": os.getpid()}], asked, "the push service is asked about the process on the socket")
 
 
 PAT, READ, BZ, REAL = "ghp-not-a-real-token", "ghp-read-only", "not-a-real-bugzilla-key", "sk-ant-oat01-REAL"
@@ -712,19 +719,25 @@ class TestAHostSocketIsPublishedIntoThePodmanMachine(WkTest):
         self.assertIn("52000", argv)
 
 
-def _bridge_script(d, ca):
-    """ensure-bridge.sh with its fixed paths moved under `d`; `ca` is the injector CA's text, or None."""
+FAKE_PORT = "4242"
+
+
+def _bridge_script(d, ca, bridge="print(%s, flush=True)\n" % FAKE_PORT, stores=("demo",)):
+    """ensure-bridge.sh with its fixed paths moved under `d`; `ca` is the injector CA's text, or None; `bridge` is bridge.py's source;
+    `stores` the workspace stores mounted at /var/lib/wk/ws."""
     secrets = d / "secrets"
     secrets.mkdir()
     tools = d / "wk-tools"
     (tools / "shell").mkdir(parents=True)
     (tools / "container" / "proxy").mkdir(parents=True)
     (tools / "shell" / "path.sh").write_text(":\n")
-    (tools / "container" / "proxy" / "bridge.py").write_text("import time; time.sleep(30)\n")
+    (tools / "container" / "proxy" / "bridge.py").write_text(bridge)
     runwk = d / "run-wk"
     runwk.mkdir()
     if ca:
         (runwk / "wk-github-ca.pem").write_text(ca)
+    for name in stores:
+        (d / "ws" / name).mkdir(parents=True)
     sysca = d / "ca-certificates.crt"
     sysca.write_text("THE-SYSTEM-STORE\n")
     script = d / "ensure-bridge.sh"
@@ -733,7 +746,8 @@ def _bridge_script(d, ca):
         .replace("/opt/wk-tools", str(tools))
         .replace("/run/wk/wk-github-ca.pem", str(runwk / "wk-github-ca.pem"))
         .replace("/etc/ssl/certs/ca-certificates.crt", str(sysca))
-        .replace("/secrets/", str(secrets) + "/"))
+        .replace("/secrets/", str(secrets) + "/")
+        .replace("/var/lib/wk/ws", str(d / "ws")))
     return script, secrets
 
 
@@ -825,6 +839,144 @@ class TestTheWorkspaceHoldsThePlaceholder(unittest.TestCase):
         self.assertEqual([], left,
                          "a half-written temp file was left in the full directory")
 
+BRIDGE_PY = REPO / "container" / "proxy" / "bridge.py"
+ON_LINUX = "a bridge finds its client by the socket in /proc, which only Linux has"
+PROXY_VARS = ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY")
+
+
+class TestEachExecHasABridgeOfItsOwn(unittest.TestCase):
+    """The proxy judges a write by the pid on its socket, the bridge's: so the bridge is the exec's child, and the command is handed its port."""
+
+    def wrap(self, bridge, command, stores=("demo",), *args, **env):
+        d = Path(tempfile.mkdtemp(prefix="wk-test-bridge-exec-"))
+        self.addCleanup(shutil.rmtree, d, True)
+        script, _ = _bridge_script(d, None, bridge, stores)
+        (d / "rw").mkdir()
+        mine = {k: v for k, v in os.environ.items() if k != "WK_WORKSPACE"}
+        return subprocess.run(["bash", str(script), "sh", "-c", command, *args], capture_output=True, text=True, timeout=60,
+                              env=dict(mine, TMPDIR=str(d / "rw"), **env)), d
+
+    def test_the_command_is_handed_its_bridges_port(self):
+        printer = "; ".join('printf "%s=[%%s]\\n" "$%s"' % (v, v) for v in PROXY_VARS)
+        cp, _ = self.wrap("print(%s, flush=True)\n" % FAKE_PORT, printer, http_proxy="http://127.0.0.1:3128")
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        for v in PROXY_VARS:
+            self.assertIn("%s=[http://127.0.0.1:%s]" % (v, FAKE_PORT), cp.stdout)
+
+    def test_the_bridge_is_the_child_of_the_command_it_serves(self):
+        bridge = ("import os, sys\n"
+                  "open(os.path.join(os.path.dirname(__file__), 'parent'), 'w').write('%d %s %s' % (os.getppid(), sys.argv[1], sys.argv[2]))\n"
+                  "print(4242, flush=True)\n")
+        cp, d = self.wrap(bridge, "echo $$")
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        ppid, named, ws = (d / "wk-tools" / "container" / "proxy" / "parent").read_text().split()
+        self.assertEqual((cp.stdout.strip(), cp.stdout.strip()), (ppid, named), "the command execs into the bridge's parent")
+        self.assertEqual("demo", ws, "the name is the one store mounted, which holds under sudo's reset environment, where the exec has none")
+
+    def test_anything_but_one_workspace_store_runs_the_command_without_network_and_says_so(self):
+        for stores in ((), ("demo", "other")):
+            with self.subTest(stores=stores):
+                cp, _ = self.wrap("print(4242, flush=True)\n", 'printf "[%s] %s" "${http_proxy:-}" "$#"', stores, "sh", "a", "b")
+                self.assertEqual(0, cp.returncode, cp.stderr)
+                self.assertEqual("[] 2", cp.stdout, "the command keeps its own arguments")
+                self.assertIn("/ws, which 'wk new' mounts for every container, so this command has no network", cp.stderr)
+
+    def test_a_bridge_that_does_not_start_leaves_the_command_without_network_and_says_so(self):
+        cp, _ = self.wrap("import sys; sys.exit(1)\n", 'printf "[%s]" "$http_proxy"', http_proxy="http://127.0.0.1:3128")
+        self.assertEqual(0, cp.returncode, cp.stderr)
+        self.assertEqual("[http://127.0.0.1:3128]", cp.stdout)
+        self.assertIn("did not start, so this command has no network", cp.stderr)
+
+
+class TestTheBridge(unittest.TestCase):
+    """container/proxy/bridge.py itself, against a scratch proxy socket."""
+
+    def setUp(self):
+        d = tempfile.mkdtemp(prefix="wk-br-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, d, True)
+        self.sock = os.path.join(d, "proxy.sock")
+        server = socket.socket(socket.AF_UNIX)
+        server.bind(self.sock)
+        server.listen(4)
+        self.addCleanup(server.close)
+
+        def echo():
+            with contextlib.suppress(OSError):
+                while True:
+                    c, _ = server.accept()
+                    with c:
+                        c.sendall(b"proxy:" + c.recv(64))
+        threading.Thread(target=echo, daemon=True).start()
+
+    def start(self, parent):
+        p = subprocess.Popen([sys.executable, str(BRIDGE_PY), str(parent), "demo"], stdout=subprocess.PIPE, text=True,
+                             env=dict(os.environ, WK_PROXY_SOCKET=self.sock))
+        self.addCleanup(p.wait, 10)
+        self.addCleanup(p.kill)
+        return p
+
+    @unittest.skipUnless(sys.platform == "linux", ON_LINUX)
+    def test_each_binds_a_port_of_its_own_prints_it_and_relays_to_the_proxy_socket(self):
+        ports = [int(self.start(os.getpid()).stdout.readline()) for _ in range(2)]
+        self.assertNotEqual(ports[0], ports[1])
+        for port in ports:
+            with socket.create_connection(("127.0.0.1", port), timeout=10) as c:
+                c.sendall(b"hello")
+                self.assertEqual(b"proxy:hello", c.recv(64))
+
+    def test_a_bridge_whose_parent_is_already_gone_exits(self):
+        p = self.start(1)
+        self.assertEqual("", p.stdout.read())
+        self.assertEqual(0, p.wait(10))
+
+    @unittest.skipUnless(sys.platform == "linux", ON_LINUX)
+    def test_it_serves_a_client_that_is_its_commands_child(self):
+        port = int(self.start(os.getpid()).stdout.readline())
+        client = ("import socket; c = socket.create_connection(('127.0.0.1', %d), timeout=10); c.sendall(b'hello'); "
+                  "print(c.recv(64).decode())" % port)
+        cp = subprocess.run([sys.executable, "-c", client], capture_output=True, text=True, timeout=30)
+        self.assertEqual("proxy:hello", cp.stdout.strip(), cp.stderr)
+
+    @unittest.skipUnless(sys.platform == "linux", ON_LINUX)
+    def test_a_client_with_an_agent_between_is_refused_by_name(self):
+        """The real socket lookup in this process's /proc; the ancestry a fake one, this process under claude under the command."""
+        m = _load(BRIDGE_PY, "wkbridge")
+        fake = Proc(Path(tempfile.mkdtemp(prefix="wk-br-proc-")))
+        self.addCleanup(shutil.rmtree, fake.root, True)
+        fake.chain([(os.getpid(), 600, "python3", ["python3"]), (600, 500, "claude", ["/home/u/.local/bin/claude"])] + PERSONS_COMMAND)
+        m.ancestry = pushgate.Proc(str(fake.root))
+
+        async def ask():
+            server = await asyncio.start_server(functools.partial(m.handle, 500, "demo"), "127.0.0.1", 0)
+            reader, writer = await asyncio.open_connection("127.0.0.1", server.sockets[0].getsockname()[1])
+            said = await reader.read()
+            writer.close()
+            server.close()
+            return said.decode()
+        said = asyncio.run(ask())
+        self.assertTrue(said.startswith("HTTP/1.1 403 Forbidden"), said)
+        self.assertIn("wk bridge: an agent session (claude, pid 600)", said)
+        self.assertIn("wk enter demo", said)
+
+    @unittest.skipUnless(sys.platform == "linux", "a bridge dies with its parent by PR_SET_PDEATHSIG, which only Linux has")
+    def test_it_dies_with_the_command_its_exec_became(self):
+        sh = subprocess.Popen(["bash", "-c", 'exec 3< <(exec %s %s $$ demo); read -r p <&3; echo "$! $p"; exec sleep 60'
+                               % (shlex.quote(sys.executable), shlex.quote(str(BRIDGE_PY)))],
+                              stdout=subprocess.PIPE, text=True, env=dict(os.environ, WK_PROXY_SOCKET=self.sock))
+        self.addCleanup(sh.wait, 10)
+        self.addCleanup(sh.kill)
+        pid, port = sh.stdout.readline().split()
+        socket.create_connection(("127.0.0.1", int(port)), timeout=10).close()
+        sh.kill()
+        sh.wait(10)
+        for _ in range(100):
+            state = Path("/proc/%s/status" % pid)
+            if not state.exists() or "\nState:\tZ" in state.read_text():
+                return
+            time.sleep(0.1)
+        self.fail("bridge %s outlived the command it served" % pid)
+
+
 EGRESS = (
     "# wk: written by lib/wk/guest.py on every start\n"
     "export http_proxy=http://192.168.2.1:3128\n"
@@ -903,12 +1055,13 @@ class TestTheEditorsTerminalGetsTheSameEnvironment(unittest.TestCase):
             with self.subTest(pair=pair):
                 self.assertIn(pair, line.split(" "))
 
-    def test_it_carries_the_proxy_the_container_was_created_with(self):
+    def test_it_carries_the_bridge_of_the_exec_that_runs_sshd(self):
         line, _ = self.setenv_line(True, env_extra={
             "http_proxy": "http://127.0.0.1:3128",
             "NO_PROXY": "localhost,127.0.0.1,::1"})
-        self.assertIn("http_proxy=http://127.0.0.1:3128", line)
-        self.assertIn("NO_PROXY=localhost,127.0.0.1,::1", line)
+        self.assertIn("http_proxy=http://127.0.0.1:%s" % FAKE_PORT, line.split(" "))
+        self.assertNotIn("3128", line)
+        self.assertIn("NO_PROXY=localhost,127.0.0.1,::1", line.split(" "))
 
     def test_a_value_with_whitespace_is_left_out_rather_than_truncating_it(self):
         out, _, _ = run_bridge(True, "WK_SSH_SETENV", "GITHUB_COM_USERNAME",
@@ -1017,78 +1170,68 @@ class TestGuestConvergence(WkTest):
         self.assertEqual(got.get("https_proxy"), "http://192.168.2.1:3128", got)
 
 
-FIRSTRUN = REPO / "container" / "firstrun.sh"
+PERSONS_COMMAND = [(500, 400, "bash", ["/bin/bash", "/opt/wk-tools/" + pushgate.PERSON, "/bin/bash", "--login"]),
+                   (400, 1, "conmon", ["/usr/bin/conmon"])]
+AGENTS_COMMAND = [(500, 400, "bash", ["bash", "-lc", "exec claude"]), (400, 1, "conmon", ["/usr/bin/conmon"])]
 
 
-def _shell_function(path, name):
-    """One function lifted out of a shell file, so a test can call it without running the rest of the file
-    (firstrun.sh installs a whole workspace)."""
-    text = path.read_text()
-    start = text.index(f"{name}() {{")
-    return text[start:text.index("\n}\n", start) + 3]
+class TestTheBridgeFindsItsClient(unittest.TestCase):
+    """bridge.py's lookup and verdict against a fake /proc: the client's end of the connection, the process holding it, its ancestry."""
+    LOCAL, PEER, INODE = 4242, 5555, "31337"
+
+    def setUp(self):
+        self.m = _load(BRIDGE_PY, "wkbridge")
+        self.proc = Proc(Path(tempfile.mkdtemp(prefix="wk-br-proc-")))
+        self.addCleanup(shutil.rmtree, self.proc.root, True)
+        (self.proc.root / "net").mkdir()
+        header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        row = "   0: 0100007F:%04X 0100007F:%04X 01 00000000:00000000 00:00000000 00000000  1000        0 %s 1\n"
+        (self.proc.root / "net" / "tcp").write_text(header + row % (self.LOCAL, self.PEER, "111") + row % (self.PEER, self.LOCAL, self.INODE))
+        (self.proc.root / "net" / "tcp6").write_text(header)
+        self.m.PROC, self.m.ancestry = str(self.proc.root), pushgate.Proc(str(self.proc.root))
+
+    def holds(self, pid, inode):
+        fd = self.proc.root / str(pid) / "fd"
+        fd.mkdir(parents=True, exist_ok=True)
+        (fd / "3").unlink(missing_ok=True)
+        os.symlink("socket:[%s]" % inode, fd / "3")
+
+    def refusal(self, rows):
+        self.proc.chain(rows)
+        self.holds(rows[0][0], self.INODE)
+        return self.m.refusal(self.LOCAL, self.PEER, 500, "demo")
+
+    def test_a_client_under_the_command_is_served(self):
+        self.assertIsNone(self.refusal([(77, 500, "git", ["git", "fetch"])] + PERSONS_COMMAND))
+
+    def test_an_agent_sessions_bridge_serves_a_tool_under_its_agent(self):
+        self.assertIsNone(self.refusal([(77, 600, "gh", ["gh"]), (600, 500, "claude", ["/home/u/.local/bin/claude"])] + AGENTS_COMMAND))
+
+    def test_a_persons_bridge_refuses_a_client_with_an_agent_between(self):
+        why = self.refusal([(77, 600, "gh", ["gh"]), (600, 500, "claude", ["/home/u/.local/bin/claude"])] + PERSONS_COMMAND)
+        self.assertIn("an agent session (claude, pid 600)", why)
+        self.assertIn("wk enter demo", why)
+
+    def test_a_client_not_under_the_command_is_refused(self):
+        for command in (PERSONS_COMMAND, AGENTS_COMMAND):
+            with self.subTest(command=command[0][3]):
+                why = self.refusal([(77, 700, "sh", ["sh"]), (700, 1, "sh", ["sh"])] + command)
+                self.assertIn("pid 77 is not under the command this bridge serves (pid 500)", why)
+
+    def test_a_client_no_readable_process_holds_is_refused_naming_sudos_remedy(self):
+        self.proc.chain([(77, 500, "git", ["git"])])
+        self.holds(77, "999")
+        why = self.m.refusal(self.LOCAL, self.PEER, 500, "demo")
+        self.assertIn("no process this bridge can read holds the connection from port %d" % self.PEER, why)
+        self.assertIn("sudo /opt/wk-tools/container/proxy/ensure-bridge.sh <command>", why)
 
 
-def _sandbox_env():
-    """The variables `Container.sandbox_flags` starts a container with."""
-    flags = wk_places.Container("container", str(REPO), {"XDG_RUNTIME_DIR": "/run/user/1"}, Fake("here")).sandbox_flags("armhf")
-    return dict(v.split("=", 1) for k, v in zip(flags[0::2], flags[1::2]) if k == "--env")
-
-
-class TestAptGoesThroughTheProxy(unittest.TestCase):
-    """Every apt step in container/firstrun.sh runs under sudo, whose env_reset drops http_proxy/https_proxy, and
-    the container is `--network none`: apt then dials the archive directly and has no route at all."""
-
-    def _drop_in(self, **env):
-        cp = subprocess.run(
-            ["bash", "-c", _shell_function(FIRSTRUN, "apt_proxy_conf") + "\napt_proxy_conf\n"],
-            cwd=str(REPO), capture_output=True, text=True, timeout=30,
-            env={"PATH": "/usr/bin:/bin", **env})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout
-
-    def test_the_address_is_the_one_the_container_is_started_with(self):
-        env = _sandbox_env()
-        for var in ("http_proxy", "https_proxy"):
-            self.assertIn(var, env, env)
-        out = self._drop_in(http_proxy=env["http_proxy"], https_proxy=env["https_proxy"])
-        self.assertIn('Acquire::http::Proxy "%s";' % env["http_proxy"], out)
-        self.assertIn('Acquire::https::Proxy "%s";' % env["https_proxy"], out)
-
-    def _write_step(self, **env):
-        """The block that writes the drop-in, lifted and run with `sudo` and the file path made harmless."""
-        text = FIRSTRUN.read_text()
-        start = text.index('if [ -n "${http_proxy:-}"')
-        block = text[start:text.index("\nfi\n", start) + 4]
-        conf = Path(tempfile.mkdtemp(prefix="wk-test-aptconf-")) / "99-wk-proxy"
-        script = (
-            'set -euo pipefail\n'
-            'log()  { printf "LOG %s\\n" "$*"; }\n'
-            'warn() { printf "WARN %s\\n" "$*"; }\n'
-            'sudo() { "$@"; }\n'
-            + "APT_PROXY_CONF=" + str(conf) + "\n"
-            + _shell_function(FIRSTRUN, "apt_proxy_conf") + "\n" + block)
-        cp = subprocess.run(["bash", "-c", script], cwd=str(REPO), capture_output=True,
-                            text=True, timeout=30, env={"PATH": "/usr/bin:/bin", **env})
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        return cp.stdout + cp.stderr, (conf.read_text() if conf.exists() else "")
-
-    def test_an_address_carrying_apt_conf_syntax_is_refused_by_name(self):
-        out, wrote = self._write_step(
-            http_proxy='http://127.0.0.1:9";Acquire::http::Proxy "http://elsewhere:8080',
-            https_proxy="http://127.0.0.1:9")
-        self.assertIn("WARN", out, out)
-        self.assertIn("apt.conf's own syntax", out, out)
-        self.assertEqual(wrote, "", "it wrote the drop-in anyway")
-        out, wrote = self._write_step(http_proxy="http://127.0.0.1:9",
-                                      https_proxy="http://127.0.0.1:9;")
-        self.assertIn("WARN", out, out)
-        self.assertEqual(wrote, "", "a semicolon in the https address was written")
-
-    def test_an_ordinary_address_is_still_written(self):
-        out, wrote = self._write_step(http_proxy="http://127.0.0.1:9",
-                                      https_proxy="http://127.0.0.1:9")
-        self.assertIn("LOG apt goes through the workspace proxy", out, out)
-        self.assertIn('Acquire::http::Proxy "http://127.0.0.1:9";', wrote)
+class TestTheContainerEnvironment(unittest.TestCase):
+    def test_the_container_is_created_naming_no_proxy_address(self):
+        flags = wk_places.Container("container", str(REPO), {"XDG_RUNTIME_DIR": "/run/user/1"}, Fake("here")).sandbox_flags("armhf")
+        env = dict(v.split("=", 1) for k, v in zip(flags[0::2], flags[1::2]) if k == "--env")
+        self.assertEqual([], [v for v in PROXY_VARS if v in env], "only an exec's own bridge names one")
+        self.assertEqual("localhost,127.0.0.1,::1", env["no_proxy"])
 
 
 if __name__ == "__main__":

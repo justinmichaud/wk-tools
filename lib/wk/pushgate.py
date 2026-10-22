@@ -79,26 +79,49 @@ def is_person_entry(words):
     return any(w.endswith("/" + PERSON) for w in words[:2])
 
 
-def person(proc, pid, ws):
-    remedy = "a publish is made from a shell of your own:  wk enter %s" % ws
-    caller, seen = pid, set()
+def remedy(ws):
+    return "a publish is made from a shell of your own:  wk enter %s" % ws
+
+
+def walk_up(proc, pid, ws, until, agents=True):
+    """The chain from `pid` up to the first process `until` takes, left out; None past pid 1 or a gone parent; Denied past an agent."""
+    chain, seen = [], set()
     while pid and pid > 1 and pid not in seen:
+        if until(pid):
+            return chain
         seen.add(pid)
-        words, parent = proc.cmdline(pid), proc.ppid(pid)
+        parent = proc.ppid(pid)
         if parent is None:
-            break
-        agent = agent_word(words, proc.exe(pid))
+            return None
+        agent = agents and agent_word(proc.cmdline(pid), proc.exe(pid))
         if agent:
             raise Denied("an agent session (%s, pid %d) is behind this caller, and nothing an agent runs may publish" % (agent, pid),
-                         "end the session, then " + remedy, "agent")
-        if proc.comm(parent) == "conmon":
-            if is_person_entry(words):
-                return
-            raise Denied("this caller descends from a run of wk's own (pid %d: %s), not from a shell of yours"
-                         % (pid, " ".join(words)[:60] or "?"), remedy + "\n    (a build, a probe and 'wk enter --own' never publish)", "own")
+                         "end the session, then " + remedy(ws), "agent")
+        chain.append(pid)
         pid = parent
-    raise Denied("no shell of yours is behind this caller (pid %s): it runs on its own, left behind by a session or a job that ended"
-                 % (caller or "?"), remedy, "orphan")
+    return None
+
+
+def person(proc, pid, ws):
+    chain = walk_up(proc, pid, ws, lambda p: proc.comm(p) == "conmon")
+    if chain is None:
+        raise Denied("no shell of yours is behind this caller (pid %s): it runs on its own, left behind by a session or a job that ended"
+                     % (pid or "?"), remedy(ws), "orphan")
+    words = proc.cmdline(chain[-1]) if chain else []
+    if not is_person_entry(words):
+        raise Denied("this caller descends from a run of wk's own (pid %s: %s), not from a shell of yours"
+                     % (chain[-1] if chain else pid, " ".join(words)[:60] or "?"),
+                     remedy(ws) + "\n    (a build, a probe and 'wk enter --own' never publish)", "own")
+
+
+def bridged(proc, pid, command, ws):
+    try:
+        person(proc, command, ws)
+        persons = True
+    except Denied:
+        persons = False
+    if walk_up(proc, pid, ws, lambda p: p == command, persons) is None:
+        raise Denied("pid %s is not under the command this bridge serves (pid %d)" % (pid or "?", command), remedy(ws), "orphan")
 
 
 def agent_pids(t, ws):

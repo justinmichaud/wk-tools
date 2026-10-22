@@ -1108,9 +1108,8 @@ exist.
 
    The rest of the tree's in-place shell stays outside step 5, and neither
    part fits the 1k budget alone:
-   - `container/`'s scripts are 947 lines, of which `firstrun.sh` 298 and
-     `sdk-patches/apply.sh` 480 are portable, since a container has
-     python3.
+   - `container/`'s scripts are 470 lines, of which `firstrun.sh` 298 is
+     portable, since a container has python3.
    - `build/build-in-workspace.sh` and `mem-watchdog.sh` are 225.
    - The three privileged helpers are 1,994, with `wk-card-priv` also on
      every rescue.
@@ -1181,8 +1180,9 @@ exist.
    7.7 ∥ **The bench `System`, `Run` and `AB`.** One of each; the Mac as a
      system. (`ab-summary` is gone.)
    7.8 ∥ **Boot.** One `Channel`, `arm_sequence` per driver.
-   7.9 ∥ **Images.** The `fetch` builder, `CFG_NEEDS` plumbing kept, the SDK
-     fork branch replaces `sdk-patches/`; one dry-run printer.
+   7.9 ∥ **Images.** `CFG_NEEDS` plumbing kept; one dry-run printer; one
+     staged lifecycle. (The `fetch` builder is gone, and the SDK's edits are
+     the fork's `wk` branch at `SDK_PIN`.)
    7.10 ∥ **Guests and daemons.** The one supervisor; `guest.py`'s findings
      into `doctor`. (The conveniences in `container/bin/` are gone.)
    7.11 **Tests by cluster.** After each package lands: the push service,
@@ -1210,7 +1210,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | `wk bench run --a-args/--b-args` runs a JetStream3 subtest in the jsc shell with an option toggled, in alternating rounds, and `wk bench report <task>` compares it per subtest | 5 | `live bench.options_ab` |
 | rpi4 boots its bench system reliably: EEPROM sd-first with `BOOT_WATCHDOG_TIMEOUT` and `MAX_RESTARTS`, a medium that holds the bus under write load, the stick reproduced from the repo by `wk sysimage write --disk rpi4:/dev/sda`, and `--back` reaches the rescue | 5 | `live boot[rpi4]` |
 | The Mac's bench volume runs the whole lifecycle: `wk boot mbp` against the real install, a stage from a guest onto it, a measured run, `wk quiesce status` before it, the screen watch during it, and `wk bench compare` against a container run | 5 | `live bench[mbp]` |
-| The second spellings of a round, a device, a slot and a time profile fail lint (`lint.vocabulary` catches "lane" and "benchmark task"; README defines no name for these, so which spellings are second is the user's call) | 5 | `lint.vocabulary` |
+| A second spelling of a bench system (`system image`) or a warmup profile (`warmup capture`) fails lint; `round` and `slot` have no second spelling in the tree, and `device` is the CLI's word (`--devices`) for a bench machine | 5 | `lint.vocabulary` (landed 2026-10-21) |
 | A failed leg on a board leaves evidence readable afterwards: a persistent journal, browser and tunnel logs on every leg, a board-at-failure capture, and warmup evidence on a leg that timed out | 5 | `unit bench.failed_leg_keeps_evidence`, `live bench.evidence[<board>]` |
 | The live tier runs against the container place on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
 | The fleet view is one: the exit code is the worst state found anywhere, a name alive on two machines is a conflict `--on` disambiguates, two workstations reaching one box see one state and a disagreement names both views | 2 | `unit status.fleet_is_one` |

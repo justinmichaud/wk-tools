@@ -406,6 +406,8 @@ class TestTheInstallResolvesItself(MacTest):
 
 
 class Drv:
+    name = "mac-volume"
+
     def __init__(self, w, local):
         self.w, self.local, self.put_rc = w, local, 0
 
@@ -425,9 +427,6 @@ class Drv:
 
     def c(self, key):
         return {"volume": "WK Bench"}.get(key, "")
-
-    def facts(self):
-        return {"arming": "command"}
 
 
 class StageWorld(World):

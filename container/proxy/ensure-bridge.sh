@@ -2,14 +2,13 @@
 
 set -euo pipefail
 
-# The two steps writing into the temp directory warn rather than die: under errexit a full or read-only /tmp would abort every exec in the workspace over a pidfile.
+# The step writing into the temp directory warns rather than dies: under errexit a full or read-only /tmp would abort every exec in the workspace over a CA bundle.
 warn() { printf 'wk: %s\n' "$*" >&2; }
 
 WK_TMP="${TMPDIR:-/tmp}"
-PIDFILE="$WK_TMP/.wk-bridge.pid"
 BRIDGE=/opt/wk-tools/container/proxy/bridge.py
 
-# An ssh session -- an editor's terminal -- is the one way into a workspace that cannot inherit this environment, since sshd builds a session's from scratch; it is handed what is set here, and the proxy the container was created with, as sshd's SetEnv (lib/wk/places.py's Container). SetEnv has no quoting, so a value with whitespace in it would end the option early and take every later assignment with it.
+# An ssh session -- an editor's terminal -- is the one way into a workspace that cannot inherit this environment, since sshd builds a session's from scratch; it is handed what is set here, the bridge of the exec that runs sshd included, as sshd's SetEnv (lib/wk/places.py's Container). SetEnv has no quoting, so a value with whitespace in it would end the option early and take every later assignment with it.
 WK_SSH_SETENV=""
 carry() {   # <name>
     local v="${!1-}"
@@ -26,20 +25,17 @@ wk_export() {   # <name>=<value>
     carry "${1%%=*}"
 }
 
-bridge_alive() {
-    local pid
-    pid=$(cat "$PIDFILE" 2>/dev/null) || return 1
-    [ -n "$pid" ] && grep -qa "bridge.py" "/proc/$pid/cmdline" 2>/dev/null
-}
-
-if ! bridge_alive; then
-    setsid python3 "$BRIDGE" >"$WK_TMP/.wk-bridge.log" 2>&1 &
-    echo $! > "$PIDFILE" || warn "could not write $PIDFILE ($WK_TMP full?);
-    the next command in this workspace will start a second bridge"
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
-        (exec 3<>/dev/tcp/127.0.0.1/${WK_PROXY_PORT:-3128}) 2>/dev/null && break
-        sleep 0.1
-    done
+WK_STORES=(/var/lib/wk/ws/*)
+if [ "${#WK_STORES[@]}" -ne 1 ] || [ ! -d "${WK_STORES[0]}" ]; then
+    warn "no workspace store mounted at /var/lib/wk/ws, which 'wk new' mounts for every container, so this command has no network"
+else
+    exec 3< <(exec python3 "$BRIDGE" "$$" "${WK_STORES[0]##*/}" </dev/null)
+    if read -r -t 10 WK_BRIDGE_PORT <&3 && [[ "$WK_BRIDGE_PORT" =~ ^[0-9]+$ ]]; then
+        for _v in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; do export "$_v=http://127.0.0.1:$WK_BRIDGE_PORT"; done
+    else
+        warn "the egress bridge ($BRIDGE) did not start, so this command has no network"
+    fi
+    exec 3<&-
 fi
 
 # api.github.com's and api.anthropic.com's TLS terminates at the injector, which swaps the placeholder Authorization header for the real token. The bundle is the system store plus that CA and never that CA alone, since these variables replace the trust store outright -- except NODE_EXTRA_CA_CERTS, which the Claude CLI adds to its own; `gh` is Go and reads only SSL_CERT_FILE/SSL_CERT_DIR, webkitcorepy only GITHUB_COM_* and BUGS_WEBKIT_ORG_* -- and, for every other credential, the keyring git-webkit autoinstalls, whose libsecret backend raises KeyringLocked on every lookup here (no session bus) and exits git-webkit; the null backend answers "nothing stored" and it prompts instead.

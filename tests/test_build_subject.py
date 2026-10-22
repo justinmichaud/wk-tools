@@ -6,27 +6,8 @@ import unittest
 from tests.support import REPO, WkTest, bash, builds_on_the_books_env, func_body, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.sysimage import yocto  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 
-SHA = "a" * 40
-WS = "yocto-p"
-
-
-class TestABuildSaysWhatItIsOf(WkTest):
-    """yocto.build_subject; the instrumented slot and the mix stage are tests/test_images.py's."""
-
-    def test_the_two_are_not_the_same_words(self):
-        self.assertNotEqual(yocto.build_subject(WS, "webkit", "base-instr", SHA, "wpe-cross-pgo-collect"),
-                            yocto.build_subject(WS, "webkit", "base", SHA, "wpe-cross-pgo-use"))
-
-    def test_an_image_stage_says_the_stage_and_the_image_workspace(self):
-        self.assertEqual(yocto.build_subject(WS, "image", "", "", ""), "image stage of " + WS)
-
-    def test_the_image_workspace_is_named_every_time(self):
-        for stage in ("webkit", "pgo-mix", "image"):
-            with self.subTest(stage=stage):
-                self.assertIn(WS, yocto.build_subject(WS, stage, "s", SHA, "wpe-cross"))
 
 
 class TestTheRecordCarriesIt(WkTest):
@@ -88,7 +69,7 @@ class TestSelftestRefusesBesideABuild(WkTest):
 
     def test_the_tiers_that_need_no_machine_run_beside_a_build(self):
         env = builds_on_the_books_env(self.tmp, "wk-test-fake-build")
-        cp = run("selftest", "test_the_two_are_not_the_same_words", env=env)
+        cp = run("selftest", "test_the_task_a_log_names_is_the_last_one", env=env)
         self.assertEqual(cp.returncode, 0, cp.stdout)
         self.assertIn("tiers: lint,unit  tests: 1 ", cp.stdout)
 

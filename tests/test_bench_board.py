@@ -102,15 +102,14 @@ class BenchBoard(FakeBoard):
 
     def __init__(self, conf, clock=None):
         super().__init__(conf, clock)
-        self.sides = {"m_ssh": BenchSide(self, "host"), "i_ssh": BenchSide(self, "bench")}
-        self.onboard.update({board.Script(REPO, n).text(): n for n in os.listdir(REPO / "bench" / "onboard")})
+        self.machines = {"host": BenchSide(self, "host"), "bench": BenchSide(self, "bench")}
         self.display, self.weston, self.pinned, self.sysprof = "drm:card1-HDMI-A-1", True, True, False
         self.rescue("rescue-1")
         self.running = self.write_system(part("/dev/sda", 1), "sys-a")
 
     @property
     def bench(self):
-        return self.sides["i_ssh"]
+        return self.machines["bench"]
 
     def run_onboard(self, name, p, input=None):
         facts = "kernel=6.6.31\narch=aarch64\nthrottled=0\ntaskset=yes\nsystemd=yes\nparanoid=2\n"
@@ -124,13 +123,13 @@ class BenchBoard(FakeBoard):
             return Result(0)
         return super().run_onboard(name, p, input)
 
-    def answer(self, side, argv, input=None):
+    def reply(self, side, argv, input=None):
         if side == "bench" and not self.on_rescue() and self.up:
             if argv[:1] == ["od"]:
                 return Result(0, OD_AARCH64)
             if argv[:1] in (["tail"], ["chmod"]) or (argv[:2] == ["sh", "-c"] and argv[2].startswith(("killall", "echo 1 >"))):
                 return Result(0, "a board message\n" if argv[:1] == ["tail"] else "")
-        return super().answer(side, argv, input)
+        return super().reply(side, argv, input)
 
 
 def local_holders():
@@ -479,7 +478,7 @@ class TestARun(BoardTest):
         self.assertEqual(t.steps(), [(1, "done"), (2, "done"), (3, "running")])
         self.assertEqual((t.field("kill"), t.raw("holds")), ("wk bench run ws --kill --system testboard", "device:testboard"))
         self.assertEqual(Path(t.field("log")), w.run_dir() / "run.log")
-        self.assertEqual([e for e in w.board.sides["m_ssh"].effects if e[0] != "run"], [], "every effect on the board goes through its bench system")
+        self.assertEqual([e for e in w.board.machines["host"].effects if e[0] != "run"], [], "every effect on the board goes through its bench system")
 
     def test_the_run_is_recorded_as_the_slot_it_measured(self):
         w = self.world()
