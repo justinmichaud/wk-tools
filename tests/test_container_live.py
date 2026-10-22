@@ -273,6 +273,26 @@ class TestBuiltWorkspace(unittest.TestCase):
             time.sleep(5)
         return self.babysit_exit()
 
+    def test_5_rr_records_and_replays_or_refuses_the_cpu_by_name(self):
+        """`live run.rr_record_replay`: on a Linux host `wk run --rr` records jsc and `--replay` reaches lldb; on this
+        Mac's podman machine rr is refused by name (Apple Silicon), naming --lldb and a Linux build machine, and the
+        record half stays owed to a Linux host."""
+        self.built()
+        js = "/tmp/wk-live.js"
+        inside(self.ws, "printf '%%s' %s > %s" % (shlex.quote(JS), js))
+        rc, out = on_a_pty("run", self.ws, "--rr", "--", js, timeout=600)
+        if sys.platform == "darwin":
+            self.assertNotEqual(rc, 0, tail(out))
+            self.assertIn("rr does not support Apple Silicon CPUs", out)
+            self.assertIn("--lldb", out)
+            self.assertIn("Linux build machine", out)
+            self.skipTest("the record and the replay run on a Linux host")
+        self.assertEqual(rc, 0, tail(out))
+        self.assertIn("WK-PROFILE ", out)
+        rc, out = on_a_pty("run", self.ws, "--replay", timeout=600)
+        self.assertEqual(rc, 0, tail(out))
+        self.assertIn("(lldb)", out)
+
     def test_4_babysit_is_one_task_refused_beside_itself_cancelled_by_kill_and_ends_by_name(self):
         """`live build.babysit_e2e`: with the checkout broken, `wk build --babysit` is a task of its own: a second one is
         refused naming the pid and the kill, `--kill` leaves its record cancelled, and one run to its end reads ok (the
