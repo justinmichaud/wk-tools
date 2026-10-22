@@ -293,6 +293,19 @@ class TestBuiltWorkspace(unittest.TestCase):
         self.assertEqual(rc, 0, tail(out))
         self.assertIn("(lldb)", out)
 
+    def test_6_wk_test_runs_the_jsc_suite_by_name(self):
+        """`live test.suite[container]`: `wk test <ws> <path>` runs the JSC suite for that test (its stress variants) on
+        the container place and ends TESTS OK with its record; the `--layout` half needs a port build and stays owed to a
+        run with one."""
+        self.built()
+        rc, out = on_a_pty("test", self.ws, "JSTests/stress/16bit-code.js", timeout=1500)
+        self.assertEqual(rc, 0, tail(out))
+        self.assertIn("TESTS OK", out)
+        log = inside(self.ws, "cat /var/lib/wk/ws/%s/test.log 2>/dev/null || true" % self.ws)
+        shown = container_side("cat %s/ws/%s/test.log" % (container_store(), self.ws)) if not log.strip() else log
+        self.assertIn("Running stress/16bit-code.js.default", shown, tail(shown))
+        self.assertNotIn("Stray anonymous argument", shown, tail(shown))
+
     def test_4_babysit_is_one_task_refused_beside_itself_cancelled_by_kill_and_ends_by_name(self):
         """`live build.babysit_e2e`: with the checkout broken, `wk build --babysit` is a task of its own: a second one is
         refused naming the pid and the kill, `--kill` leaves its record cancelled, and one run to its end reads ok (the
