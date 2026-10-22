@@ -6,17 +6,17 @@ last step lands.
 
 ## Where we are
 
-Measured 2026-10-22 06:00 MST on the host, after the night's cut (`./wk selftest`).
+Measured 2026-10-22 12:00 MST on the host, after the day's cuts (`./wk selftest`).
 
 | | |
 | --- | --- |
-| code | 29.8k non-blank lines of Python outside `tests/` (26.7k in the budget rows: `lib/wk`, `lib/*.py`, `cmd/`, `wk`), 7.0k of shell (what runs on a board, a bench install or in a place, the helpers and the setup stages); 25 commands, each a table and one function |
-| tests | 42.4k lines, 137 modules, 3,163 unit and 94 lint tests, 166 in the live tier |
-| `wk selftest` (lint then unit) | 3,257 tests, 4.2 minutes, green; the lint tier alone 9 s |
-| the slowest unit test | 10.7 s (`test_crash_only`'s stage converge), under the 30 s budget the runner enforces |
-| owed tests | 27 in each tier: the budget rows (`lint.budgets`), the dry runs the kill-point table found not on the recorder, `lint.no_addresses`, `lint.one_wifi_reader` |
-| the Owed table | `tests/test_owed_live.py` is generated from it at import: one stub per `live`/`unit` name no test holds (89) |
-| the last live run from the host | 2026-10-22, lane 8 (see the night's memory): the push rule by the caller's ancestry is served to a person (GitHub's 422) and refused to wk's own run and an agent (412) |
+| code | 26.5k non-blank lines of Python outside `tests/` (26.1k in the budget rows: `lib/wk`, `lib/*.py`, `cmd/` without its help, `wk`), 6.9k of shell (what runs on a board, a bench install or in a place, the helpers and the setup stages); 25 commands, each a table and one function, the six largest bodies in `lib/` |
+| tests | 42.2k lines, 137 modules, 3,253 unit and lint tests (121 lint), 171 in the live tier |
+| `wk selftest` (lint then unit) | 3,253 tests, 4.5 minutes, green; the lint tier alone 9 s |
+| the slowest unit test | 10.8 s (`test_crash_only`'s stage converge), under the 30 s budget the runner enforces |
+| owed tests | 28 lint (the budget rows, `lint.no_addresses`, `lint.one_wifi_reader`, `lint.test_shape`), 55 in the unit tier counting the owed-live stubs |
+| the Owed table | `tests/test_owed_live.py` is generated from it at import: one stub per `live`/`unit` name no test holds (78) |
+| the last live run from the host | 2026-10-22, lane 15 on a1dee01: 171 tests, 2 failures, both answered since (a stale integ-container from lane 14; the guest base rebuilt from the tree at 11:40 MST) |
 
 Why bugs come back:
 
