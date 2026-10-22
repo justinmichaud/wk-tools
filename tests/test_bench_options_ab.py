@@ -1,4 +1,4 @@
-"""`wk bench run <ws> <plan> --a-args X --b-args Y`: one build measured under two argument sets (lib/wk/bench/board_ab.py's ArgsAB)."""
+"""`wk bench run <ws> <plan> --a-args X --b-args Y`: one build measured under two argument sets (lib/wk/bench/ab.py, its arms argument sets)."""
 import io
 import json
 import os
@@ -62,8 +62,8 @@ class TestOptionsAB(BenchTest):
         os.environ["WK_DRY_RUN"] = "1"
         rc, err = self.run_(None, "run", "jetstream3", "--preset", "jsc-release", "--a-args", "", "--b-args", "--useFoo=1")
         self.assertEqual(rc, 0, err)
-        self.assertIn("round 1/3 -- options (none) (first)", err)
-        self.assertIn("round 1/3 -- options --useFoo=1", err)
+        self.assertIn("round 1/5 -- options (none) (first)", err)
+        self.assertIn("round 1/5 -- options --useFoo=1", err)
         self.assertEqual(self.w.tasks(), [])
 
     def test_refusals(self):

@@ -18,7 +18,7 @@ NOT_STATE = {
     "lib/wk/job.py": "the job's own log, opened only past its dry-run check",
     "lib/wk/places.py": "the ProxyCommand exec that is the route",
     "lib/wk/tools.py": "removes its own temporary bundle",
-    "lib/wk/boot/mac.py": "removes its own temporary tar",
+    "lib/wk/bench/mac.py": "removes its own temporary tar",
     "lib/wk/slot.py": "`python3 -m wk.slot`: a step's tool writing the output its caller named",
     "lib/wk/mac.py": "`python3 -`: the program a Machine runs on the Mac (autorun's `sudo wkmac display-mode --declare`); the effect is that act_run",
     "lib/wk/pgo.py": "`python3 -m wk.pgo`: a step's tool writing the output its caller named",

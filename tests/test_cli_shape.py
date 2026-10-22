@@ -54,7 +54,9 @@ def literal_opts(text):
 def package_opts(path):
     pkg = REPO / "lib" / "wk" / path.name
     texts = (f.read_text() for f in pkg.glob("*.py")) if pkg.is_dir() else ()
-    return {o for t in texts for o in re.findall(r'"(--[a-z][a-z-]*)"', t)}
+    texts = [t for t in texts]
+    keys = {"--" + k.replace("_", "-") for t in texts for k in re.findall(r'\bo(?:\.get\(|\[)"([a-z][a-z_]*)"', t)}   # cli.options' dict
+    return {o for t in texts for o in re.findall(r'"(--[a-z][a-z-]*)"', t)} | keys
 
 
 def imported_reads(path):

@@ -37,7 +37,6 @@ def preflight_notes(rows, notes):
 
 
 def load(path):
-    """{} where the file is absent -- an older run, or one still writing it; anything else (corrupt JSON, a permission error) raises, so it is not misreported as merely missing."""
     try:
         with open(path) as f:
             return json.load(f)
@@ -62,22 +61,12 @@ def set_nested(doc, dotted_key, value):
     node[parts[-1]] = value
 
 
-def _pairs(fields, who):
-    for field in fields:
-        key, sep, value = field.partition("=")
-        if not sep:
-            sys.exit("%s: not a key=value: %s" % (who, field))
-        yield key, value
-
-
-def write_env(path, fields, bool_fields=(), update=False, machine=None):
-    """The one writer of a run's env.json, on `machine`; `update` merges onto the write before the run (wall_time_s comes after)."""
+def write_env(path, fields, update=False, machine=None):
+    """The one writer of a run's env.json, on `machine`: dotted keys nest; `update` merges onto the write before the run."""
     m = machine or Local()
     doc = (json.loads(m.read(path)) if m.exists(path) else {}) if update else {}
-    for key, value in _pairs(fields, "env-record"):
+    for key, value in fields.items():
         set_nested(doc, key, value)
-    for key, value in _pairs(bool_fields, "env-record"):
-        set_nested(doc, key, bool(value))
     cfg = doc.setdefault("configuration", {})
     for key, value in DEFAULT_CONFIGURATION.items():
         cfg.setdefault(key, value)
@@ -90,7 +79,7 @@ def _list_field(value):
 
 def task_write(taskdir, fields, commands, machine=None):
     doc = {"commands": list(commands)}
-    for key, value in _pairs(fields, "task-write"):
+    for key, value in fields.items():
         if key == "devices":
             doc["devices"] = [{"device": dev, "profile": profile}
                               for dev, _, profile in (item.partition("=") for item in _list_field(value))]
@@ -100,11 +89,9 @@ def task_write(taskdir, fields, commands, machine=None):
             doc[key] = int(value)
         else:
             set_nested(doc, key, value)
-    for key in ("task", "requested", "devices", "plans", "slots", "rounds"):
-        if key not in doc:
-            sys.exit("task-write: %s is required" % key)
-    if not doc["devices"] or not doc["plans"] or not doc["slots"]:
-        sys.exit("task-write: devices, plans and slots each need at least one entry")
+    missing = [k for k in ("task", "requested", "devices", "plans", "slots", "rounds") if not doc.get(k)]
+    if missing:
+        die("task-write: %s is required, with at least one entry" % missing[0])
     m = machine or Local()
     m.mkdir_now(os.path.join(taskdir, "runs"))
     m.write_own(os.path.join(taskdir, "task.json"), json.dumps(doc, indent=2, sort_keys=True) + "\n")
@@ -116,7 +103,7 @@ def new_task(m, bench, task, lock, requested, fields, command, held=False):
         die("task %s already exists (%s); a task is one request, made once" % (task, taskdir))
     if not held:
         lock.hold("bench-task-" + task, timeout=5)
-    task_write(taskdir, ["task=" + task, "requested=" + requested, "restart=%s --task %s" % (command, task)] + fields, [command], machine=m)
+    task_write(taskdir, dict({"task": task, "requested": requested, "restart": "%s --task %s" % (command, task)}, **fields), [command], machine=m)
     return taskdir
 
 
@@ -135,9 +122,10 @@ def not_a_measurement(env):
 
 
 def run_state(env, has_result):
-    """ok has a non-empty result.json; failed has none but the wall_time_s written when the runner returned; running has neither."""
+    """ok has a non-empty result.json and nothing that spoiled it (`unclean`); failed has none but the wall_time_s written
+    when the runner returned; running has neither."""
     if has_result:
-        return "rehearsal" if not_a_measurement(env) else "ok"
+        return "rehearsal" if not_a_measurement(env) else "failed" if env.get("unclean") else "ok"
     return "failed" if "wall_time_s" in env else "running"
 
 
@@ -385,12 +373,6 @@ def running_tasks(found, lock_path, alive):
     return {t for t in found if alive(lock_path("bench-task-" + t))}
 
 
-def map_row(line):
-    """One line of the autorun's runs.tsv: (round, label, staged, run, clean, plan)."""
-    r = (line.rstrip("\n").split("\t") + [""] * 6)[:6]
-    return tuple(r[:5]) + (r[5] or "unnamed",)
-
-
 def ls_rows(found, running=(), where=""):
     out = []
     for name, taskdir in found.items():
@@ -406,7 +388,6 @@ def ls_rows(found, running=(), where=""):
 
 
 class Listing:
-    """This machine's store, then every place whose machine answers for a store of its own, through its own wk."""
 
     def __init__(self, reg, store, alive, label, warn):
         self.reg, self.store, self.label, self.warn, self.alive = reg, store, label, warn, alive

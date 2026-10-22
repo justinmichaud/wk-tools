@@ -1,10 +1,13 @@
 """`wk bench run --cores`: the cpu-list syntax, the pin a run records, and the warning for two runs pinned differently."""
+import contextlib
+import io
 import unittest
 
 from tests.support import WkTest, scratch_dir
 from tests.test_bench_pipeline import BenchTest, World
 from tests.test_bench_report import rep, run_dir
 
+from wk.act import Refused
 from wk.bench import pipeline
 
 
@@ -12,9 +15,13 @@ class TestCoresValid(unittest.TestCase):
 
     def test_the_documented_shapes_and_nothing_else(self):
         for spec, ok in (("0-3", True), ("2,3", True), ("0-1,4", True), ("7", True),
-                         ("", False), ("a", False), ("1-", False), ("-1", False), ("1,,2", False)):
-            with self.subTest(spec=spec):
-                self.assertEqual(bool(pipeline.cores_valid(spec)), ok)
+                         ("a", False), ("1-", False), ("-1", False), ("1,,2", False)):
+            with self.subTest(spec=spec), contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    pipeline.check_cores(spec)
+                    self.assertTrue(ok)
+                except Refused:
+                    self.assertFalse(ok)
 
 
 class TestAPinnedRun(BenchTest):

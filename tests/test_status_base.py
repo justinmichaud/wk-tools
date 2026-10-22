@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, bash
+from tests.support import REPO
 from tests.test_status import machine_rec, render
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -33,12 +33,8 @@ def _init_repo(repo):
 
 
 def upstream_line(repo):
-    """The probe `wk ls` runs inside a workspace, and the fragment `wk status` runs with $PWD inside `repo`: one answer."""
-    cp = bash(places.upstream_line_body() + 'printf %s "${_b:-?}"', cwd=str(repo))
-    assert cp.returncode == 0, cp.stderr
-    probed = git.probe(Local().run, str(repo))["wsbase"]
-    assert probed == cp.stdout.strip(), (probed, cp.stdout)
-    return probed
+    """The probe `wk ls` and `wk status` run inside a workspace, run in `repo`."""
+    return git.probe(Local().run, str(repo))["wsbase"]
 
 
 class TestUpstreamLine(unittest.TestCase):

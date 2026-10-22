@@ -8,7 +8,8 @@ import zipfile
 
 from wk import act, fleet, record as wkrecord
 from wk.act import die, info
-from wk.bench import ab, board, board_ab, mac_ab, pipeline, plans, record, report, seed, systems
+from wk.bench import ab, board, change, mac_ab, plans, record, report, seed, systems
+from wk.bench.pipeline import Run, check_cores
 from wk.lock import Lock, holder_pid
 from wk.machine import Local, Planted, matches
 from wk.store import ws_name
@@ -17,22 +18,15 @@ REPORT_USAGE = ("usage: wk bench report <task> [--html] [--text]\n"
                 "       wk bench report <run-a> <run-b> [--html out.html] [--text]; see wk bench -h")
 
 
-def options(args, names, **given):
-    """Each named option under its name without dashes: a value as given, True for a flag given, None for either absent."""
+def options(decl, argv, args, **given):
+    """Each option the verb declares under its name without dashes: a value as given, True for a flag given, None for either absent."""
+    names = {n.rstrip("=") for n in decl.opts_for(argv).split(",") if n}
     return dict({n[2:].replace("-", "_"): args.flag(n) or args.value(n) for n in names}, **given)
 
 
-RUN = ("--count", "--browser", "--subtests", "--cores", "--browser-args", "--software", "--system", "--slot", "--ab", "--ab-systems",
-       "--rounds", "--task", "--timeout", "--exclude-subtests", "--collect", "--max-rounds", "--detect", "--a-args", "--b-args",
-       "--no-warmup-profile", "--jit-tiers")
-STAGED = ("--id", "--plan", "--count", "--subtests", "--payload", "--profile", "--timeout", "--browser-args", "--expect-display", "--ls", "--gates")
-AB = ("--devices", "--release", "--builder", "--bits", "--base", "--build-on", "--rounds", "--count", "--timeout", "--task", "--systems",
-      "--slot", "--detach", "--patch", "--workspace", "--max-rounds", "--detect", "--settle", "--a-args", "--b-args", "--plant", "--rehearse",
-      "--allow-network-fetch", "--preflight", "--progress", "--status", "--collect")
-
-
-def where(reg, args):
-    """seed runs where its workspace's store is; ls walks from where it was typed, and answers another machine's walk (--continued) from this machine's store."""
+def where(root, reg, args):
+    """seed runs where its workspace's store is; ls walks from where it was typed, and answers another machine's walk
+    (--continued) from this machine's store; a run on a Mac's bench volume runs on that install, which holds no workspace."""
     verb = args[0] if args else ""
     if verb == "seed":
         try:
@@ -42,6 +36,14 @@ def where(reg, args):
         return "workspace" if t == "container" else "host"
     if verb == "ls":
         return "store" if "--continued" in args[1:] else "local"
+    if verb == "run":
+        name = next((a.split("=", 1)[1] if "=" in a else args[i + 2] for i, a in enumerate(args[1:])
+                     if a.split("=", 1)[0] == "--system" and ("=" in a or i + 2 < len(args))), "")
+        try:
+            kind = (fleet.Fleet(root, reg.env).load(name) or {}).get("kind") if name else ""
+        except fleet.ConfError:
+            kind = ""
+        return "host" if kind in ("mac", "guest") else "workspace"
     return "host"
 
 
@@ -249,31 +251,19 @@ class Bench:
         print(seed.pin(self.machine, Lock(self.reg.store, self.machine, self.clock), self.reg.store, seed.ws_reader(driver, ws), plan)[1])
         return 0
 
-    def deploy(self, ws, board_name, slot_name, machine=None, driver=None):
-        if not ws or not board_name:
-            act.die("usage: wk bench deploy <workspace> <board> [--slot <name>]; see wk bench -h")
+    def deploy(self, ws, name, o):
+        if not ws or not name:
+            act.die("usage: wk bench deploy <workspace> <board|mac> [--slot <name>] [--preset P] [--plan P]...; see wk bench -h")
         if self.reg.in_workspace():
-            return board.request(self.root, self.reg, "stage", ["machine=" + board_name, "workspace=" + ws, "slot=" + slot_name],
-                                 "wk bench deploy %s %s --slot %s" % (ws, board_name, slot_name))
-        board.require_board(self.root, self.reg.env, board_name)
-        held, rc = board.claim(self.root, self.reg.env, board_name, "deploy %s:%s to %s" % (ws, slot_name, board_name)), 1
-        try:
-            board.for_board(self.root, self.reg, ws, self.clock, board_name, machine=machine, driver=driver).deploy_slot(slot_name)
-            rc = 0
-        except act.Refused as e:
-            rc = e.status
-            raise
-        finally:
-            if held is not None:
-                held.end(rc)
-        return 0
+            return board.request(self.root, self.reg, "stage", ["machine=" + name, "workspace=" + ws, "slot=" + (o.get("slot") or "a")],
+                                 "wk bench deploy %s %s --slot %s" % (ws, name, o.get("slot") or "a"))
+        return systems.for_system(self.root, self.reg, ws, self.clock, name).deploy(o, plans)
 
     def ab(self, spec, o, kill):
-        if not kill and o.get("devices") and ab.machine_kind(self.root, self.reg.env, o["devices"]) in ("mac", "guest"):
-            m = mac_ab.MacAB(self.root, self.reg, self.clock, spec, o, self)
+        if not kill and o.get("devices") and change.machine_kind(self.root, self.reg.env, o["devices"]) in ("mac", "guest"):
+            m = mac_ab.Plant(self.root, self.reg, self.clock, spec, o, self)
             return m.back() if any(o.get(k) for k in mac_ab.READS) else m.go()
-        return ab.run(self.root, self.reg, self.clock, spec, o, kill)
-
+        return change.run(self.root, self.reg, self.clock, spec, o, kill)
 
 
 def unpack(files, into):
@@ -306,8 +296,7 @@ def archive(taskdir, running, shown=None):
     return buf.getvalue()
 
 
-BOARD_AB_ONLY = ("exclude_subtests", "no_warmup_profile", "jit_tiers")
-AB_ONLY = ("rounds",) + BOARD_AB_ONLY
+AB_ONLY = ("rounds", "max_rounds", "detect", "exclude_subtests", "no_warmup_profile", "jit_tiers")
 
 
 def nothing_left(reg, ws, plan, task):
@@ -330,36 +319,30 @@ def ab_report(taskdir):
 
 
 def run(root, reg, words, o, kill, clock):
-    """`wk bench run <ws> <plan>`: the dispatcher resolved the workspace (WK_NAME) and dropped it from `words`."""
-    ws, plan = ws_name(reg.env), (words[0] if words else "")
+    """`wk bench run <ws> <plan>`: the dispatcher resolved the workspace (WK_NAME) and dropped it from `words`, except on a
+    Mac's bench volume, which holds no workspace and where <ws> is the one its staged build came from."""
+    ws = ws_name(reg.env)
+    if not ws and words:
+        ws, words = words[0], words[1:]
+    plan = words[0] if words else ""
     if not ws or not (plan or kill):
         die("usage: wk bench run <workspace> <plan> [options]; see wk bench -h")
-    ab = not kill and (o.get("ab") or o.get("ab_systems"))
-    options = not kill and (o.get("a_args") is not None or o.get("b_args") is not None)
-    if options and (ab or o.get("system")):
-        die("--a-args and --b-args are an A/B of one build in this workspace; on a board the arms are\n"
-            "    slots (--ab) or systems (--ab-systems)")
-    alone = [k for k in (BOARD_AB_ONLY if options else () if ab else AB_ONLY) if o.get(k)]
+    check_cores(o.get("cores") or "")
+    arms = not kill and any(o.get(k) not in (None, False) for k in ("ab", "ab_systems", "a_args", "b_args"))
+    alone = [k for k in AB_ONLY if o.get(k)] if not arms else []
     if alone:
-        die("--%s belongs to an A/B on a board (--ab or --ab-systems)" % alone[0].replace("_", "-"))
-    if options:
-        return board_ab.ArgsAB(root, reg, ws, plan, o, clock, ab_report).go()
-    if o.get("system") and reg.in_workspace() and (ab or o.get("collect")):
-        die("an A/B or a collection on a board is not a request a workspace can make; run it on the workstation:\n"
-            "    wk bench run %s %s --system %s ..." % (ws, plan, o["system"]))
-    if ab:
-        return board_ab.run(root, reg, ws, plan, o, clock, ab_report)
+        die("--%s belongs to an A/B (--ab, --ab-systems, or --a-args with --b-args)" % alone[0].replace("_", "-"))
     if o.get("system") and reg.in_workspace():
+        if arms or o.get("collect"):
+            die("an A/B or a collection on a board is not a request a workspace can make; run it on the workstation:\n"
+                "    wk bench run %s %s --system %s ..." % (ws, plan, o["system"]))
         return board.request(root, reg, "run", ["machine=" + o["system"], "workspace=" + ws, "plan=" + plan, "slot=" + (o.get("slot") or ""),
                                                 "count=" + (o.get("count") or "")], "wk bench run %s %s --system %s" % (ws, plan, o["system"]))
-    if o.get("task") and not kill and nothing_left(reg, ws, plan, o["task"]):
+    if o.get("task") and not kill and not arms and nothing_left(reg, ws, plan, o["task"]):
         return 0
-    system = systems.for_workspace(root, reg, ws, clock, o.get("system") or "")
-    if o.get("collect") and system.kind != "board":
-        die("--collect takes a PGO profile from a board's instrumented slot: --system <board> --slot <name>-instr")
-    r = pipeline.run_class(system)(root, reg, system, clock, plans, reg.env)
+    system = systems.for_system(root, reg, ws, clock, o.get("system") or "")
     if kill:
-        return r.stop()
-    if o.get("task") and not act.dry_run():
-        r.lock.hold("bench-task-" + o["task"], timeout=5)
-    return r.go(plan, o)
+        return system.stop(reg.env)
+    if arms:
+        return ab.run(root, reg, clock, ws, plan, o, system, ab_report)
+    return Run(system, plans, reg.env).go(plan, o)

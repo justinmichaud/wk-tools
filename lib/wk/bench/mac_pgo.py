@@ -7,7 +7,7 @@ from wk import act, images, pgo, screen
 from wk.act import Refused, die, log
 from wk.bench import seed
 from wk.bench.mac import CHECK, console_row, screen_row
-from wk.bench.mac_ab import PGO_INSTR, PGO_STATE, q
+from wk.bench.mac_ab import PGO_STATE, q
 from wk.clock import Clock
 from wk.lock import Lock
 from wk.machine import Local, isolated_module, lib_argv
@@ -24,13 +24,13 @@ class PgoCollect:
 
     def faults(self):
         """Every reason, not the first: a throttled collection looks exactly like a good one."""
-        ok, said = console_row(self.m)
+        ok, _, said = console_row(self.m)
         out = [] if ok is True else [said]
         if not self.m.run(lib_argv(self.root, "bench/mac-pyobjc.sh", "wk_pyobjc_have")).ok:
             return out + ["no pyobjc: run-benchmark cannot size the screen and no raiser can hold the browser in front"]
         if not self.m.run(["/usr/bin/python3", "-c", "import AppKit, sys; sys.exit(0 if AppKit.NSScreen.mainScreen() else 1)"]).ok:
             out.append("there is no main screen, so nothing can be drawn at all")
-        ok, said = screen_row(self.m, self.root)
+        ok, _, said = screen_row(self.m, self.root)
         return out + ([said] if ok is False else [])
 
     def read(self, rel):
@@ -114,17 +114,13 @@ def main(argv, env=None, here=None):
     here = here or Local()
     verb, args = (argv or [""])[0], argv[1:]
     try:
-        if verb == "pgo-instr" and len(args) == 1:
-            print(args[0] + PGO_INSTR)
-            return 0
         if verb == "pgo-collect" and len(args) == 4:
             return PgoCollect(root, here, env, args[0]).run(*args[1:])
         if verb == "pgo-evidence" and len(args) == 3:
             return PgoCollect(root, here, env, args[0]).evidence(*args[1:])
     except Refused as e:
         return e.status
-    sys.stderr.write("usage: python3 -m wk.bench.mac_pgo pgo-instr <final> | pgo-collect <src> <instr> <profile> <arch>\n"
-                     "       | pgo-evidence <src> <final> <profile>\n")
+    sys.stderr.write("usage: python3 -m wk.bench.mac_pgo pgo-collect <src> <instr> <profile> <arch> | pgo-evidence <src> <final> <profile>\n")
     return 2
 
 

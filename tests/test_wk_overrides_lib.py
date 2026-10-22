@@ -179,13 +179,6 @@ class TestEachOverrideReachesWhatItNames(WkTest):
         t = places.Registry(REPO, env={"HOME": "/h", "WK_SDK": "/my/sdk"}, machine=Fake()).load("container")
         self.assertEqual(t.sdk(), "/my/sdk")
 
-    def test_wk_bench_machine_names_the_volume_in_host_mode(self):
-        from wk.bench.mac import Install
-        seen = []
-        env = {"HOME": "/h", "WK_MACHINES_DIR": str(REAL_MACHINES), "WK_BENCH_MACHINE": "mbp", "WK_ROOT": str(REPO)}
-        install = Install(REPO, Fake(), env, lambda root, conf: seen.append(conf["name"]) or types.SimpleNamespace(bench_root=lambda: "/v"))
-        self.assertEqual((install.staging_root(), seen), ("/v", ["mbp"]))
-
     def test_wk_bench_user_is_the_second_account_asked(self):
         asked = []
         survey = reach.Survey(reach.Reach(Fake(), {"WK_BENCH_USER": "benchy"}, peers=[]))

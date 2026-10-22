@@ -9,7 +9,7 @@ from html import escape
 from wk import pgo, presets
 from wk.bench import record
 from wk.bench.scores import (bh_significant, evidence_paths, mean, precision_lines, run_result, sd, subtest_metrics,
-                              warmup_check, welch_p)
+                              warmup_check, warmup_problems, welch_p)
 from wk.machine import Local
 
 
@@ -348,7 +348,8 @@ def warmup_lines(evidence):
                                                  " (%s)" % ", ".join("%s %d ms" % kv for kv in by_process) if by_process else ""),
                   "   JIT %s, %s executable in %d mapping(s)%s" % (jit.get("verdict", "?"), _bytes_label(jit.get("exec_bytes", 0)), jit.get("exec_mappings", 0),
                                                                    "; compiles " + ", ".join("%s=%d" % kv for kv in sorted(jit["tiers"].items())) if jit.get("tiers") else "")]
-        lines += ["   %s" % n for n in rec.get("notes", []) + rec.get("problems", [])]
+        problems, notes = warmup_problems(rec)
+        lines += ["   %s" % n for n in notes + problems]
         if rec.get("profile"):
             lines.append("   profile: %s (%s)" % (rec["profile"].get("file", "?"), rec["profile"].get("tool", "?")))
     return lines

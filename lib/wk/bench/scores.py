@@ -231,17 +231,49 @@ def evidence_paths(taskdir, device):
     return [os.path.join(taskdir, "warmup", "%s-%s.evidence.json" % (device, arm)) for arm in "ab"]
 
 
+def warmup_problems(rec):
+    """(problems, notes) of one arm's warmup evidence, as the board's driver read it off the live web process."""
+    problems, notes, gl, gpu = [], [], rec.get("gl", {}), rec.get("gpu") or {}
+    if not gl.get("mapped"):
+        problems.append("the web process mapped no DRI driver at all -- the GL path it used cannot be identified")
+    elif gl.get("software"):
+        problems.append("the web process rendered through %s, a software rasterizer" % gl.get("driver"))
+    if not rec.get("jit", {}).get("exec_mappings"):
+        problems.append("the web process took no executable memory -- nothing was JITted")
+    if not rec.get("elf", {}).get("bits"):
+        problems.append("the width of the measured process could not be read")
+    if rec.get("class", "gpu") == "gpu":
+        if gpu.get("measured") and not gpu.get("busy_ms"):
+            problems.append("the GPU was billed no engine time for the whole run (driver %s) -- the frames came off the CPU"
+                            % (gpu.get("driver") or "unknown"))
+        elif not gpu.get("measured") and gl.get("render_nodes") and gl.get("mapped") and not gl.get("software"):
+            notes.append("engine time is unreadable on this driver (no fdinfo drm-engine-* counters); the hardware path is still "
+                         "evidenced by %s on %s" % (os.path.basename(gl["mapped"][0]), ", ".join(gl["render_nodes"])))
+        elif not gpu.get("measured"):
+            problems.append("no DRM engine counters and no render node held by the web process -- nothing evidences a GPU path at all")
+    tiers, want = (rec.get("jit") or {}).get("tiers"), "FTL" if rec.get("elf", {}).get("bits") == 64 else "DFG"
+    if tiers is None:   # --jit-tiers asks for it: its JSC options crash the web process on some builds
+        notes.append("the JIT tier was not probed (--jit-tiers); an executable mapping is still evidence the build JITted, "
+                     "but not of which tier it reached")
+    elif not tiers:
+        problems.append("no JSC compile-time report reached the browser log, so no tier can be confirmed")
+    elif not tiers.get(want):
+        problems.append("a %d-bit build reached no %s compilation (%s) -- the score is not this engine at its top tier"
+                        % (rec["elf"]["bits"], want, ", ".join("%s=%d" % kv for kv in sorted(tiers.items()))))
+    return problems, notes
+
+
 def warmup_check(a_path, b_path, same_width):
     a, b = record.load(a_path), record.load(b_path)
     problems = []
     for arm, rec, path in (("A", a, a_path), ("B", b, b_path)):
-        missing = [k for k in ("elf", "gl", "jit", "problems") if k not in rec]
+        missing = [k for k in ("elf", "gl", "jit") if k not in rec]
         if not rec:
             problems.append("arm %s produced no warmup evidence (%s)" % (arm, path))
         elif missing:
             problems.append("arm %s's evidence file is not warmup evidence -- it parses as JSON but has no %s (%s)" % (arm, "/".join(missing), path))
         else:
-            problems += ["arm %s: %s" % (arm, p) for p in rec["problems"]]
+            problems += ["arm %s: %s" % (arm, p) for p in warmup_problems(rec)[0]]
     if a and b:
         ga, gb, ea, eb = a.get("gl", {}), b.get("gl", {}), a.get("elf", {}), b.get("elf", {})
         if ga.get("driver") and gb.get("driver") and ga["driver"] != gb["driver"]:

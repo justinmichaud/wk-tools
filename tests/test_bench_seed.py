@@ -133,7 +133,7 @@ class TestAPayloadIsSeededOnce(WkTest):
         plan = json.dumps({"github_source": "https://github.com/webkit/MotionMark/tree/be2a5fea89b6ef411b053ebeb95a6302b3dc0ecb/MotionMark"})
         with quiet():
             dest = seeder(m).seed("motionmark1.3.1", plan)
-        self.assertEqual(dest, "%s/motionmark1.3.1-%s" % (SEEDS, SHA[:12]))
+        self.assertEqual(dest, "%s/motionmark1.3.1-be2a5fea89b6" % SEEDS, "a commit in the URL is the pin; no remote is asked")
         self.assertIn(dest + "/index.html", m.files)
         self.assertIn("subdir=MotionMark\n", m.files[dest + "/.wk-seeded/origin"])
 
@@ -147,13 +147,14 @@ class TestAPayloadIsSeededOnce(WkTest):
 
 class TestWhatCannotBeSeeded(WkTest):
 
-    def test_a_plan_with_no_fetchable_source_warns_and_answers_nothing(self):
+    def test_a_plan_with_no_pinnable_source_is_refused(self):
         for plan in (json.dumps({"remote_archive": "https://x/y.zip"}), "not json",
                      json.dumps({"github_source": "https://example.com/elsewhere"})):
             with self.subTest(plan=plan):
                 m = fake()
                 cp = in_process(seeder(m).seed, "octane", plan)
-                self.assertIn("cannot pre-seed octane", cp.stderr)
+                self.assertEqual(cp.returncode, 1)
+                self.assertIn("octane names its payload in no form wk pins", cp.stderr)
                 self.assertEqual(ran(m, "clone"), [])
 
     def test_a_local_copy_is_not_seeded(self):
@@ -161,10 +162,10 @@ class TestWhatCannotBeSeeded(WkTest):
         self.assertEqual(seeder(m).seed("p", json.dumps({"local_copy": "/somewhere"})), "")
         self.assertEqual(ran(m, "ls-remote"), [])
 
-    def test_a_clone_that_fails_leaves_nothing_and_says_so(self):
+    def test_a_clone_that_fails_leaves_nothing_and_is_refused(self):
         m = fake(clone_ok=False)
-        with quiet() as said:
-            self.assertEqual(seeder(m).seed("jetstream3", PLAN), "")
+        with quiet() as said, self.assertRaises(Refused):
+            seeder(m).seed("jetstream3", PLAN)
         self.assertIn("could not clone", said.getvalue())
         self.assertFalse(any(p.startswith(SEEDS + "/") for p in m.files))
 

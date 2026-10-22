@@ -153,19 +153,21 @@ class TestHandsOnArmingAndBench(WkTest):
         objc.write_text("#!/bin/sh\nexit 0\n")
         objc.chmod(0o755)
         env = {"WK_BENCH_ROOT": str(self.tmp / "bench"), "WK_BENCH_PYTHON": str(objc)}
-        cp = run("bench", "staged", "--plan", "jetstream2.2", env=env)
+        bench = ("bench", "run", "ws", "jetstream2.2", "--system", "mbp", "--slot", "s1")
+        cp = run(*bench, env=env)
         self.assertNotEqual(cp.returncode, 0, "a run was accepted with no benchmark volume at all")
 
-        stage = self.tmp / "bench" / "staged" / "20260101T000000Z-mac-release"
+        stage = self.tmp / "bench" / "staged" / "s1"
         (stage / "Tools" / "Scripts").mkdir(parents=True)
+        (stage / "payload" / "jetstream2.2").mkdir(parents=True)
         (stage / "WebKitBuild" / "Release" / "MiniBrowser.app" / "Contents" / "MacOS").mkdir(parents=True)
         (stage / "stage.json").write_text('{"preset":"mac-release","plans":"jetstream2.2"}')
 
-        cp2 = run("bench", "staged", "--plan", "jetstream2.2", "--force", env=env)
+        cp2 = run(*bench, "--force", env=env)
         self.assertNotEqual(cp2.returncode, 0, "--force ran a benchmark in host mode")
         self.assertIn("host mode", cp2.stdout + cp2.stderr)
 
-        cp3 = run("bench", "staged", "--plan", "jetstream2.2", "--dry-run", env=env)
+        cp3 = run(*bench, "--dry-run", env=env)
         self.assertEqual(cp3.returncode, 1, "a dry run in host mode is a leg that would be refused")
         self.assertIn("--browser minibrowser --platform osx --plan jetstream2.2", cp3.stdout + cp3.stderr)
 

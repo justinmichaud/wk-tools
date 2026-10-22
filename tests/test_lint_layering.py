@@ -11,7 +11,7 @@ LAYERS = {
     "lab": ("lib/common.sh", "lib/credcheck.py", "lib/secretfile.py", "lib/treehash.py", "lib/wkdata.py", "lib/wk/"),
     "wk": ("lib/contributors.py", "lib/wk/build.py", "lib/wk/pgo.py", "lib/wk/pr.py", "lib/wk/presets.py",
            "lib/wk/profile.py", "lib/wk/slot.py", "lib/wk/bench/ab.py", "lib/wk/bench/autorun.py",
-           "lib/wk/bench/board_ab.py", "lib/wk/bench/board_driver.py", "lib/wk/bench/mac_ab.py", "lib/wk/bench/mac_pgo.py",
+           "lib/wk/bench/board_driver.py", "lib/wk/bench/change.py", "lib/wk/bench/mac_ab.py", "lib/wk/bench/mac_pgo.py",
            "lib/wk/bench/plans.py", "lib/wk/bench/scores.py", "lib/wk/bench/seed.py",
            # The image recipes: WebKit's own Tools/yocto and cross-toolchain-helper, and buildroot's wpewebkit package.
            "lib/wk/sysimage/buildroot.py", "lib/wk/sysimage/buildroot_ws.py", "lib/wk/sysimage/yocto.py", "lib/wk/sysimage/yocto_ws.py",

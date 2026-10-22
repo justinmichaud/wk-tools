@@ -197,12 +197,6 @@ class Cycle:
     def log_path(self, ws, slot):
         return os.path.join(self.store.ws_dir(ws), "pgo-%s.log" % slot)
 
-    def step(self, sid, on, needs, holds, done, words, place=""):
-        return sched.wk_step(self.here, self.wk, lambda s: self.log, sid, on, needs, holds, done, words, place)
-
-    def holds(self, spec, ws, *rest):
-        return sched.wk_yes(self.here, [self.wk, "sysimage", "holds", spec, "--workspace", ws] + list(rest))
-
     def graph(self, ws, commit, slot, board):
         named, me = images.spec_machine(self.spec), progress.machine_name(self.env, self.here)
         try:
@@ -210,7 +204,8 @@ class Cycle:
         except LookupError as e:
             die(str(e))
         place = named if named and named != me else ""
-        return sched.validate(steps(self.step, self.holds, board, ws, self.spec, on, place, commit, slot, ()))
+        w = sched.Wk(self.here, self.root, lambda s: self.log)
+        return sched.validate(steps(w.step, w.holds, board, ws, self.spec, on, place, commit, slot, ()))
 
     def say_collection(self, ws, slot):
         log("  collection  %s" % images.pgo_dir(ws, slot, self.env))
@@ -229,36 +224,15 @@ class Cycle:
         return 0
 
     def cycle(self, ws, commit, slot, board):
-        order = sched.plan_order(self.graph(ws, commit, slot, board))
         self.log = self.log_path(ws, slot)
+        graph = self.graph(ws, commit, slot, board)
         self.here.mkdir(os.path.dirname(self.log))
         t = self.records().begin("pgo", "here", "%s/%s" % (ws, slot), "wk sysimage webkit %s --workspace %s --slot %s --stop"
-                                 % (self.spec, ws, slot), self.log, [s.command for s in order])
+                                 % (self.spec, ws, slot), self.log, [s.command for s in sched.plan_order(graph)])
         info("profile-guided slot '%s' of %s in workspace %s: instrument, collect on %s, rebuild" % (slot, self.name, ws, board))
         self.say_collection(ws, slot)
-
-        def announce(event, step, rc=0):
-            t.step_event(order.index(step) + 1, event)
-            log(sched.say_event(order, event, step, rc, self.log))
-
-        rc = 1
-        try:
-            with job.Signals():
-                s = sched.Scheduler(order, announce, pool=self.pool)
-                rc = s.run_all()
-                for line in sched.summary(s):
-                    log(line)
-                if rc:
-                    die("the cycle for '%s' stopped (above); what was collected is in %s,\n    and re-running this command "
-                        "takes up what is left." % (slot, images.pgo_dir(ws, slot, self.env)))
-        except job.Interrupted as e:
-            rc = "cancelled"
-            raise Refused(job.EXIT_OF.get(e.signum, 130))
-        except Refused as e:
-            rc = e.status
-            raise
-        finally:
-            t.end(rc)
+        sched.run_plan(graph, t, lambda s: self.log, "the cycle for '%s' stopped (above); what was collected is in %s,\n    and re-running "
+                       "this command takes up what is left." % (slot, images.pgo_dir(ws, slot, self.env)), pool=self.pool)
         info("slot '%s' is a profile-guided build of %s" % (slot, commit[:12]))
         d = images.pgo_dir(ws, slot, self.env)
         log("  profile     %s/output/%s.profdata" % (d, GLIB_LIB))

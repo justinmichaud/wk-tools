@@ -2,13 +2,12 @@
 store records -- read here, or asked of the place's own wk (fleet.ask). Every fact is read as the walk runs."""
 
 import os
-import shlex
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from wk import fleet, places, record, statusview
+from wk import fleet, git, places, record, statusview
 from wk.clock import Clock
-from wk.kv import ANSI, kv
+from wk.kv import ANSI
 from wk.store import Snapshots, dispatch_place
 
 ENDED_AS_ASKED = ("ok", "cancelled", "stopped", "refused")
@@ -17,19 +16,6 @@ TASK_EXIT = {"running": 2, "starting": 2, "silent": 2, "died": 4, "unreadable": 
 METHOD = {"container": "container", "vm": "macOS guest"}
 RANK = {"container": 0, "vm": 1, "local": 2}
 WAIT_SECONDS = 5   # between two walks of `--wait`: a build's state changes in minutes
-
-WS_PROBE = r'''cd @SRC@ 2>/dev/null || exit 0
-printf 'origin=%s\n' "$(git config --get remote.origin.url 2>/dev/null)"
-printf 'dirty=%s\n' "$(git status --porcelain --untracked-files=no 2>/dev/null | wc -l | tr -d ' ')"
-printf 'untracked=%s\n' "$(git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')"
-printf 'unpushed=%s\n' "$(git rev-list --count HEAD --not --remotes 2>/dev/null)"
-_u=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || _u=origin/main
-printf 'upstream=%s\n' "$_u"
-set -- $(git rev-list --left-right --count "$_u...HEAD" 2>/dev/null)
-printf 'behind=%s\nahead=%s\n' "${1:-}" "${2:-}"
-@BASE@
-printf 'wsbase=%s\n' "${_b:-?}"
-'''
 
 
 def clean(text):
@@ -120,8 +106,6 @@ def wait(poll, timeout, clock, label, info, warn):
 
 
 class Walk:
-    """One `wk status`: a job per place this machine lists."""
-
     def __init__(self, root, name=None, env=None, clock=None, reg=None):
         self.root = str(root)
         self.env = os.environ if env is None else env
@@ -219,8 +203,7 @@ class Walk:
                 ws=st, branch=driver.branch(ws))
         worst, probe, repo = 0, {}, driver.repo(ws)
         if st == "present":
-            script = WS_PROBE.replace("@SRC@", shlex.quote(driver.src(ws))).replace("@BASE@", places.upstream_line_body())
-            probe = kv(driver.exec(ws, ["sh", "-c", script]).out)
+            probe = git.probe(lambda argv: driver.exec(ws, argv), driver.src(ws))
             origin = probe.get("origin", "")
             if origin and origin != repo.origin(driver.here, self.root):
                 note(r, "origin is %s, not upstream -- 'wk sync %s --fix'" % (origin, ws), "warn")

@@ -32,12 +32,6 @@ TOOLS = "/opt/wk-tools"
 BRIDGE = TOOLS + "/container/proxy/ensure-bridge.sh"
 NO_PROXY = "localhost,127.0.0.1,::1"
 
-def upstream_line_body():
-    """git.LINE as a fragment setting `_b` with $PWD inside the checkout (status.WS_PROBE's, until it runs git.PROBE)."""
-    return ("t=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null) || t=''\nr=%s\n%s_b=$b\n"
-            % (shlex.quote(project.get("RELEASES")), git.LINE))
-
-
 def guest_mirror():
     return GUEST_MIRROR_MOUNT + "/mirror/" + project.get("MIRROR")
 

@@ -96,6 +96,8 @@ class BaseWorld(BenchHere):
     def _guest(self, argv, _):
         cmd = argv[-1]
         self.guest_cmds.append(cmd)
+        if cmd == "date -u +%s":
+            return Result(0, "1700000000\n")
         if cmd == "true" and self.agent_down:
             return Result(255, "", "no guest agent\n")
         if "Setup Assistant.app" in cmd:

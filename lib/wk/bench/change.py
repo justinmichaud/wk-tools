@@ -1,0 +1,569 @@
+"""`wk bench ab <change>`: an interleaved A/B of a change across the fleet's boards. Its arms are two slots, base and the
+patched head, each built against every device's image and deployed to its board; `--systems A,B` names two bench systems
+on one board instead. The plan is a graph (lib/wk/sched.py) run in this process: each build, deploy and collection is the
+`wk` command a person types, and each board's rounds are one A/B (lib/wk/bench/ab.py), a `wk bench run` on the machine
+holding the image workspace the task lives in."""
+
+import concurrent.futures as futures
+import os
+import re
+import sys
+from fnmatch import fnmatchcase
+
+from wk import act, fleet, git, images, job, pgo, pr, record as progress, sched, sync
+from wk.act import Refused, die, info, log, warn
+from wk.bench import board, record
+from wk.bench.ab import Task, check_plan, cost_line, duration, flags, pair, refuse
+
+SHA = re.compile(r"^[0-9a-f]{40}$")
+RELEASE_OF = re.compile(r"^(wpe-|webkitglib/)([0-9]+\.[0-9]+)$")
+PLAN = "speedometer3"
+SLOTS = 'for s in %s/*/slot.json; do [ -f "$s" ] && basename "$(dirname "$s")"; done 2>/dev/null; true' % board.SLOTS_DIR
+USAGE = ("usage: wk bench ab <pr-spec|branch|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>]\n"
+         "           [--build-on <a[,b]>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--detach]\n"
+         "       wk bench ab --systems A,B --devices <board> --workspace <ws> [--slot S] [--plan P]... [--rounds N]\n"
+         "       wk bench ab --devices <mac> --systems A,B | --patch <ref|diff> [--base <ref>] --workspace <ws> ...\n"
+         "       wk bench ab <task> --kill; see wk bench -h")
+BUILD_ONLY = ("release", "builder", "bits", "base", "build_on")
+MAC_ONLY = ("patch", "preset", "settle", "a_args", "b_args", "plant", "rehearse", "preflight", "progress", "status", "collect")
+
+
+def legs_per_plan(rounds, systems):
+    """A warmup leg per arm, then each round one leg per arm; a system arm settles on each fresh boot first."""
+    return 2 + rounds * (4 if systems else 2)
+
+
+class Device:
+    def __init__(self, name, image_preset, p):
+        self.name, self.image_preset, self.p = name, image_preset, p
+        self.arm_ws, self.mode, self.slots = [], "unreachable", []
+
+    @property
+    def pgo(self):
+        return images.pgo_wanted(self.p["IMG_BUILDER"], self.p["CFG_RELEASE"])
+
+    def booted(self):
+        return self.mode.startswith("bench %s-" % self.image_preset)
+
+
+class Change(Task):
+    """`boards(name)` answers (mode, slots) for a board, by default the real board's; `pool` is the executor steps run on."""
+
+    def __init__(self, root, reg, clock, spec, o, boards=None, pool=futures.ThreadPoolExecutor):
+        super().__init__(root, reg, clock, o)
+        self.spec, self.store = spec or "", reg.store
+        self.boards, self.pool = boards or self.board_state, pool
+        self.wk = os.path.join(self.root, "wk")
+        self.systems = bool(self.o.get("systems"))
+        self.me = progress.machine_name(self.env, self.here)
+        self.devices, self.arms, self.pr, self._base_branch = [], [], {}, None
+        self.head = self.base = self.head_desc = self.base_how = self.branch = ""
+        self.ahead = self.behind = 0
+
+    def check(self):
+        o = self.o
+        if not o.get("devices"):
+            die(USAGE + "\n    --devices names the boards (wk boot --list)")
+        refuse(o, MAC_ONLY, "%s is a Mac A/B's: --devices names a board here, and a board's arms are slots")
+        self.rounds, self.max_rounds, self.detect, self.plans = check_plan(o, [PLAN])
+        if o.get("detach") and act.dry_run():
+            die("--detach and --dry-run: a dry run has nothing to detach")
+        if o.get("bits") not in (None, "", "32", "64"):
+            die("--bits takes 32 or 64 (got '%s')" % o["bits"])
+        if self.systems:
+            self.check_systems()
+        elif not self.spec or self.spec.startswith("-"):
+            die(USAGE)
+        elif o.get("workspace"):
+            die("--workspace names the workspace a --systems A/B keeps its task in; a change's is the first device's image workspace")
+        elif o.get("slot"):
+            die("--slot names the one slot a --systems A/B holds fixed; a change's arms are the slots base and pr<n>")
+
+    def check_systems(self):
+        o = self.o
+        if self.spec:
+            die("--systems compares two bench systems, so there is no change to build: drop '%s'" % self.spec)
+        refuse(o, BUILD_ONLY, "%s says how to build a change's slots, and a --systems A/B builds nothing")
+        if "," in o["devices"]:
+            die("--systems names two system ids, and a system id names one board's image: one --devices board")
+        if not o.get("workspace"):
+            die("--systems keeps its task in the image workspace that built system A: --workspace <ws> ('wk sysimage ls')")
+        a, b = pair(o["systems"], "systems")
+        slot = o.get("slot") or "a"
+        images.check_slot_name(slot)
+        self.arms = [(a, slot), (b, slot)]
+
+    def git(self, *args):
+        return self.here.run(["git", "-C", self.mirror] + list(args))
+
+    def rev(self, ref):
+        r = self.git("rev-parse", "--verify", "--quiet", ref + "^{commit}")
+        return r.out.strip() if r.ok else ""
+
+    def fetched(self, dest, what, fetch):
+        sha = pr.resolved_or_planned(self.here, self.mirror, dest, what, fetch)
+        if not sha:
+            die("the mirror has no %s after fetching it" % what)
+        return sha
+
+    def resolve_head(self):
+        """Which of the three the spec is settles before the mirror is required, so a malformed spec is refused as the argument error it is."""
+        s = self.spec
+        self.pr = dict(kind="commit", n="", remote="") if SHA.match(s) else pr.parse_spec(s)
+        if not self.o.get("release") and self.pr["kind"] != "pull":
+            die("--release is required for a commit or a branch: only a pull request\n"
+                "    has a base branch saying which image it is for ('wk sysimage presets' has\n"
+                "    every release; --release 2.52).")
+        self.mirror = self.store.mirror_dir()
+        if not self.here.isdir(self.mirror):
+            die("no mirror at %s; 'wk sync' makes one. Both commits are resolved in it." % self.mirror)
+        if self.pr["kind"] == "commit":
+            if not self.git("cat-file", "-e", s + "^{commit}").ok:
+                die("the mirror does not have commit %s ('wk sync' fetches the upstream branches)" % s)
+            self.head, self.head_desc = s, "commit"
+        elif self.pr["kind"] == "user":
+            self.head_branch()
+        else:
+            remote, n = self.pr["remote"], self.pr["n"]
+            dest = "refs/remotes/pr/" + pr.pull_refname(remote, n)
+            self.head = self.fetched(dest, "pull request %s" % n, lambda: sync.fetch_pull_into_mirror(self.here, self.store, self.lock, remote, n))
+            self.head_desc = "%s (pull request %s on %s)" % (s, n, remote)
+
+    def head_branch(self):
+        """A fork's branch is a head like a pull request's: found in whichever of that fork's repositories carries it, fetched into the mirror."""
+        user, branch = self.pr["user"], self.pr["branch"]
+        found = pr.branch_repos(self.here, user, branch)
+        if not found:
+            die("no branch '%s' under '%s'.\n    Checked: %s\n    A pull request is named as wpe:<n> or <n>, a commit as its "
+                "40-digit sha." % (branch, user, " ".join(pr.branch_repo_urls(user))))
+        if len(found) > 1:
+            die("'%s' exists in more than one of %s's repositories:\n%s\n    They are different projects; pass the head sha of "
+                "the one you mean." % (branch, user, "\n".join("    %s %s %s" % f for f in found)))
+        repo, url, _ = found[0]
+        ref = pr.pr_refname(user, repo, branch)
+        dest = "refs/remotes/pr/" + ref
+        self.head = self.fetched(dest, "%s:%s from %s" % (user, branch, url),
+                                 lambda: sync.fetch_into_mirror(self.here, self.store, self.lock, url, "refs/heads/" + branch, dest))
+        self.head_desc = "%s:%s (branch of %s/%s)" % (user, branch, user, repo)
+
+    def pr_base_branch(self):
+        """The branch a pull request was written against, which its head ref does not carry: asked of GitHub, once."""
+        if self._base_branch is None:
+            url = dict(git.REMOTES)[self.pr["remote"]]
+            repo = re.sub(r"\.git$", "", url).replace("https://github.com/", "")
+            r = self.here.run(["gh", "pr", "view", self.pr["n"], "--repo", repo, "--json", "baseRefName", "--jq", ".baseRefName"])
+            if not r.ok or not r.out.strip():
+                die("could not read pull request %s's base branch from %s (gh auth login signs gh in):\n    %s\n"
+                    "    Say both of the things it answers yourself:\n"
+                    "        --release <x.y>   which image to measure on (wk sysimage presets)\n"
+                    "        --base <sha>      the unpatched side, usually the head's own parent"
+                    % (self.pr["n"], repo, (r.err or r.out).strip()))
+            self._base_branch = r.out.strip()
+        return self._base_branch
+
+    def release(self):
+        if self.o.get("release"):
+            return self.o["release"]
+        m = RELEASE_OF.match(self.pr_base_branch())
+        if not m:
+            die("pull request %s is against '%s', which names no release.\n    Say which image to measure on: --release 2.38 "
+                "(wk sysimage presets)" % (self.pr["n"], self.pr_base_branch()))
+        return m.group(2)
+
+    def narrow(self, dev, matches, release):
+        """What tells the matches apart is what to ask for: naming a width narrows nothing between two builders of it."""
+        builders, widths = [], []
+        for c in matches:
+            b, w = c.split("-%s-" % release, 1)[1].split("-", 1)[0], c.rsplit("-", 1)[1]
+            builders += [b] if b not in builders else []
+            widths += ["%s-%s" % (dev, w)] if "%s-%s" % (dev, w) not in widths else []
+        said = (["--builder " + " or ".join(builders)] if len(builders) > 1 else []) + (["--devices " + " or ".join(widths)] if len(widths) > 1 else [])
+        return ", and ".join(said) or ("nothing -- they differ in neither builder nor width, so no option here tells them apart,\n"
+                                       "    and two such image presets at one release is a bug in image/presets")
+
+    def image_preset_for(self, dev, bits, release):
+        pattern = "*-%s-%s-%s-%s" % (release, self.o.get("builder") or "*", dev, bits or "*")
+        matches = [c for c in images.names(self.env) if fnmatchcase(c, pattern)]
+        if not matches:
+            die("no image preset for %s at release %s%s%s.\n    'wk sysimage presets' has every image preset this checkout "
+                "defines." % (dev, release, " (%s)" % self.o["builder"] if self.o.get("builder") else "", ", %s-bit" % bits if bits else ""))
+        if len(matches) > 1:
+            die("%s has more than one image at release %s:\n%s\n    Say which: %s"
+                % (dev, release, "\n".join("    " + m for m in matches), self.narrow(dev, matches, release)))
+        return matches[0]
+
+    def resolve_devices(self, release):
+        for tok in self.o["devices"].split(","):
+            dev, bits = tok, self.o.get("bits") or ""
+            if tok[-3:] in ("-32", "-64"):
+                dev, bits = tok[:-3], tok[-2:]
+            board.require_board(self.root, self.env, dev)
+            image_preset = self.image_preset_for(dev, bits, release)
+            p = images.load(image_preset, self.env)
+            if p["CFG_NEEDS"]:
+                die("%s cannot be built yet: %s\n    (%s)" % (image_preset, p["CFG_NEEDS"], images.conf_path(image_preset, self.env)))
+            if p["IMG_BUILDER"] not in images.WS_BUILDERS:
+                die("%s is built by %s, which has no WebKit slots" % (image_preset, p["IMG_BUILDER"] or "nothing"))
+            self.devices.append(Device(dev, image_preset, p))
+        first = self.devices[0].p
+        for d in self.devices[1:]:
+            if (d.p["CFG_BRANCH"], d.p["CFG_REMOTE"]) != (first["CFG_BRANCH"], first["CFG_REMOTE"]):
+                die("%s tracks %s/%s while %s tracks %s/%s;\n    one A/B measures one branch. Run them as two."
+                    % (d.image_preset, d.p["CFG_REMOTE"], d.p["CFG_BRANCH"], self.devices[0].image_preset, first["CFG_REMOTE"], first["CFG_BRANCH"]))
+        if not first["CFG_BRANCH"] or not first["CFG_REMOTE"]:
+            die("%s declares no CFG_BRANCH/CFG_REMOTE, so there is no branch to take a base from" % self.devices[0].image_preset)
+
+    def resolve_base(self):
+        """Off the branch the change was written against -- a pull request's own base branch -- not the image's, which
+        says only which image to measure on. Refreshed first: a stale mirror would pick an older base."""
+        p = self.devices[0].p
+        remote, branch = p["CFG_REMOTE"], p["CFG_BRANCH"]
+        if not self.o.get("base") and self.pr["kind"] == "pull":
+            remote, branch = self.pr["remote"], self.pr_base_branch()
+        url = dict(git.REMOTES).get(remote)
+        if not url:
+            die("no upstream remote '%s' (lib/wk/git.py REMOTES) to fetch %s from" % (remote, branch))
+        dest = "refs/remotes/%s/%s" % (remote, branch)
+        tip = self.fetched(dest, "%s/%s" % (remote, branch),
+                           lambda: sync.fetch_into_mirror(self.here, self.store, self.lock, url, "refs/heads/" + branch, dest))
+        self.branch = "%s/%s" % (remote, branch)
+        if self.o.get("base"):
+            self.base = self.rev(self.o["base"])
+            if not self.base:
+                die("--base '%s' is not a commit the mirror knows" % self.o["base"])
+            self.base_how = "given"
+        else:
+            r = self.git("merge-base", self.head, tip)
+            if not r.ok or not r.out.strip():
+                die("%s and %s share no history; is this change against that branch?\n    Say the base yourself: --base <sha>"
+                    % (self.head, self.branch))
+            self.base, self.base_how = r.out.strip(), "merge-base of the head and %s (guessed)" % self.branch
+        self.ahead, self.behind = self.count("%s..%s" % (self.base, self.head)), self.count("%s..%s" % (self.head, tip))
+
+    def count(self, spec):
+        out = self.git("rev-list", "--count", spec).out.strip()
+        return int(out) if out.isdigit() else 0
+
+    def build_on(self):
+        names = [m for m in (self.o.get("build_on") or "").split(",") if m]
+        if len(names) > 2:
+            die("--build-on names the machine each of the two arms builds on, base first, so it takes one name or two "
+                "(got '%s')." % self.o["build_on"])
+        known = self.reg.known()
+        for m in names:
+            if m not in known and m != self.me:
+                die("--build-on names a machine this checkout knows (machines/<name>.conf) or this one, and '%s' is neither.\n"
+                    "    The machines here: %s" % (m, " ".join(known) or "none"))
+        return (names + names)[:2] if names else ["", ""]
+
+    def resolve_arm_ws(self):
+        on = self.build_on()
+        pr_slot = "pr" + self.pr["n"] if self.pr.get("n") else "pr"
+        self.arms = [("", "base"), ("", pr_slot)]
+        for d in self.devices:
+            ws = images.image_ws(d.image_preset, self.env)
+            for named in on:
+                try:
+                    where = images.ws_machine(named, "" if named else self.reg.ws_place(ws), self.me)
+                except LookupError as e:
+                    die(str(e))
+                place = named if named and named != self.me else ""
+                d.arm_ws.append((ws, "%s@%s" % (d.image_preset, named) if named else d.image_preset, where, place))
+
+    def logged(self, step):
+        """Each `wk` step logs beside its resource; the task step is this process's own."""
+        return "" if step.id == "task" else os.path.join(self.logdir(), sched.log_name(step))
+
+    def maker(self):
+        return sched.Wk(self.here, self.root, self.logged, ["WK_TASK_HELD=" + self.task] if self.task else [])
+
+    def build_steps(self, w, d, imaged):
+        out = []
+        for a, (_, slot) in enumerate(self.arms):
+            commit = self.head if a else self.base
+            ws, spec, on, place = d.arm_ws[a]
+            key, res = "%s@%s" % (ws, on), images.build_resource(on)
+            sdk = d.p["IMG_BUILDER"] == "yocto"
+            built = ("toolchain:" if sdk else "image:") + key
+            if key not in imaged:
+                imaged.add(key)
+                out.append(w.step("image:" + key, on, (), (res,), w.holds(spec, ws),
+                                        ["sysimage", "build", spec, "--workspace", ws]))
+                if sdk:   # the nativesdk stack does not fit the webkit stage's booking, so the SDK is machine-sized and its own step
+                    out.append(w.step("toolchain:" + key, on, ("image:" + key,), (res,), w.holds(spec, ws, "--toolchain"),
+                                            ["sysimage", "build", spec, "--workspace", ws, "--stage", "toolchain"]))
+            if d.pgo:
+                out += pgo.steps(w.step, w.holds, d.name, ws, spec, on, place, commit, slot, (built,))
+            else:
+                out.append(w.step("slot:%s:%s" % (ws, slot), on, (built,), (res,), w.holds(spec, ws, "--slot", slot, "--commit", commit),
+                                        ["sysimage", "webkit", spec, "--workspace", ws, "--commit", commit, "--slot", slot]))
+            out.append(w.step("deploy:%s:%s" % (d.name, slot), on, ("slot:%s:%s" % (ws, slot),), ("device:" + d.name,), None,
+                                    ["bench", "deploy", ws, d.name, "--slot", slot], place))
+        return out
+
+    def home(self):
+        """(workspace, place) the task lives in: a --systems A/B's --workspace, else the first device's base image workspace."""
+        if self.systems:
+            return self.o["workspace"], ""
+        ws, _, _, place = self.devices[0].arm_ws[0]
+        return ws, place
+
+    def cost_homes(self):
+        return [self.home()] + [(ws, place) for d in self.devices for ws, _, _, place in d.arm_ws]
+
+    def logdir(self):
+        return record.driver_logs(self.store, self.task)
+
+    def task_path(self):
+        m, d = record.ws_home(self.reg, *self.home())
+        return m, os.path.join(d, self.task)
+
+    def task_step(self):
+        """The task is recorded through the machine holding its workspace, once the image step has made that workspace."""
+        ws, _ = self.home()
+        needs = () if self.systems else ("image:%s@%s" % (ws, self.devices[0].arm_ws[0][2]),)
+
+        def done():
+            m, d = self.task_path()
+            return bool(self.task) and m.exists(os.path.join(d, "task.json"))
+
+        def run():
+            m, d = self.task_path()
+            try:
+                record.held((m, os.path.dirname(d)), ws)
+            except Refused as e:
+                return e.status
+            record.task_write(d, self.task_fields(), [" ".join(["wk"] + self.argv()[1:])], machine=m)
+            return 0
+        return sched.Step("task", self.me, needs, (), done, run, command="record task %s in workspace %s" % (self.task or "<task>", ws))
+
+    def steps(self):
+        out, imaged, benches, w = [], set(), [], self.maker()
+        for d in self.devices:
+            if not self.systems:
+                out += self.build_steps(w, d, imaged)
+        out.append(self.task_step())
+        for d in self.devices:
+            needs = ("task",) + (() if self.systems else tuple("deploy:%s:%s" % (d.name, s) for _, s in self.arms))
+            on, place = (self.me, "") if self.systems else d.arm_ws[0][2:]
+            for plan in self.plans:
+                benches.append("bench:%s:%s" % (d.name, plan))
+                out.append(w.step(benches[-1], on, needs, ("device:" + d.name,), None, self.bench_words(d, plan), place))
+        out.append(w.step("report", self.me, benches, (), None, ["bench", "report", self.task or "<task>", "--html", "--text"]))
+        return sched.validate(out)
+
+    def bench_options(self, d):
+        o = {"rounds": str(self.rounds), "count": self.o.get("count") or "",
+             "timeout": self.o.get("timeout") or "", "max_rounds": str(self.max_rounds) if self.detect else "",
+             "detect": "%g" % self.detect if self.detect else ""}
+        a, b = self.arms
+        if self.systems:
+            return self.o["workspace"], dict(o, ab_systems="%s,%s" % (a[0], b[0]), slot=a[1])
+        return d.arm_ws[0][0], dict(o, ab="%s,%s" % (a[1], b[1]))
+
+    def bench_words(self, d, plan):
+        ws, o = self.bench_options(d)
+        return (["bench", "run", ws, plan, "--system", d.name] + flags(o, o)
+                + ["--task", self.task or "<task>"])
+
+    def board_state(self, name):
+        """(mode, slots) the board answers now; a config problem is refused by name, never folded into 'unreachable'."""
+        s = board.for_board(self.root, self.reg, "", self.clock, name)
+        mode = s.driver.probe()
+        if not mode.startswith("bench "):
+            return mode, []
+        try:
+            return mode, s.bench().run(["sh", "-c", SLOTS]).out.replace("\r", "").split()
+        except Refused:
+            return "unreachable", []
+
+    def cost_lines(self):
+        lines, per_board = [], {}
+        for d in self.devices:
+            for plan in self.plans:
+                line, secs = cost_line(self.reg, self.cost_homes(), d.name, plan, self.o.get("count") or "", legs_per_plan(self.rounds, self.systems))
+                lines.append(line)
+                per_board.setdefault(d.name, []).append(secs)
+        if per_board and all(None not in v for v in per_board.values()):
+            lines.append("about %s on the boards, which run at once; the builds are not in it" % duration(max(sum(v) for v in per_board.values())))
+        return lines
+
+    def subject(self):
+        if self.systems:
+            return "%s vs %s on %s" % (self.arms[0][0], self.arms[1][0], self.devices[0].name)
+        return "%s on %s: %s vs %s, %s" % (self.head_desc, ", ".join(d.name for d in self.devices), self.base[:12], self.head[:12],
+                                           self.devices[0].p["CFG_RELEASE"])
+
+    def subject_line(self, sha):
+        r = self.git("log", "-1", "--format=%s", sha)
+        return r.out.strip()[:70] if r.ok else ""
+
+    def show(self, steps, done):
+        if self.systems:
+            log("A/B of system %s vs %s on %s" % (self.arms[0][0], self.arms[1][0], self.devices[0].name))
+        else:
+            p = self.devices[0].p
+            log("A/B of %s on %s\n" % (self.head_desc, ", ".join(d.name for d in self.devices)))
+            log("  patched   %s  %s" % (self.head[:12], self.subject_line(self.head)))
+            log("  base      %s  %s" % (self.base[:12], self.subject_line(self.base)))
+            log("            %s; the patched side is %d commit(s) ahead of it" % (self.base_how, self.ahead))
+            if self.behind:
+                log("            %s has moved %d commit(s) past the base since" % (self.branch, self.behind))
+            log("  release   %s (%s %s/%s)" % (p["CFG_RELEASE"], p["CFG_PROJECT"] or "WebKit", p["CFG_REMOTE"], p["CFG_BRANCH"]))
+        log("  plans     %s" % " ".join(self.plans))
+        log("  rounds    %s per plan, the lead alternating%s%s" % (
+            self.rounds, "; up to %d until they resolve %g%%" % (self.max_rounds, self.detect) if self.detect else "",
+            "; --count %s iterations per run" % self.o["count"] if self.o.get("count") else ""))
+        log("  arms      %s" % ", ".join(s for _, s in self.arms) if not self.systems else "  slot      %s in both systems" % self.arms[0][1])
+        log("  task      %s, in workspace %s" % (self.task or "(named when it is created)", self.home()[0]))
+        for line in self.cost_lines():
+            log("  cost      " + line)
+        log("")
+        for d in self.devices:
+            log("  %s: %s" % (d.name, "board %s" % d.mode if self.systems else "image %s" % d.image_preset))
+            if not self.systems:
+                for (_, slot), (ws, _, on, _) in zip(self.arms, d.arm_ws):
+                    log("        slot %-7s %s on %s" % (slot, ws, on))
+                log("        board      %s%s" % (d.mode, "  (slots there: %s)" % (" ".join(d.slots) or "none") if d.booted()
+                                                  else "  <-- not booted into %s" % d.image_preset))
+                log("        build      %s" % ("profile-guided: each slot is instrument, collect on %s, rebuild -- so %s has to be in this "
+                                               "image before the builds" % (d.name, d.name) if d.pgo
+                                               else "plain: %s predates upstream cmake PGO support" % d.p["CFG_RELEASE"]))
+        log("\nthe plan as a graph -- a step runs when its needs are done and what it holds is free:\n")
+        sched.render(steps, done, sys.stderr)
+        for d in self.devices:
+            if not self.systems and not d.booted():
+                log("\n  %s is not booted into %s -- by hand, before the steps above:\n    wk sysimage write --from %s --disk %s:<device>\n"
+                    "    wk boot %s" % (d.name, d.image_preset, d.image_preset, d.name, d.name))
+
+    def argv(self):
+        words = ([self.spec] if self.spec else []) + flags(self.o, ("devices", "release", "builder", "bits", "base", "build_on", "systems",
+                                                                   "workspace", "slot", "count", "timeout", "max_rounds", "detect"))
+        for p in self.plans:
+            words += ["--plan", p]
+        return [self.wk, "bench", "ab"] + words + ["--rounds", str(self.rounds)]
+
+    def create_task(self):
+        """Named, and its lock taken, before any work; a given --task is a --detach parent's, whose lock this process takes over."""
+        if self.task:
+            self.lock.hold("bench-task-" + self.task, timeout=30)
+        else:
+            stamp = self.clock.stamp()
+            self.task = ("%s-%s-systems" % (stamp, self.devices[0].name) if self.systems
+                         else "%s-%s-pr%s" % (stamp, self.pr["remote"], self.pr["n"]) if self.pr.get("n") else "%s-%s" % (stamp, self.head[:12]))
+            self.lock.hold("bench-task-" + self.task, timeout=5)
+        self.here.mkdir_now(self.logdir())
+
+    def task_fields(self):
+        a, b = self.arms
+        if self.systems:
+            subj, devices = {"subject.kind": "systems", "subject.spec": "%s,%s" % (a[0], b[0])}, self.devices[0].name
+        else:
+            p = self.devices[0].p
+            subj = {"subject.kind": "pull" if self.pr.get("n") else "commit", "subject.spec": self.spec, "subject.remote": self.pr["remote"],
+                    "subject.number": self.pr["n"], "subject.head": self.head, "subject.base": self.base, "subject.base_how": self.base_how,
+                    "subject.release": p["CFG_RELEASE"], "subject.branch": "%s/%s" % (p["CFG_REMOTE"], p["CFG_BRANCH"])}
+            devices = ",".join("%s=%s" % (d.name, d.image_preset) for d in self.devices)
+        return dict(subj, task=self.task, requested=self.clock.iso(), restart="%s --task %s" % (" ".join(["wk"] + self.argv()[1:]), self.task),
+                    **self.shape(devices, self.plans, (s for _, s in self.arms)), **{k: self.o[k] for k in ("count", "timeout") if self.o.get(k)})
+
+    def resolve(self):
+        self.check()
+        if not self.systems:
+            self.resolve_head()
+            self.resolve_devices(self.release())
+            self.resolve_base()
+            self.resolve_arm_ws()
+        else:
+            board.require_board(self.root, self.env, self.o["devices"])
+            self.devices.append(Device(self.o["devices"], "", images.FIELDS))
+        for d in self.devices:
+            d.mode, d.slots = self.boards(d.name)
+        if self.task and not self.here.isdir(self.logdir()) and not self.task_step().done():   # an A/B named here, or one recorded
+            die("no such task '%s' in workspace %s; 'wk bench ls' lists the tasks" % (self.task, self.home()[0]))
+
+    def go(self):
+        self.resolve()
+        steps = self.steps()
+        done = sched.done_ids(steps, self.pool)
+        if self.ahead > 1:
+            act.barrier("the patched side is %d commits ahead of the base, so the two arms differ by more than the change under\n"
+                        "    measurement and no number says which commit moved it. Name the commit's own parent:\n"
+                        "        --base %s" % (self.ahead, self.git("rev-parse", "--short=12", self.head + "^").out.strip() or "<sha>"))
+        self.show(steps, done)
+        if act.dry_run():
+            log("\ndry run -- nothing was built or run.")
+            return 0
+        log("")
+        if not self.systems:
+            warn("this replaces slots %s on the boards named, and moves each image workspace's checkout to the commits above."
+                 % " and ".join("'%s'" % s for _, s in self.arms))
+        if not act.confirm("run these %d step(s)%s?" % (len(steps), "" if self.systems else ", replacing those slots")):
+            die("not run")
+        self.create_task()
+        info("task %s, in workspace %s  (logs: %s)" % (self.task, self.home()[0], self.logdir()))
+        if self.o.get("detach"):
+            pid = job.detach(self.here, self.argv() + ["--yes", "--task", self.task], os.path.join(self.logdir(), "ab.log"))
+            info("detached as pid %d -- this end can go away" % pid)
+            log("  follow:  tail -f %s/ab.log\n  state:   wk status;  wk bench ls\n  report:  wk bench report %s   (partial while it runs)"
+                % (self.logdir(), self.task))
+            return 0
+        return self.run(self.steps())
+
+    def run(self, steps):
+        recs = progress.Records(self.store.records_dir(), clock=self.clock, env=self.env, machine=self.here)
+        t = recs.begin("ab", "here", self.task, "wk bench ab %s --kill" % self.task, os.path.join(self.logdir(), "ab.log"),
+                       [s.command for s in sched.plan_order(steps)])
+        t.set("subject", self.subject())
+        try:
+            sched.run_plan(steps, t, self.logged, "A/B incomplete: the steps above say which did not run, and each one's log is beside its "
+                           "own resource in\n    %s. Every round that finished is recorded ('wk bench report %s'), and re-running\n"
+                           "    'wk bench ab ... --task %s' takes up what is left." % (self.logdir(), self.task, self.task),
+                           pool=self.pool, after=self.verify)
+        finally:
+            self.lock.release_all()
+        info("A/B complete: task %s in workspace %s  (wk bench ls; wk bench report %s)" % (self.task, self.home()[0], self.task))
+        return 0
+
+    def verify(self):
+        """Both slots are what the A/B names after the builds, asked of the machine holding each arm's workspace."""
+        if self.systems:
+            return
+        w = self.maker()
+        for d in self.devices:
+            for a, (_, slot) in enumerate(self.arms):
+                ws, spec = d.arm_ws[a][:2]
+                if not w.holds(spec, ws, "--slot", slot, "--commit", self.head if a else self.base)():
+                    die("%s does not hold slot '%s' at %s after the builds (wk sysimage ls), so what ran was not the pair\n"
+                        "    this A/B names. Do not take the report as it stands." % (ws, slot, (self.head if a else self.base)[:12]))
+
+
+def kill(reg, clock, task):
+    """`wk bench ab <task> --kill`: the A/B's process and every step it started, the record ended cancelled once they are gone."""
+    recs = progress.Records(reg.store.records_dir(), clock=clock, env=reg.env, machine=reg.machine)
+    t = recs.find("ab", task)
+    if t is None:
+        die("no A/B task '%s' was started from this machine.\n    'wk bench ls' names the tasks and 'wk status' the one running." % task)
+    if not t.alive(None):
+        die("A/B task '%s' is not running: it is %s.\n    What it measured is recorded:  wk bench report %s" % (task, t.verdict(), task))
+    info("stopping A/B task '%s' (pid %s)" % (task, t.field("pid")))
+    if not job.kill(None, task, t, "cancelled", reg.machine, clock, reg.env):
+        die("pid %s outlived a TERM and a KILL (ps -p %s); the record says cancelled, the process does not" % (t.field("pid"), t.field("pid")))
+    info("cancelled. The rounds it recorded stay in %s ('wk bench report %s');\n    re-running with --task %s takes up what is left."
+         % (record.homes(reg.store).get(task) or "its workspace", task, task))
+    return 0
+
+
+def machine_kind(root, env, name):
+    try:
+        return (fleet.Fleet(root, env).load(name) or {}).get("kind", "")
+    except fleet.ConfError as e:
+        die(str(e))
+
+
+def run(root, reg, clock, spec, o, kill_it=False):
+    if kill_it:
+        if not spec:
+            die(USAGE)
+        return kill(reg, clock, spec)
+    return Change(root, reg, clock, spec, o).go()

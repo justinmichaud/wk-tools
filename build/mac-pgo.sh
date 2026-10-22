@@ -30,7 +30,7 @@ pgo_build() {
     [ -n "$pgo" ] || { echo "wk: WK_PGO_DIR is unset; lib/wk/presets.py sets it for a PGO config" >&2; return 1; }
     arch=$(uname -m)
     local instr
-    instr=$(_pgo_py pgo-instr "$final") || return 1
+    instr="$final-instr"
 
     _pgo_run "instrumented (thin LTO, profile generation)" "$instr" \
         "${@}" --lto-mode=thin \

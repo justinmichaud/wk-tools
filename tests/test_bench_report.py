@@ -62,7 +62,7 @@ def report_means(stdout):
 
 
 def env_record(path, *fields):
-    record.write_env(str(path), [f for f in fields if f != "--update"], update="--update" in fields)
+    record.write_env(str(path), dict(f.split("=", 1) for f in fields if f != "--update"), update="--update" in fields)
 
 
 def run_dir(d, doc, *env):
@@ -249,11 +249,6 @@ class TestReportWalkerAndStats(WkTest):
         env_record(f, "--update", "wall_time_s=42")
         doc = json.loads(f.read_text())
         self.assertEqual((doc["plan"], doc["preset"], doc["wall_time_s"]), ("jetstream3", "jsc-release", "42"))
-
-    def test_env_record_refuses_a_field_that_is_not_key_value(self):
-        r = in_process(record.write_env, str(self.tmp / "env.json"), ["--nosuch"])
-        self.assertEqual(1, r.returncode)
-        self.assertIn("not a key=value: --nosuch", r.stderr)
 
 
 class TestTheHeadlineRow(WkTest):
