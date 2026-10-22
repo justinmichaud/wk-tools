@@ -41,7 +41,7 @@ class TestAllConfigDefaults(unittest.TestCase):
                     self.assertTrue(c.args.startswith("--no-fatal-warnings "), c.args)
                     self.assertEqual(c.args.count("--no-fatal-warnings"), 1)
                     self.assertIn("-DUSE_LIBBACKTRACE=" + bt, c.cmake)
-                    for flag in ("-DDEVELOPER_MODE=ON", "-DUSE_VULKAN=OFF", "-DENABLE_THUNDER=OFF", "-DUSE_LIBBACKTRACE="):
+                    for flag in ("-DDEVELOPER_MODE=ON", "-DUSE_VULKAN=OFF", "-DENABLE_THUNDER=OFF", "-DCMAKE_Swift_NUM_THREADS=1", "-DUSE_LIBBACKTRACE="):
                         self.assertEqual(c.cmake.count(flag), 1, "%s states %s as well as the default" % (name, flag))
 
     def test_no_xcode_config_gets_them(self):

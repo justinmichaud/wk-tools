@@ -14,7 +14,7 @@ JavaScriptCore with Xcode instead: there is no JSCOnly port there.
 RELWITHDEBINFO = ('-DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O3 -g -DNDEBUG"'
                   ' -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -g -DNDEBUG" -DDEBUG_FISSION=ON')
 DEFAULT_ARGS = "--no-fatal-warnings"
-DEFAULT_CMAKE = "-DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF"
+DEFAULT_CMAKE = "-DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF -DCMAKE_Swift_NUM_THREADS=1"   # else one ninja job runs a swift-frontend per core (measured: nine at 1.7 GB in gtk-debug)
 LIBCXX_CMAKE = ("-DCMAKE_CXX_FLAGS=-stdlib=libc++ -DCMAKE_EXE_LINKER_FLAGS=-stdlib=libc++"
                 " -DCMAKE_SHARED_LINKER_FLAGS=-stdlib=libc++ -DCMAKE_MODULE_LINKER_FLAGS=-stdlib=libc++")
 LIBBACKTRACE = {"container": "ON", "vm": "ON", "local": "ON", "remote": "OFF"}   # buildbox4 has no libbacktrace package
@@ -175,7 +175,6 @@ def resolve_or_die(name, driver):
 
 
 def resolve(name, os_name, kind, env):
-    """LookupError for a name that is none; a refusal (`Refused`) for one this place cannot build."""
     if name not in PRESETS:
         raise LookupError(name)
     spec = PRESETS[name]
