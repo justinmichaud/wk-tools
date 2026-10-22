@@ -17,12 +17,12 @@ from tests.support import REPO, as_dispatched, load_cmd
 from tests.test_doctor_wall import _Wall
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, decl, places, wall  # noqa: E402
+from wk import act, ai, decl, places, wall  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
-AI = load_cmd("ai")
+CMD, AI = load_cmd("ai"), ai
 WK = os.path.join(AI.ROOT, "wk")
 
 
@@ -95,7 +95,7 @@ class _Flow(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             try:
-                status = AI.main(as_dispatched("ai", list(argv)), None, env=self.env, reg=self.reg)
+                status = CMD.main(as_dispatched("ai", list(argv)), None, env=self.env, reg=self.reg)
             except Refused as e:
                 status = e.status
         os.environ.pop("WK_FORCE", None)
@@ -285,7 +285,7 @@ class TestWhatIsWkTheAgentNever(_Flow):
         for argv, said in (((), "'wk ai' needs one of: claude, pi"),
                            (("gpt", "demo"), "unknown verb: gpt (one of claude, pi)")):
             with self.subTest(argv=argv), self.assertRaises(decl.Usage) as e:
-                decl.parse("ai", AI.COMMAND, list(argv))
+                decl.parse("ai", CMD.COMMAND, list(argv))
             self.assertEqual(said, str(e.exception))
 
     def test_an_invalid_name_is_refused(self):

@@ -357,7 +357,7 @@ ROWS = {
     "gc": Row(gc.GcTest, lambda c: gc.rubble_world(c.tmp), gc_run, gc.World.state, gc_mutations),
     "pr checkout": Row(unittest.TestCase, lambda c: prw.checkout_world(),
                        lambda c, w: quiet(pr.checkout, w.driver, w, "ws", "alice:eng/x"), prw.checkout_state, pr_mutations),
-    "pr rebase": Row(unittest.TestCase, lambda c: prw.rebase_world(), lambda c, w: quiet(prw.CMD_PR_MODULE.pr_rebase, w.driver, "ws"),
+    "pr rebase": Row(unittest.TestCase, lambda c: prw.rebase_world(), lambda c, w: quiet(pr.pr_rebase, w.driver, "ws"),
                      lambda w: dict(w.local), pr_mutations),
     "pr open": Row(unittest.TestCase, lambda c: prw.GitWorld(), pr_open, lambda w: (set(w.pushed), any(e[0] == "exec" for e in w.effects)), pr_mutations),
     "pr open from a box": Row(unittest.TestCase, lambda c: prw.box_world(), lambda c, w: prw.box_push(w), prw.box_state),

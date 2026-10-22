@@ -1,10 +1,19 @@
-"""A PR head taken into a checkout, and a branch pointed at its fork: git argv through a place's exec."""
+"""A PR head taken into a checkout, and a branch pointed at its fork, rebased, or opened as a pull request: git argv
+through a place's exec."""
 
 import re
+import shlex
 
-from wk import act, git
+from wk import act, git, images, places, pushgate, secrets, sync
 from wk.act import die, info, log, warn
+from wk.clock import Clock
+from wk.lock import Lock
+from wk.machine import Local
+from wk.places import show
+from wk.store import Store
+from wk.workspace import require_name
 
+ROOT = images.root()
 DIGITS = re.compile(r"^[0-9]+$")
 PLANNED_COMMIT = "0" * 40
 PUSH_REFS = "refs/wk/push/"
@@ -236,3 +245,120 @@ def resolved_or_planned(machine, mirror, dest, what, fetch):
         return PLANNED_COMMIT
     fetch()
     return mirror_rev(machine, mirror, dest)
+
+
+def pr_open_target(src, run=lambda argv: Local().run(argv)):
+    """(base-repo, "<owner>:<branch>", fork-remote, branch) for the checkout at `src`."""
+    def ask(*args):
+        r = run(["git", "-C", str(src)] + list(args))
+        return r.rc, r.out.strip()
+
+    rc, branch = ask("symbolic-ref", "--quiet", "--short", "HEAD")
+    if rc != 0 or not branch:
+        die("'wk pr open' needs a branch checked out, not a detached HEAD")
+    if branch == "main":
+        die("'wk pr open' cannot open 'main' as a pull request -- create a branch first")
+    if ask("status", "--porcelain")[1]:
+        die("the tree has uncommitted changes -- commit or stash them: git -C %s status" % src)
+    rc, up = ask("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
+    if rc != 0 or not up:
+        die("'%s' has no upstream, so 'wk pr open' cannot tell which project it belongs to -- "
+            "track one first: git branch -u origin/main (WebKit) or wpe/main (WPEWebKit)" % branch)
+    # Not `git remote get-url`: through the mirror's insteadOf every remote reads as the mirror, and both projects as one.
+    up_url = ask("config", "--get", "remote.%s.url" % up.split("/", 1)[0])[1]
+    up_repo = git.repo_of(up_url)
+    push_forks = secrets.forks()
+    # The project's upstream, not the fork `wk pr` leaves a branch tracking: a PR against that is one against yourself.
+    fork = next((r for r, repo, _ in push_forks if git.repo_of(repo) == up_repo), None)
+    if not fork:
+        die("'%s' tracks '%s' (%s), not a known upstream (origin or wpe) -- "
+            "'wk pr open' only knows WebKit and WPEWebKit" % (branch, up, up_url))
+    rc, url = ask("config", "--get", "remote.%s.url" % fork)
+    if rc != 0 or not url:
+        die("no '%s' remote here -- 'wk sync --fix' wires it" % fork)
+    owner = re.search(r"[:/]([^/]+)/[^/]+$", re.sub(r"\.git$", "", url))
+    forks = {r for r, _, _ in push_forks}
+    base = next((re.sub(r"^https://github\.com/|\.git$", "", u) for n, u in git.REMOTES
+                 if n not in forks and u.endswith("/%s.git" % up_repo)), "")
+    if not base:
+        die("no upstream among the wired remotes for the project '%s', so there is nothing to open '%s' against"
+            % (up_repo, branch))
+    return base, "%s:%s" % (owner.group(1) if owner else "", branch), fork, branch
+
+
+def pr_rebase(driver, name):
+    src, mirror = driver.src(name), driver.mirror_dir()
+    info("fetching in '%s' from the mirror, then rebasing onto origin/main" % name)
+    if mirror and driver.exec(name, ["test", "-d", mirror]).ok:
+        r = driver.act_exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", mirror,
+                                   "+refs/heads/*:refs/remotes/origin/*"])
+    else:
+        r = driver.act_exec(name, ["git", "-C", src, "fetch", "--prune", "--quiet", "origin"])
+    if r.ok:
+        r = driver.act_exec(name, ["git", "-C", src, "rebase", "origin/main"])
+    if r.ok:
+        info("'%s' is rebased onto origin/main" % name)
+        r = driver.exec(name, ["git", "-C", src, "--no-pager", "log", "--oneline", "-1"])
+        log("  %s" % r.out.replace("\r", "").strip())
+        return 0
+    show(r)
+    warn("the rebase stopped -- almost always a conflict, and the sequencer holds where.")
+    log("  in the workspace:  git status; git rebase --continue   (or --abort)")
+    return 1
+
+
+def pr_open(driver, name, draft, web):
+    src = driver.src(name)
+    info("reading '%s's branch and remotes" % name)
+    base, head, fork, branch = pr_open_target(src, run=lambda argv: driver.exec(name, argv))
+    info("pushing '%s' to '%s'" % (branch, fork))
+    if driver.kind == "remote" and not driver.is_here() and not driver.peer:
+        r = push_from_here(driver, src, fork, branch)
+    else:
+        r = driver.act_exec(name, ["git", "-C", src, "push", "-u", fork, branch], person=True)
+    show(r)
+    if not r.ok:
+        die("the push to '%s' failed -- see above; a refusal there is the push service's, and names its remedy" % fork)
+    info("opening a pull request: %s <- %s" % (base, head))
+    driver.here.exec(["gh", "pr", "create", "--repo", base, "--head", head, "--fill"]
+                     + (["--draft"] if draft else []) + (["--web"] if web else []))
+
+
+def push_from_here(driver, src, fork, branch):
+    here, store = driver.here, Store(driver.env)
+    sec = secrets.Secrets(ROOT, driver.env, here)
+    key = sec.push_key_path(fork)
+    if not here.exists(key):
+        die("'wk pr open' pushes '%s' from here with the deploy key '%s', and this machine holds none.\n    wk key deploy" % (branch, fork))
+    ref, lock = "%s%s/%s" % (PUSH_REFS, driver.name, branch), Lock(store, here, Clock())
+    repo = next(r for f, r, _ in sec.forks() if f == fork)
+    with lock.held(push_lock(ref)):
+        sync.fetch_into_mirror(here, store, lock, "%s:%s" % (driver.ssh_host(""), src), "refs/heads/" + branch, ref)
+        r = here.act_run(["git", "-C", store.mirror_dir(), "-c", "core.sshCommand=" + shlex.join(pushgate.ssh_prefix(key)), "push",
+                          "git@github.com:%s.git" % repo, "%s:refs/heads/%s" % (ref, branch)])
+        here.act_run(["git", "-C", store.mirror_dir(), "update-ref", "-d", ref])
+    return r
+
+
+def _load(reg, name, usage):
+    if not name:
+        die("usage: %s; see wk pr -h" % usage)
+    require_name(name)
+    return reg.present(name)
+
+
+def main(name, words, draft, web):
+    """`wk pr`'s verbs: `words` is the dispatcher's positionals, the verb first."""
+    verb = words[0]
+    reg = places.Registry(ROOT)
+    if verb == "rebase":
+        return pr_rebase(_load(reg, name, "wk pr rebase [<workspace>]; run inside a workspace, or name one"), name)
+    if verb == "open":
+        return pr_open(_load(reg, name, "wk pr open <workspace> [--draft] [--web]"), name, draft, web)
+    spec = words[1]
+    if not name:
+        die("'wk pr %s' does not say which workspace to check it out into.\n"
+            "    Name one:        wk pr <workspace> %s   ('wk ls' lists them)\n"
+            "    or run it in one: wk pr %s" % (spec, spec, spec))
+    checkout(_load(reg, name, ""), reg.machine, name, spec)
+    return 0

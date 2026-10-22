@@ -13,7 +13,7 @@ from tests.fakes import FlowTest
 from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import record  # noqa: E402
+from wk import places, record, stop  # noqa: E402
 from wk.act import Refused  # noqa: E402
 
 STOP = load_cmd("stop")
@@ -120,7 +120,6 @@ class TestEveryMachine(unittest.TestCase):
 
     def test_each_machine_answers_for_itself(self):
         from wk import fleet
-        stop = load_cmd("stop")
         reg = mock.Mock(machines=lambda: ["box", "here", "far"])
         answers = [fleet.Answer("box", None, "answering", 1, "build ws -- left\n", ""), fleet.Answer("here", None, "none", None, "", ""),
                    fleet.Answer("far", None, "unreachable", None, "", "unreachable over ssh")]
@@ -167,10 +166,9 @@ class TestStopWorkspace(unittest.TestCase):
             return self.driver
 
     def test_each_kind_is_stopped_by_its_driver_alone(self):
-        stop = load_cmd("stop")
         for kind in ("container", "vm", "remote"):
             with self.subTest(kind=kind):
                 t = self.Driver(kind)
-                with mock.patch.object(stop.places, "Registry", lambda root: self.Reg(t)), mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
-                    self.assertEqual(0, stop.main(as_dispatched("stop", []), None))
+                with mock.patch.object(places, "Registry", lambda root: self.Reg(t)), mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
+                    self.assertEqual(0, STOP.main(as_dispatched("stop", []), None))
                 self.assertEqual([("stop", "ws")], t.calls)

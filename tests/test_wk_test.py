@@ -14,7 +14,7 @@ from tests.fakes import FakeProc, FlowTest, JobWorld
 from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import job, record  # noqa: E402
+from wk import job, record, testcmd  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result  # noqa: E402
 
@@ -173,7 +173,7 @@ class TestInterrupted(TestTest):
 
         def begin(recs, *a, **kw):
             t = real(recs, *a, **kw)
-            t.set("pid_match", CMD.PID_MATCH)
+            t.set("pid_match", testcmd.PID_MATCH)
             t.pid(777)
             t.set("where", "place")
             return t
@@ -199,7 +199,7 @@ class TestLayoutPathCheck(unittest.TestCase):
                     return Result(rc, "", "unreachable")
                 cp = subprocess.run(argv, capture_output=True, text=True)
                 return Result(cp.returncode, cp.stdout, cp.stderr)
-            return CMD.missing_layout_paths(runner, src, paths)
+            return testcmd.missing_layout_paths(runner, src, paths)
 
     def test_every_missing_path_is_named_and_a_query_is_not_part_of_one(self):
         self.assertEqual(self.missing(["fast/gone-a.html", "fast/a.html?variant=1", "fast/gone-b.html"],

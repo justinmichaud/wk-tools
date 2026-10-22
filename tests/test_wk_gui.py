@@ -10,7 +10,7 @@ from unittest import mock
 from tests.support import REPO, as_dispatched, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import presets  # noqa: E402
+from wk import gui, places, presets  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
@@ -48,7 +48,7 @@ class TestRefusesARemotePlace(unittest.TestCase):
     def test_a_remote_target_is_refused_before_anything_else(self):
         """`unit gui.refuses_remote`"""
         driver = _driver(kind="remote")
-        with mock.patch.object(GUI.places, "Registry", return_value=_registry(driver)), \
+        with mock.patch.object(places, "Registry", return_value=_registry(driver)), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
             err = _refused(self, lambda: GUI.main(as_dispatched("gui", []), None))
         self.assertIn("remote place", err)
@@ -61,10 +61,10 @@ class TestRefusesARemotePlace(unittest.TestCase):
         reg = _registry(driver)
         reg.machine = Fake()
         err = io.StringIO()
-        with mock.patch.object(GUI.places, "Registry", return_value=reg), \
+        with mock.patch.object(places, "Registry", return_value=reg), \
                 mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
-                mock.patch.object(GUI, "is_macos", return_value=False), \
-                mock.patch.object(GUI, "session_env", return_value=""), \
+                mock.patch.object(gui, "is_macos", return_value=False), \
+                mock.patch.object(gui, "session_env", return_value=""), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release", "WK_DRY_RUN": "1"}), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
             GUI.main(as_dispatched("gui", []), None)
@@ -75,15 +75,15 @@ class TestRefusesARemotePlace(unittest.TestCase):
 class TestJscOnlyAndMissingBrowserRefusals(unittest.TestCase):
     def test_a_jsc_only_config_is_refused(self):
         driver = _driver()
-        with mock.patch.object(GUI.places, "Registry", return_value=_registry(driver)), \
+        with mock.patch.object(places, "Registry", return_value=_registry(driver)), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "jsc-release"}):
             _refused(self, lambda: GUI.main(as_dispatched("gui", []), None))
 
     def test_no_minibrowser_built_is_refused_naming_the_build_command(self):
         driver = _driver()
         driver.exec.return_value = mock.Mock(ok=False)
-        with mock.patch.object(GUI.places, "Registry", return_value=_registry(driver)), \
-                mock.patch.object(GUI, "is_macos", return_value=False), \
+        with mock.patch.object(places, "Registry", return_value=_registry(driver)), \
+                mock.patch.object(gui, "is_macos", return_value=False), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release"}):
             err = _refused(self, lambda: GUI.main(as_dispatched("gui", []), None))
         self.assertIn("wk build ws gtk-release", err)
@@ -92,8 +92,8 @@ class TestJscOnlyAndMissingBrowserRefusals(unittest.TestCase):
 class TestMacosContainerHasNoDisplay(unittest.TestCase):
     def test_a_container_target_on_a_macos_host_is_refused(self):
         driver = _driver(kind="container")
-        with mock.patch.object(GUI.places, "Registry", return_value=_registry(driver)), \
-                mock.patch.object(GUI, "is_macos", return_value=True), \
+        with mock.patch.object(places, "Registry", return_value=_registry(driver)), \
+                mock.patch.object(gui, "is_macos", return_value=True), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release"}):
             _refused(self, lambda: GUI.main(as_dispatched("gui", []), None))
         driver.exec_argv.assert_not_called()
@@ -107,13 +107,13 @@ class TestFullscreenFlagByPort(unittest.TestCase):
         for name, os_name, kind, want in cases:
             with self.subTest(config=name):
                 preset = presets.resolve(name, os_name, kind, {})
-                self.assertEqual(GUI.fullscreen_flag(preset), want)
+                self.assertEqual(gui.fullscreen_flag(preset), want)
 
     def test_a_config_with_no_browser_is_refused(self):
         preset = presets.resolve("ios-sim-release", "macos", "vm", {})
         with self.assertRaises(Refused):
             with contextlib.redirect_stderr(io.StringIO()):
-                GUI.fullscreen_flag(preset)
+                gui.fullscreen_flag(preset)
 
 
 if __name__ == "__main__":

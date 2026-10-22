@@ -13,7 +13,7 @@ import time
 import unittest
 
 from tests.fakes import Fake, FakeClock, FlowTest, WsDriver
-from tests.support import REPO, glob_bait, load_cmd
+from tests.support import REPO, glob_bait
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, build, job, record  # noqa: E402
@@ -247,7 +247,7 @@ class TestThePatternsCoverEveryShapeTheJobTakes(unittest.TestCase):
             self.assertFalse(job.match_any(args, build.PID_MATCH), args)
 
     def test_a_test_runs_suite_matches_and_another_shell_does_not(self):
-        mod = load_cmd("test")
+        from wk import testcmd as mod
         self.assertTrue(job.match_any('bash -lc echo "wk: test pid $$" >&2 cd /src/WebKit && nice -n 10 '
                                       'Tools/Scripts/run-javascriptcore-tests --release wpe', mod.PID_MATCH))
         self.assertTrue(job.match_any("bash -lc cd /src/WebKit && Tools/Scripts/run-webkit-tests --release", mod.PID_MATCH))
