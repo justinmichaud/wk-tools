@@ -9,7 +9,7 @@ import sys
 from wk import act, places, project, secrets, sudo
 from wk.act import die, info, log, warn
 from wk.kv import kv
-from wk.machine_cmd.deps import Deps, inputs_hash, probe
+from wk.machine_cmd.deps import inputs_hash, probe
 
 CONFS = {
     "build": "# %(name)s -- a shared build machine, reached through the ssh entry of the same name.\n"
@@ -64,7 +64,7 @@ class BuildMachines:
         return 0
 
     def check_build(self, name, t, host):
-        """The probe's findings and a shared home: a refusal changes nothing."""
+        """The probe and a shared home: a refusal changes nothing."""
         info("probing %s" % host)
         text = probe(t, self.root)
         if not text:
@@ -72,17 +72,6 @@ class BuildMachines:
         p = kv(text)
         log("  %s: %s, %s, %s cores" % (p.get("host", "?"), p.get("os", "?"), p.get("arch", "?"), p.get("cores", "?")))
         log("  root: %s   jobs: derived per build from what is free" % t.root_there())
-        stop = False
-        for state, what, remedy in Deps(self.root, self.env, self.here).findings(text):
-            if state in ("required", "wanted"):
-                warn(what)
-                stop = stop or state == "required"
-            else:
-                log("  " + what + ("\n      " + remedy if remedy else ""))
-        if stop:
-            die("%s is missing something a build cannot start without.\n"
-                "    Run the root command above (or send it to the machine's administrators),\n"
-                "    then re-run 'wk machine setup %s'. Nothing has been changed." % (host, name))
         if re.search(r"home *(dir|directory)?.*shared", t._sh(MOTD).out, re.I) and not t.conf_root:
             die("this machine says its home directory is shared with other boxes. Each needs a root of its\n"
                 "    own, or they share one set of workspaces, key dirs and locks, and one build tree\n"

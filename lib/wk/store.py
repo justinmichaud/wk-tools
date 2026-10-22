@@ -181,8 +181,6 @@ class Store:
     def keyring_push_dir(self):
         return os.path.join(os.path.dirname(self.keyring_dir()), "push-keys")
 
-    def keyring_ntfy_topic(self):
-        return os.path.join(os.path.dirname(self.keyring_dir()), "notify", "ntfy-topic")
 
     def is_local(self):
         """Whether this process can write the store; on a macOS host the default one is the podman VM's."""

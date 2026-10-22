@@ -195,8 +195,8 @@ wk sync                        # the WebKit mirror and the snapshot; then wk new
 ```
 
 `wk doctor` names what is missing and the command that fixes it. It also
-checks every machine it reaches against this tree: git identity and speed
-settings, the wk-tools commit, the provisioning hash.
+checks every machine it reaches against this tree: the wk-tools commit and the
+provisioning hash.
 
 After the first whole `./setup`, a person never runs it again. It records the
 tree it converged on and the boot it ran in, and any `wk` command that changes
@@ -876,7 +876,6 @@ check out the pin; moving it is a new `SDK_PIN`.
 - `WK_MAC_BENCH_SSH` the ssh destination of the Mac's bench install, over the conf's `bench_ssh`.
 - `WK_MAC_BENCH_TOOLS` where the wk-tools checkout is on the Mac's bench install.
 - `WK_QUIESCE_STATE` the directory quiesce records live in (default `~/.local/state/wk/quiesce`).
-- `WK_NTFY_API` the ntfy server notifications are published to (default `https://ntfy.sh`).
 - `WK_SCREEN_WATCH_SECONDS` how often the screen watch samples (default 10).
 - `WK_STORE_DEFAULT` the machine's own store when it differs from `WK_STORE`; its secrets live under it.
 - `WK_TAILNET_API` the tailnet API endpoint.

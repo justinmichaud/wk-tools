@@ -1,8 +1,8 @@
 """the machines in machines/: set one up, remove it, list them, find one
 
   setup <name> [--kind build|peer]
-           a build machine: probe it (remote/deps.sh), push wk-tools, provision it (remote/provision.sh), place the
-           agent credentials and run WebKit's install-dependencies; nothing changes until the probe passes. A peer:
+           a build machine: probe it (remote/probe.sh), push wk-tools, provision it (remote/provision.sh), place the
+           agent credentials and run WebKit's install-dependencies; nothing changes until the probe answers. A peer:
            check its own wk answers. A name with no machines/<name>.conf needs --kind, which writes the conf.
   rm <name>
            a build machine, once no workspace is left on it: the wk-tools lines in its shell rc files, its

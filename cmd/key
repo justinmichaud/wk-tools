@@ -14,11 +14,10 @@
                       litellm           the API key `wk ai pi` reaches your LiteLLM endpoint with
                       tailnet           the fleet's tailnet auth key, seeded onto every card written here
                       tailnet-api       the tailnet API token that retires a stale fleet node
-                      ntfy              the ntfy.sh topic notifications go to; minted here
   wk key deploy [--rotate]  the deploy keys alone, as `setup` does them, registered on GitHub with write access
   wk key check      what every credential here and on each other workstation can do, asked now, and what needs doing
                     under `needs you:`. What a bare `wk key` runs
-  wk key show       the public halves, and the ntfy topic URL for a phone
+  wk key show       the public halves
   wk key ensure     create missing push keys without registering them
   wk key sudo [status|setup] [--on <machine>|--all]
                     root costs a password with a 30-second window, through /etc/sudoers.d/zz-<user>-passwd. `status`

@@ -266,11 +266,6 @@ class TestSetup(MachineTest):
                 self.assertIn("root=", err)
                 self.assertEqual([r for r in self.runs(w) if r[0] == "env"], [])
 
-    def test_a_missing_required_tool_stops_it_before_any_change(self):
-        w, err = self.verb(1, "setup", "box", "build", deps=DEPS_PROBE.replace("tool.git=/usr/bin/git", "tool.git="))
-        self.assertIn("sudo apt-get update && sudo apt-get install -y git", err)
-        self.assertEqual([e for e in w.fake.effects if e[0] != "run" or e[1][0] not in ("sh", "bash", "git", "python3", "id")], [])
-
     def test_the_machine_is_probed_once_and_provisioning_is_handed_the_inputs_hash(self):
         w, _ = self.verb(0, "setup", "box", conf=BUILD)
         self.assertEqual(1, len([r for r in self.runs(w) if r[:2] == ("sh", "-c") and r[2] == places.PROBE_SCRIPT]))

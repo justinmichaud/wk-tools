@@ -59,8 +59,7 @@ def build_doctor():
 
 def deps(**over):
     """lib/wk/machine_cmd/deps.py's build-machine questions, answered with nothing unless the test says otherwise."""
-    return mock.patch.multiple(doctor.machine_deps, **dict(dict(probe=lambda driver, root: "", stale=lambda driver, root: None,
-                                                               findings=lambda root, probe, env=None, here=None: []), **over))
+    return mock.patch.multiple(doctor.machine_deps, **dict(dict(probe=lambda driver, root: "", stale=lambda driver, root: None), **over))
 
 
 def text_of(rows):
@@ -487,20 +486,17 @@ class TestAMachineThatDoesNotAnswer(unittest.TestCase):
             rows = list(build_doctor().build_machine("farbox"))
         self.assertEqual([(UNK, "farbox did not answer", "ssh farbox true  -- then re-run; nothing was changed")], rows)
 
-    def test_a_build_machine_that_answers_gets_the_drivers_findings_and_its_provisioning_age(self):
+    def test_a_build_machine_that_answers_gets_its_provisioning_age(self):
         with deps(probe=lambda t, root: "family=debian\n",
-                  findings=lambda root, probe, env=None, here=None: [("ok", "git (/usr/bin/git)", ""), ("required", "ninja", "apt install ninja"), ("note", "cores: 4", "")],
                   stale=lambda t, root: "remote/provision.sh or remote/deps.sh has changed since it ran"):
             rows = list(build_doctor().build_machine("box"))
-        self.assertEqual([(OK, "git (/usr/bin/git)", ""), (MISS, "ninja", "apt install ninja"), (UNK, "cores: 4", ""),
-                          (MISS, "provisioning on box predates its inputs: remote/provision.sh or remote/deps.sh has changed since it ran",
+        self.assertEqual([(MISS, "provisioning on box predates its inputs: remote/provision.sh or remote/deps.sh has changed since it ran",
                            "wk machine setup box")], rows)
 
-    def test_a_missing_remedy_names_the_setup_command(self):
-        with deps(probe=lambda t, root: "family=debian\n", findings=lambda root, probe, env=None, here=None: [("wanted", "ccache", "")]):
+    def test_a_build_machine_provisioned_from_this_tree_is_ok(self):
+        with deps(probe=lambda t, root: "family=debian\n"):
             rows = list(build_doctor().build_machine("box"))
-        self.assertEqual((MISS, "ccache", "see 'wk machine setup box'"), rows[0])
-        self.assertEqual((OK, "provisioned from this tree's remote/provision.sh + remote/deps.sh", ""), rows[1])
+        self.assertEqual([(OK, "provisioned from this tree's remote/provision.sh + remote/deps.sh", "")], rows)
 
 
 class TestRootAccess(unittest.TestCase):

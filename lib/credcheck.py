@@ -370,17 +370,6 @@ def _claude_login_mint():
         here.remove_now(d)
 
 
-def _ntfy_mint():
-    from wk import notify
-    return notify.mint()
-
-
-def _ntfy_topic(value, repos, path, evidence):
-    from wk import notify
-    code, detail = notify.check(value.strip())
-    return {0: OK, 3: WIDE, 6: UNVERIFIED}.get(code, BAD), detail
-
-
 def _row(name, check, url="", store_with=None, **kw):
     return name, Rule(url=url, store_with=store_with or "wk key set " + name, check=check, **kw)
 
@@ -424,11 +413,6 @@ def rules():
         _row("deploy-key", _deploy_key, store_with="wk key deploy", needs="push to exactly one fork",
              forbids="reach any other repository, or be read-only", what="an ed25519 key per fork, generated here and never pasted",
              remedy="wk key deploy  (it registers with read_only=false)"),
-        _row("ntfy", _ntfy_topic, "https://ntfy.sh/", mint=_ntfy_mint, needs="publish a notification a person sees",
-             forbids="be a name someone could arrive at by guessing: the topic is the whole credential, so anyone holding it "
-                     "reads every notification and can send one",
-             what="the ntfy.sh topic this machine's notifications go to, so the fleet can tell you it wants you",
-             remedy="subscribe ntfy's iOS or Android app to that topic URL"),
     ))
 
 

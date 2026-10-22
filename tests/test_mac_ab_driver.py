@@ -94,13 +94,12 @@ class PlantGuest(Shell, FakeGuest):
 
 
 def here_fake():
-    """This machine: its own digest of the tree, a cached samply, and a notifier that is told what went out."""
+    """This machine: its own digest of the tree, a cached samply."""
     here = Fake("here")
     here.answer(["hostname", "-s"], out="moose\n")
     here.answer(["python3"], out=DIGEST + "\n")
     here.answer(["sh", "-c", 'wc -c < "$1"'], out="42\n")
     here.answer(["test", "-x"])   # samply.fetch finds it in the cache
-    here.notified = []
     return here
 
 
@@ -144,10 +143,7 @@ def world(kind="mac-volume", env=None, **o):
         opts = dict({"devices": "mbp" if kind == "mac-volume" else "benchvm", "systems": "sid-a,sid-b", "workspace": "mac-rel"}, **o)
         m = mac_ab.Plant(tree, reg, clock, "", opts, cli.Bench(tree, reg, clock), driver=lambda root, c: driver)
         m.fake, m.here_fake, m.manager_fake, m.store, m.clock_ = fake, here, manager, store["path"], clock
-        def sent(root, headline, *a, **k):
-            here.notified.append(headline)
-            return not getattr(here, "notify_fails", False)
-        with mock.patch.dict(os.environ, {"WK_YES": "1"}), mock.patch("wk.notify.send", side_effect=sent), \
+        with mock.patch.dict(os.environ, {"WK_YES": "1"}), \
                 mock.patch("wk.sysimage.mactailnet.Tailnet.collect", return_value=str(tree / "lib")):
             os.environ.pop("WK_DRY_RUN", None)
             os.environ.pop("WK_FORCE", None)
@@ -415,7 +411,6 @@ class TestTheWholeTrip(WkTest):
             self.assertEqual(rc, 0, err)
             self.assertEqual([v for v in m.fake.priv_asked() if v == "reboot"], ["reboot"])
             self.assertEqual(m.fake.running, "bench")
-            self.assertEqual(len(m.here_fake.notified), 1, "the plant, and nothing about a run that is going as asked")
         self.assertIn("answers in BENCH mode", err)
 
     def test_the_display_is_asked_again_before_the_restart_and_force_does_not_cross_it(self):
@@ -470,22 +465,6 @@ class TestTheWaitReadsBothNodes(WkTest):
             self.assertEqual(got, "silent")
             self.assertLessEqual(sum(m.clock_.slept), 45 + 600 + 20 + 40)
         self.assertIn("neither node", err)
-
-
-class TestAFailedNotifyCostsNothing(WkTest):
-    def test_a_failing_notify_warns_and_carries_on(self):
-        with world() as m:
-            m.here_fake.notify_fails = True
-            got, err = said(m.notify, "a headline", "a detail")
-        self.assertIsNone(got)
-        self.assertIn("could not send the notification 'a headline'", err)
-
-    def test_the_ways_back_are_notified_and_silence_is_not(self):
-        with world() as m:
-            ready(m)
-            for came in ("host", "noreboot", "silent", "bench"):
-                said(m.outcome, came)
-            self.assertEqual(len(m.here_fake.notified), 2)
 
 
 class TestTheArmsAreBuiltInTheWorkspace(WkTest):
