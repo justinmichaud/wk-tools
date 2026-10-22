@@ -257,7 +257,6 @@ class Wall:
 
     def push_refused(self):
         tools = self.driver.tools(self.ws)
-        # macOS gives every login session its own keyless ssh-agent (measured in a guest: launchd loads it again after a disable), so what is judged is the identities
         agent = self.inside('test -S /run/wk/ssh-agent.sock && echo agent; [ -n "${SSH_AUTH_SOCK:-}" ] && { ssh-add -l >/dev/null 2>&1 && echo env-keys || echo env; }').split()
         rows = [miss("an ssh-agent reaches this workspace (%s)" % " ".join(agent), "no key may: nothing but the push service holds one")
                 if "agent" in agent or "env-keys" in agent else
