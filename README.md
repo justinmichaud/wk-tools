@@ -681,11 +681,12 @@ sends any other to the reading socket, where a write is refused with 412 and a
 read is unchanged. A push service that does not answer is a no. A bridge dies
 with its command, so a process left behind reaches nothing, and it serves only
 that command's own process tree -- a person's bridge none with an agent
-between, since the proxy would take its writes for that person's. A command run
-under sudo keeps the bridge's variables and the CA bundle's through sudo's
-`env_reset` (`/etc/sudoers.d/wk-egress`, rendered by `lib/wk/sudo.py` and
-installed by the first run after `visudo -c` takes it), so a plain
-`sudo apt-get install <pkg>` reaches the proxy as the person's command does.
+between, since the proxy would take its writes for that person's. A bridge
+refuses a client whose socket it cannot read, which is root's, so a plain
+`sudo <command>` runs the command under a root bridge of its own: the
+workspace's `sudo` (`container/bin/ws/sudo`, ahead of `/usr/bin` through
+`shell/path.sh`) is the wall under that name, and puts
+`container/proxy/ensure-bridge.sh` between sudo's options and the command.
 
 **Housekeeping**
 

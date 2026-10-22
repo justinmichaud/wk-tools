@@ -10,12 +10,26 @@ log()  { printf '[firstrun] %s\n' "$*"; }
 warn() { printf '[firstrun] warning: %s\n' "$*" >&2; }
 
 # Every fetch below goes through a bridge of this run's own, with the injector's CA and GITHUB_COM_* in the environment.
-[ "${1:-}" = --bridged ] || exec "$WK_TOOLS/container/proxy/ensure-bridge.sh" "$0" --bridged
+# The marker lib/wk/places.py's Local reads is written first, so the bridge exec's shell/path.sh puts container/bin/ws --
+# `sudo`, which gives root a bridge of its own -- ahead of /usr/bin for every sudo here. arch= is recorded because the
+# kernel is the host's: `uname -m` in an armhf container answers aarch64.
+if [ "${1:-}" != --bridged ]; then
+    if [ -n "${WK_WORKSPACE:-}" ]; then
+        cat > "$HOME/.wk-workspace" <<EOF
+# wk: this machine IS a workspace. Written by container/firstrun.sh.
+name=$WK_WORKSPACE
+src=$SRC
+repo=$WK_REPO
+arch=${WK_ARCH:-native}
+EOF
+        log "workspace marker written ($HOME/.wk-workspace)"
+    else
+        warn "WK_WORKSPACE is not set -- no workspace marker, so 'wk build' in here
+         will not find this workspace. Recreate with a current wk."
+    fi
+    exec "$WK_TOOLS/container/proxy/ensure-bridge.sh" "$0" --bridged
+fi
 [ -S /run/wk/proxy.sock ] || log "WARNING: no egress proxy socket at /run/wk/proxy.sock -- no network"
-
-# root keeps this bridge and its CA bundle across sudo's env_reset (lib/wk/sudo.py), so `sudo apt-get` reaches the proxy.
-PYTHONPATH="$WK_TOOLS/lib" python3 -m wk.sudo workspace \
-    || warn "the sudoers drop-in was not installed (above) -- 'sudo apt-get' in here has no network"
 
 if [ -S /run/wk/broker.sock ]; then
     log "fleet-request broker present -- 'wk boot' / 'wk bench' become requests"
@@ -232,22 +246,6 @@ grep -qF 'wk-tools/shell/bashrc' "$HOME/.bashrc" 2>/dev/null || \
 [ -f "$HOME/.bash_profile" ] || printf '%s\n' \
     '# wk: login shells read this, interactive non-login shells read .bashrc.' \
     '[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"' > "$HOME/.bash_profile"
-
-# The marker lib/wk/places.py's Local reads. arch= is recorded because the kernel is the
-# host's: `uname -m` in an armhf container answers aarch64.
-if [ -n "${WK_WORKSPACE:-}" ]; then
-    cat > "$HOME/.wk-workspace" <<EOF
-# wk: this machine IS a workspace. Written by container/firstrun.sh.
-name=$WK_WORKSPACE
-src=$SRC
-repo=$WK_REPO
-arch=${WK_ARCH:-native}
-EOF
-    log "workspace marker written ($HOME/.wk-workspace)"
-else
-    warn "WK_WORKSPACE is not set -- no workspace marker, so 'wk build' in here
-         will not find this workspace. Recreate with a current wk."
-fi
 
 : > "$HOME/.wk-ready"                   # what `wk new` waits for
 

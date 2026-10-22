@@ -1,11 +1,6 @@
 """`wk key sudo` (lib/wk/sudo.py, cmd/key) against Fake sudo and visudo answers."""
 
-import os
-import re
-import shutil
-import subprocess
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
@@ -161,66 +156,6 @@ class TestSetup(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual([e for e in f.effects if e[0] != "run"], [], "no write, install or removal at all")
         self.assertFalse(any(e[0] == "run" and e[1][:2] == ("sudo", "install") for e in f.effects))
-
-
-class TestTheWorkspaceDropIn(unittest.TestCase):
-    """The drop-in container/firstrun.sh installs through `python3 -m wk.sudo workspace`: one rendered text, every variable
-    ensure-bridge.sh exports kept, installed by the same validated path as `wk key sudo setup`'s."""
-    FIRSTRUN = (REPO / "container" / "firstrun.sh").read_text()
-
-    def test_the_rendered_text_keeps_every_bridge_variable(self):
-        text = sudo.workspace_dropin()
-        self.assertEqual(text, "# Installed by container/firstrun.sh (lib/wk/sudo.py). Do not edit; 'wk rm' and 'wk new' remake the workspace.\n"
-                               "Defaults env_keep += \"http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY REQUESTS_CA_BUNDLE "
-                               "CURL_CA_BUNDLE GIT_SSL_CAINFO SSL_CERT_FILE SSL_CERT_DIR NODE_EXTRA_CA_CERTS\"\n")
-        bridge = (REPO / "container" / "proxy" / "ensure-bridge.sh").read_text()
-        for var in sudo.WS_KEEP:
-            self.assertIn(var, bridge, "%s is kept but ensure-bridge.sh never exports it" % var)
-
-    @unittest.skipUnless(shutil.which("visudo"), "no visudo on this machine")
-    def test_visudo_takes_the_rendered_text(self):
-        with tempfile.NamedTemporaryFile("w", suffix=".sudoers", delete=False) as f:
-            f.write(sudo.workspace_dropin())
-        self.addCleanup(os.unlink, f.name)
-        cp = subprocess.run(["visudo", "-c", "-f", f.name], capture_output=True, text=True, timeout=30)
-        self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-
-    def test_the_install_validates_then_installs_root_owned_then_validates_sudoers(self):
-        f = fakes.World()
-        f.answer(HAVE + ("visudo",))
-        for prefix in (["visudo", "-c", "-f"], ["sudo", "install"], ["sudo", "visudo", "-c"]):
-            f.answer(prefix, 0)
-        self.assertEqual(0, sudo.workspace_setup(f))
-        runs = [e[1] for e in f.effects if e[0] == "run"]
-        check, install, recheck = [a for a in runs if a[:1] in (("visudo",), ("sudo",))]
-        tmp = check[3]
-        self.assertEqual(check, ("visudo", "-c", "-f", tmp))
-        self.assertEqual(install, ("sudo", "install", "-m", "0440", "-o", "root", "-g", "root", tmp, "/etc/sudoers.d/wk-egress"))
-        self.assertEqual(recheck, ("sudo", "visudo", "-c"))
-        self.assertEqual([("write", tmp), ("remove", tmp)], [e for e in f.effects if e[0] in ("write", "remove")])
-        self.assertNotIn(tmp, f.files)
-
-    def test_a_text_visudo_refuses_is_never_installed(self):
-        f = fakes.World()
-        f.answer(HAVE + ("visudo",))
-        f.answer(["visudo", "-c", "-f"], 1, "", "syntax error")
-        with self.assertRaises(Refused):
-            sudo.workspace_setup(f)
-        self.assertFalse(any(e[0] == "run" and e[1][:2] == ("sudo", "install") for e in f.effects))
-
-    def test_firstrun_installs_it_before_its_first_sudo_and_names_no_bridge_under_sudo(self):
-        text = self.FIRSTRUN
-        self.assertLess(text.index("python3 -m wk.sudo workspace"), re.search(r"(?m)^\s*(if |&& )?sudo apt-get ", text).start())
-        self.assertNotIn("sudo \"$WK_TOOLS/container/proxy/ensure-bridge.sh\"", text)
-        self.assertNotIn("sudo $WK_TOOLS/container/proxy/ensure-bridge.sh", text)
-
-    def test_the_module_entry_runs_the_install_and_a_refusal_is_its_status(self):
-        with mock.patch.object(sudo, "workspace_setup", return_value=0) as setup:
-            self.assertEqual(0, sudo.cli(["workspace"]))
-        self.assertTrue(setup.called)
-        self.assertEqual(2, sudo.cli(["bogus"]))
-        with mock.patch.object(sudo, "workspace_setup", side_effect=Refused(3)):
-            self.assertEqual(3, sudo.cli(["workspace"]))
 
 
 def registry(drivers=None, machine=None):

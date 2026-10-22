@@ -1222,7 +1222,7 @@ class TestTheBridgeFindsItsClient(unittest.TestCase):
         self.holds(77, "999")
         why = self.m.refusal(self.LOCAL, self.PEER, 500, "demo")
         self.assertIn("no process this bridge can read holds the connection from port %d" % self.PEER, why)
-        self.assertIn("sudo /opt/wk-tools/container/proxy/ensure-bridge.sh <command>", why)
+        self.assertIn("a root process gets a bridge of its own through the workspace's `sudo`", why)
 
 
 class TestTheContainerEnvironment(unittest.TestCase):

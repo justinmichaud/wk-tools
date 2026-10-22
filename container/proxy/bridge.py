@@ -57,8 +57,8 @@ def refusal(local, peer, command, ws):
     inode = client_inode(local, peer)
     pids = holders(inode) if inode else []
     if not pids:
-        return ("no process this bridge can read holds the connection from port %d; one of another user, as under sudo, is given a bridge "
-                "of its own:  sudo /opt/wk-tools/container/proxy/ensure-bridge.sh <command>" % peer)
+        return ("no process this bridge can read holds the connection from port %d; a root process gets a bridge of its own "
+                "through the workspace's `sudo` (container/bin/ws/sudo)" % peer)
     for pid in pids:
         try:
             pushgate.bridged(ancestry, pid, command, ws)
