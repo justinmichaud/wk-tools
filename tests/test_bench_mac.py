@@ -322,9 +322,10 @@ class TestTheProfile(MacTest):
     def test_a_warmup_leg_profiles_its_web_process_beside_the_task(self):
         self.w.answer(["test", "-x", self.samply(self.w.reg.store.cache_dir())])
         self.w.answer(["pgrep", "-n", "-f", project.get("MAC_WEB_PROCESS")], out="321\n")
-        rc, err = self.staged(warmup="1", arm="a")
+        rc, err = self.staged(warmup="1", arm="a", round="0")
         self.assertEqual(rc, 0, err)
-        self.assertEqual(self.w.env_json()["profiler"], "samply")
+        self.assertEqual((self.w.env_json()["profiler"], self.w.env_json()["warmup_kind"]), ("samply", "evidence"))
+        self.assertEqual(brecord.task_runs(str(Path(self.w.home, "results", self.w.results()[0].split("/")[0]))), [])
         (cap,) = [e[1] for e in self.w.effects if e[0] == "act" and "record" in e[1]]
         self.assertTrue(cap[cap.index("-o") + 1].endswith("/warmup/mbp-a.profile.json"), cap)
 

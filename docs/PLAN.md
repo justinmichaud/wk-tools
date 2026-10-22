@@ -653,8 +653,8 @@ exist.
 
    5.10 **The bench record and report; `cmd/bench` goes Python.** *Landed*
      (`lib/wk/bench/`; `lib/wk/status.py` imports `wk.bench.record`
-     directly). Owed: the report does not yet label an instrumented leg's
-     time (env.json's `profile` field means two things).
+     directly). A settle or warmup leg is marked so in its env.json from
+     its first write, and the report labels a warmup leg's time.
    - Closes: `unit bench.one_record[container]`, `unit
      bench.report_and_cost` (the report half), `unit bench.seed_from_mirror`,
      `live bench.compare` (`tests/test_bench_container_run.py`).

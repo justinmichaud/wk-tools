@@ -129,7 +129,7 @@ def run_state(env, has_result):
     return "failed" if "wall_time_s" in env else "running"
 
 
-def task_runs(taskdir, machine=None):
+def task_runs(taskdir, machine=None, warmup=False):
     m = machine or Local()
     if not m.isdir(os.path.join(taskdir, "runs")):
         return []
@@ -138,7 +138,7 @@ def task_runs(taskdir, machine=None):
     for name in sorted({k.split("/")[0] for k in files}):
         pre = name + "/"
         env = json.loads(files[pre + "env.json"]) if pre + "env.json" in files else {}
-        if not env or env.get("warmup"):
+        if not env or bool(env.get("warmup")) != warmup:
             continue
         runs.append({"id": name, "dir": os.path.join(taskdir, "runs", name), "env": env,
                      "state": run_state(env, bool(files.get(pre + "result.json")))})

@@ -21,9 +21,9 @@ from tests.test_bench_report import in_process  # noqa: E402
 from tests.test_bench_task import refusal  # noqa: E402
 from tests import fakes
 from tests.test_bench_pipeline import PLAN_JSON, RESULT, SHA, CleanTest, SystemConformance, registry as pipeline_registry, invoke  # noqa: E402
-from wk import images, pgo, project, record, samply  # noqa: E402
+from wk import images, job, pgo, project, record, samply  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.bench import ab, board, cli, plans, record as brecord  # noqa: E402
+from wk.bench import ab, board, cli, plans, record as brecord, report  # noqa: E402
 from wk.bench.pipeline import Run  # noqa: E402
 from wk.boot import cli as bootcli  # noqa: E402
 from wk.boot.driver import Driver, Onboard, part  # noqa: E402
@@ -636,14 +636,16 @@ class TestALegForAnAB(BoardTest):
         brecord.task_write(str(taskdir), kv(["task=t1", "requested=x", "devices=" + BOARD, "plans=jetstream3", "rounds=2", "slots=a,b"]), ["wk bench run --ab"])
         return taskdir
 
-    def test_a_leg_lands_in_the_task_it_names_with_its_round_and_arm_and_a_settle_leg_is_recorded_as_one(self):
+    def test_a_leg_lands_in_the_task_it_names_with_its_round_and_arm_and_a_settle_leg_killed_mid_run_is_still_one(self):
+        """`unit bench.report_and_cost`: no stray settle directory reads as a measured leg, so it is no cost either."""
         w = self.world()
-        self.task(w)
-        self.assertEqual(w.leg(slot="a", task="t1", round="1", arm="b", slot_a="a", slot_b="b", settle="1"), 0, w.err)
+        taskdir = str(self.task(w))
+        with mock.patch.object(job, "watch", side_effect=job.Interrupted(15)):
+            self.assertEqual(w.leg(slot="a", task="t1", round="1", arm="b", slot_a="a", slot_b="b", settle="1"), 143, w.err)
         self.assertTrue(w.run_dir().name.endswith("-settle"))
         env = w.env_json()
         self.assertEqual((env["task"], env["ab"]), ("t1", {"round": "1", "arm": "b", "slot_a": "a", "slot_b": "b"}))
-        self.assertEqual((env["warmup"], env["warmup_kind"]), (True, "settle"))
+        self.assertEqual((env["warmup"], env["warmup_kind"], brecord.task_runs(taskdir)), (True, "settle", []))
         self.assertEqual(w.tasks(), ["t1"])
         (t,) = w.recs().list()
         self.assertEqual((t.field("name"), t.field("kill")), ("ws", "wk bench run ws --kill --system " + BOARD))
@@ -681,10 +683,11 @@ class TestALegForAnAB(BoardTest):
     def test_no_warmup_profile_stages_nothing(self):
         w = self.world()
         self.task(w)
-        self.assertEqual(w.leg(slot="a", task="t1", arm="a", warmup="1", no_warmup_profile="1"), 0, w.err)
+        self.assertEqual(w.leg(slot="a", task="t1", round="0", arm="a", warmup="1", no_warmup_profile="1"), 0, w.err)
         self.assertFalse([e for e in w.effects if e[0] == "run" and "samply" in " ".join(e[1])])
         self.assertEqual(w.exports["WK_BOARD_PROFILE"], "")
         self.assertEqual(w.env_json()["profiler"], "none")
+        self.assertEqual(report.instrumented_lines([{"env": w.env_json()}], BOARD), ["A: the leg took 62s, not measured: no profiler ran"])
 
 
 class TestTheRunnerTree(BoardTest):
@@ -769,6 +772,8 @@ class TestASlotAB(ABTest):
         self.assertGreaterEqual(len(probes), 6, "and rechecked every leg")
         self.assertEqual(len({e["runner_sha"] for e in w.runs()}), 1)
         self.assertEqual(len([e for e in w.effects if e[0] == "run" and e[1][:2] == ("git", "-C")]), 1, "the runner was resolved per leg")
+        said = in_process(report.task_report, str(w.bench_dir() / w.tasks()[-1]), False).stdout
+        self.assertIn("  A: the leg took 62s, instrumented under samply, not a measured time\n", said)
 
     def test_a_restart_names_itself_and_runs_only_the_rounds_the_task_lacks(self):
         w = self.ab_world()

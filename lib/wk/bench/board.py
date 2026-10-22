@@ -527,8 +527,6 @@ class Board(System):
         leg.machine.write(os.path.join(out, "board.log"), m.run(["tail", "-n", "300", "/tmp/messages"]).out)
         n, fields = slot_verified(os.path.join(out, "verify.jsonl")), {}
         fields["verified"] = bool(n)
-        if leg.o.get("settle") or leg.o.get("warmup"):
-            fields.update(warmup=True, warmup_kind="settle" if leg.o.get("settle") else "evidence")
         if leg.o.get("warmup"):
             fields.update({"profiler": self.profiler or self.unmeasured or "none", "host.perf_event_paranoid": self.paranoid})
         record.write_env(os.path.join(out, "env.json"), fields, update=True, machine=leg.machine)

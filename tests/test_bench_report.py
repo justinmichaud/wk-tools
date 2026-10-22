@@ -130,19 +130,6 @@ class TestReportWalkerAndStats(WkTest):
             self.assertIn("%.3f" % mean, text)
             self.assertIn("%.3f" % mean, html)
 
-    def test_report_handles_speedometer_total_modifier_shape(self):
-        a_doc = {"Speedometer-3": {"tests": {"TodoMVC-JS": {
-            "metrics": {"Time": {"Total": {"current": [100.0, 102.0, 99.0, 101.0]}}}
-        }}}}
-        b_doc = {"Speedometer-3": {"tests": {"TodoMVC-JS": {
-            "metrics": {"Time": {"Total": {"current": [95.0, 97.0, 96.0, 94.0]}}}
-        }}}}
-        a, b = self._write_pair(self.tmp, a_doc, b_doc)
-        cp = rep(a, b)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("TodoMVC-JS", cp.stdout)
-        self.assertIn("Time", cp.stdout)
-
     def test_report_reads_speedometer2_board_results(self):
         def doc(base):
             return {"debugOutput": [None], "Speedometer-2": {

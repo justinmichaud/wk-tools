@@ -355,6 +355,14 @@ def warmup_lines(evidence):
     return lines
 
 
+def instrumented_lines(runs, device):
+    """A warmup leg runs under its profiler, so its time is the instrumented process's and is labelled as no measurement."""
+    warm = [r["env"] for r in runs if r["env"].get("warmup_kind") == "evidence" and (r["env"].get("machine") or r["env"].get("workspace")) == device]
+    return ["%s: the leg took %ss, %s" % ((e.get("ab") or {}).get("arm", "?").upper(), e["wall_time_s"], "instrumented under %s, not a measured time" % e["profiler"]
+            if e.get("profiler") not in (None, "", "none") and not e["profiler"].startswith(record.UNMEASURED) else "not measured: no profiler ran")
+            for e in warm if "wall_time_s" in e]
+
+
 def _bytes_label(n):
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -483,7 +491,7 @@ def task_report(taskdir, running, html=False, text=False, out=None, shown=None):
             out.write("no round has both arms yet; nothing to compare\n")
             continue
         report = build_report(a_dirs, b_dirs, header=lines + [""] + header,
-                              warmup=warmup_lines(warmup_load(taskdir, device)))
+                              warmup=warmup_lines(warmup_load(taskdir, device)) + instrumented_lines(record.task_runs(taskdir, warmup=True), device))
         if html:
             path = os.path.join(taskdir, "report-%s-%s.html" % (device, plan))   # taskdir is the caller's staged copy
             Local().write_own(path, render_html(report, title="%s: %s on %s" % (name, plan, device)))

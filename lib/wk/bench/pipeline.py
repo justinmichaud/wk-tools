@@ -117,7 +117,8 @@ class Run:
         fields = {"plan": leg.plan, "task": leg.task, "count": leg.count, "class": leg.klass, "runner": leg.runner, "arch": leg.arch,
                   "bench_host": s.bench_host, "local_copy": leg.payload, "preflight_notes": leg.notes, "cores.set": leg.cores,
                   "cores.pinned": bool(leg.cores), "software_reason": leg.software_reason, "software": leg.software,
-                  "forced": bool(act.forced(self.env)), "subtests_excluded": o.get("excluded", "")}
+                  "forced": bool(act.forced(self.env)), "subtests_excluded": o.get("excluded", ""),
+                  **({"warmup": True, "warmup_kind": "settle" if o.get("settle") else "evidence"} if o.get("settle") or o.get("warmup") else {})}
         fields.update(ab_fields(o), **({"arm_args": shlex.join(leg.args)} if o.get("round") else {}))
         fields.update(configuration_fields(self.env))
         fields.update(s.env_fields(leg))
