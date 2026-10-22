@@ -22,7 +22,7 @@ def parse(args):
     paths = list(args.positionals)
     lldb = args.flag("--lldb") and (paths.pop(0) if paths and paths[0] in ("ui", "web") else "web")
     return {"suite": "layout" if args.flag("--layout") else "jsc", "gpu": args.flag("--gpu"),
-            "kill": args.flag("--kill"), "lldb": lldb, "pass": paths + args.tail}
+            "kill": args.flag("--kill"), "lldb": lldb, "paths": paths, "pass": paths + args.tail, "tail": args.tail}
 
 
 def main(args, inv, reg=None, clock=None):

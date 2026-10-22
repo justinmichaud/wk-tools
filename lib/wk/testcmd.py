@@ -34,6 +34,11 @@ def size_and_admit(reg, driver, name, preset, recs):
     return budget, jobs, mbpj
 
 
+def jsc_filter(paths):
+    names = [re.escape(p[len("JSTests/"):] if p.startswith("JSTests/") else p) for p in paths]
+    return ["--filter", "^(%s)(\\..*)?$" % "|".join(names)] if names else []
+
+
 def build_cmd(suite, src, out_env, render_env, wrap, lower, port, jobs, debug_flags, pass_args):
     if suite == "jsc":
         envs, runner, flags = (out_env, wrap), "run-javascriptcore-tests", "--no-fail-fast --memory-limited"
@@ -107,7 +112,8 @@ def main(name, opts, reg=None, clock=None):
 
     info("JSC tests (%s, -j%d)" % (preset_name, jobs) if opts["suite"] == "jsc"
          else "layout tests (%s, %s, %d processes)" % (preset_name, render_desc, jobs))
-    cmd = build_cmd(opts["suite"], src, out_env, render_env, wrap, preset.type.lower(), preset.port, jobs, debug_flags, opts["pass"])
+    passed = opts["pass"] if opts["suite"] == "layout" else jsc_filter(opts["paths"]) + opts["tail"]
+    cmd = build_cmd(opts["suite"], src, out_env, render_env, wrap, preset.type.lower(), preset.port, jobs, debug_flags, passed)
 
     if dry_run():
         log("dry run -- nothing was run.")

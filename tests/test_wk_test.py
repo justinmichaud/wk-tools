@@ -65,6 +65,14 @@ class TestDryRun(TestTest):
         self.assertIn("run-javascriptcore-tests", err)
         self.assertEqual([], [e for e in self.w.effects if e[0] == "watch"])
 
+    def test_a_path_given_to_the_jsc_suite_is_the_runners_filter(self):
+        os.environ["WK_DRY_RUN"] = "1"
+        rc, err = self.run_(None, "JSTests/stress/arith-add.js", "stress/add.js")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("--filter", err)
+        self.assertIn("stress/arith\\-add\\.js|stress/add\\.js)(\\..*)?$", err)
+        self.assertNotIn("JSTests/stress/arith-add.js", err.split("--filter")[1])
+
     def test_layout_on_a_jsc_only_config_is_refused(self):
         err = self.refused(None, "--layout", status=1)
         self.assertIn("wk test ws --layout --preset gtk-release-asan", err)
