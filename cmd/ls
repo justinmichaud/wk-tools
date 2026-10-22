@@ -1,4 +1,4 @@
-"""workspaces, what they are pinned to, and what they cost on disk
+"""workspaces and what they cost on disk
 
 One line per workspace, on every place this machine knows:
 
@@ -7,7 +7,6 @@ One line per workspace, on every place this machine knows:
   STATE     the environment's own word: running, exited, present, creating
   BASE      the upstream WebKit line it is built from: main, a release like 2.52, an image workspace's image preset,
             or `?` when unknown; the repo, for one that is not WebKit (`wk new --repo`)
-  SNAP      the snapshot its checkout is pinned to (`wk help`)
   ARCH      what it builds natively; blank when that is the host's own
   CHANGES   disk its own writes take -- the overlay layer, reclaimed by `wk gc`
 
@@ -22,14 +21,13 @@ from wk import fleet, images, places, record
 from wk.act import die, log, warn
 from wk.decl import Command, Opt
 from wk.machine import Local
-from wk.store import Snapshots
 
 ROOT = images.root()
 COMMAND = Command(forward=False, readonly=True, group="workspaces", opts=(
     Opt("--json", "one JSON document ({\"workspaces\": [...]}), the table's columns lower-cased; nothing else on stdout"),))
-FORMAT = "%-20s %-18s %-10s %-8s %-20s %-8s %8s"
+FORMAT = "%-20s %-18s %-10s %-8s %-8s %8s"
 NOT_APPLICABLE = "n/a"
-FIELDS = ("name", "place", "state", "base", "snap", "arch", "changes")
+FIELDS = ("name", "place", "state", "base", "arch", "changes")
 
 def base_of(driver, ws):
     repo = driver.repo(ws)
@@ -49,10 +47,9 @@ def row(driver, ws, label):
     state = driver.display_state(ws)
     inside = driver.kind == "local"
     base = NOT_APPLICABLE if inside else base_of(driver, ws)
-    snap = driver.store.ws_snapshot_id(ws) or "-"
     size = NOT_APPLICABLE if inside else changes_of(driver, ws)
     arch = driver.arch(ws)
-    return dict(zip(FIELDS, (ws, col(label, driver.name), state, base, snap, arch, size)))
+    return dict(zip(FIELDS, (ws, col(label, driver.name), state, base, arch, size)))
 
 
 def rows_of(answer, label):
@@ -73,27 +70,6 @@ def rows_of(answer, label):
         return []
 
 
-def footer(reg, names):
-    multi = len(names) > 1
-    spaced = False
-    for name in names:
-        try:
-            driver = reg.load(name)
-        except LookupError:
-            continue
-        if not driver.needs_base:
-            continue
-        if not spaced:
-            print()
-            spaced = True
-        prefix = "%s: " % name if multi else ""
-        bases = Snapshots(driver.store, driver.store_machine)
-        log("%scurrent base: %s" % (prefix, bases.current() or "none"))
-        unref = len(bases.unreferenced())
-        if unref > 0:
-            log("%s%s unreferenced snapshot(s) reclaimable with 'wk gc'" % (prefix, unref))
-
-
 def main(args, inv):
     as_json = args.flag("--json")
     label = record.row_label(os.environ)
@@ -111,7 +87,5 @@ def main(args, inv):
             log("(no workspaces here -- from the workstation: wk new <name> --on %s)" % reg.self_place())
         else:
             log("(no workspaces -- 'wk new <name>' to create one)")
-    if not label:   # another machine's store is not the reader's to act on
-        footer(reg, [a.name for a in answers if a.side in ("none", "no-wk")])
     return 0
 
