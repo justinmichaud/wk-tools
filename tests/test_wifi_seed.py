@@ -183,8 +183,8 @@ class Channel:
     def __init__(self, **answers):
         self.answers, self.calls, self.channel = answers, [], "host"
 
-    def call(self, fn, *args, input=None, mutates=False):
-        self.calls.append((fn,) + args)
+    def card(self, *args, input=None, mutates=False):
+        self.calls.append(("card_priv",) + args)
         return Result(*self.answers.get(args[0], (0, "")))
 
 

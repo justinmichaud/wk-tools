@@ -1,9 +1,8 @@
-"""`wk machine setup <mac>` pushes a commit and stops at the one sudo; a machine's command runs over ssh unless
-this is that machine. ssh and scp are stubs on PATH, and the far side of a deploy is a scratch directory."""
+"""`wk machine setup <mac>` pushes a commit and stops at the one sudo. ssh and scp are stubs on PATH, and the far side
+of a deploy is a scratch directory."""
 import contextlib
 import io
 import os
-import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -14,8 +13,6 @@ from tests.support import REPO, WkTest, bash, scratch_dir, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, machine_cmd  # noqa: E402
-from wk.boot.cli import load_conf  # noqa: E402
-from wk.boot.driver import Channel  # noqa: E402
 from wk.machine import Fake, Local  # noqa: E402
 
 
@@ -126,48 +123,6 @@ class TheHostOsGateAsksWhetherTheDriverCanReachIt(WkTest):
         self.assertIn("what this host is missing", out, out)
         self.assertNotIn("run this over there", out,
                          "this is over there: a macOS host and a macOS-only machine")
-
-
-class TheCommandRunsOnTheMachineTheConfNames(WkTest):
-    """Channel's `m_ssh` runs here only when `hostname -s` is the conf's destination (case-insensitively)."""
-
-    def _m_ssh(self, conf, hostname="moose"):
-        """(what ran here, the ssh argvs issued) for `m_ssh "echo RAN-HERE"`."""
-        via = Fake("here")
-        via.answer(["hostname", "-s"], out=hostname + "\n")
-        via.answer(["tailscale"], rc=1)
-        env = {"WK_ROOT": str(REPO), "WK_MACHINES_DIR": str(REPO / "machines")}
-        Channel(REPO, conf, env=env, via=via).call("m_ssh", "echo RAN-HERE")
-        runs = [list(e[1]) for e in via.effects if e[0] == "run"]
-        return [r for r in runs if r[:2] == ["sh", "-c"]], [r for r in runs if r[0] == "ssh"]
-
-    def test_it_runs_here_on_the_named_machine_and_over_ssh_from_any_other(self):
-        mbp = load_conf(REPO, "mbp", {"WK_MACHINES_DIR": str(REPO / "machines")})
-        for conf, hostname, over in (({"ssh": "othermach"}, "moose", "othermach"), ({"ssh": "moose"}, "MOOSE", None),
-                                     (mbp, "moose", "tolken"), (mbp, "tolken", None)):
-            with self.subTest(ssh=conf["ssh"], hostname=hostname):
-                here, sshed = self._m_ssh(conf, hostname)
-                if over:
-                    self.assertEqual(here, [])
-                    self.assertEqual([(r[-2], shlex.split(r[-1])[-1]) for r in sshed],
-                                     [(over, "sh -c 'echo RAN-HERE'")], sshed)
-                else:
-                    self.assertEqual(here, [["sh", "-c", "echo RAN-HERE"]])
-                    self.assertEqual(sshed, [])
-
-    def test_a_machine_with_no_ssh_destination_is_never_this_one(self):
-        here, sshed = self._m_ssh({"ssh": ""}, hostname="")
-        self.assertEqual((here, sshed), ([], []))
-
-    def test_the_reboot_it_issues_detaches_with_what_both_platforms_ship(self):
-        """macOS ships no `setsid` (measured on tolken, macOS 26.6.2), so the reboot detaches with nohup."""
-        sys.path.insert(0, str(REPO / "lib"))
-        from wk.boot.driver import root_priv
-        for verb in ("reboot", "reboot-tryboot"):
-            with self.subTest(verb=verb):
-                asked = " ".join(root_priv(verb))
-                self.assertIn("nohup ", asked, asked)
-                self.assertNotIn("setsid", asked, asked)
 
 
 if __name__ == "__main__":

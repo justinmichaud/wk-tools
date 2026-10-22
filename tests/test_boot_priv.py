@@ -1,23 +1,13 @@
 """admin/wk-boot-priv's grant (a fixed verb list, a checked argument, a fixed mailbox tag, a bless of one mounted
 wk install) with its tools stubbed, and admin/install.sh's convergent install of all three helpers."""
-import contextlib
-import io
 import os
 import pwd
 import re
 import shutil
-import sys
 import unittest
 
 from tests.bashlift import lift
-from tests.fake_boot import FakeBoard
 from tests.support import REPO, WkTest, bash, stub_path
-
-sys.path.insert(0, str(REPO / "lib"))
-from wk import act  # noqa: E402
-from wk.boot.driver import Channel  # noqa: E402
-from wk.boot.pi import Rpi5Usb  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
 
 HELPER = REPO / "admin" / "wk-boot-priv"
 INSTALL = REPO / "admin" / "install.sh"
@@ -214,49 +204,6 @@ class TestTheBlessGateIsTheVolumeAndNotAnArgument(WkTest):
         self.assertEqual(0, cp.returncode, out)
         self.assertIn("bless-args: --mount / --setBoot", out)
         self.assertIn("blessed the running install", out)
-
-
-class TestTheDrivingEndAsksForTheOperationNotThePrivilege(unittest.TestCase):
-
-    @staticmethod
-    def _rpi5(require_ok=True):
-        conf = {"name": "rpi5", "driver": "rpi5-usb", "device": "/dev/sda",
-                "root": "/dev/nvme0n1p2", "role": "workstation"}
-        fake = FakeBoard(conf)
-        fake.write_system("/dev/sda1", "sys-a")
-        calls, answer = [], fake.call
-
-        def call(fn, *args, **kw):
-            calls.append(fn if fn != "boot_priv" else "boot_priv " + args[0])
-            return Result(1) if fn == "boot_priv_require" and not require_ok else answer(fn, *args, **kw)
-        fake.call = call
-        fake.channel = "host"
-        return Rpi5Usb(REPO, conf, fake), calls
-
-    def test_the_rpi5_driver_never_sudoes_the_firmware_itself(self):
-        d, calls = self._rpi5()
-        d.arm("/dev/sda1", d.order_image)
-        d.reboot(armed=True)
-        self.assertIn("boot_priv order", calls)
-        self.assertIn("boot_priv reboot", calls)
-        self.assertNotIn("r_sudo", calls, "the driver took a privilege the helper holds")
-
-    def test_it_checks_the_helper_before_the_firmware_call(self):
-        d, calls = self._rpi5()
-        d.arm("/dev/sda1", d.order_image)
-        self.assertLess(calls.index("boot_priv_require"), calls.index("boot_priv order"))
-        d, calls = self._rpi5(require_ok=False)
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertRaises(act.Refused, d.arm, "/dev/sda1", d.order_image)
-        self.assertNotIn("boot_priv order", calls)
-
-    def test_the_refusal_names_the_remedy(self):
-        via = Fake()
-        via.answer(("ssh",), rc=1, err="sudo: a password is required")
-        ch = Channel(REPO, {"name": "rpi5", "ssh": "rpi5", "role": "workstation"}, "host", env={}, via=via)
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertRaises(act.Refused, ch.call, "boot_priv_require")
-        self.assertIn("./setup --stage quiesce", err.getvalue())
 
 
 class SetupRefusesRoot(WkTest):

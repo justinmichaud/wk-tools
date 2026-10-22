@@ -3,14 +3,14 @@
 from wk import act
 from wk.boot.driver import Driver, disk_of, part, partno
 from wk.kv import kv
+from wk.sudo import BOOT_PRIV
 
 
 class PiSd(Driver):
     """One SD card holds every system (rescue on partitions 1-2); the firmware boots the first FAT partition only, so arming is an `os_prefix=` line in the rescue's config.txt."""
 
     name = "pi-sd"
-    arming = "medium"
-    arm_from_bench = True
+    arm_from_bench = on_medium = True
     system_parts = (3, 5, 7)
     failsafe = "pisd-self-disarm.sh"
 
@@ -26,34 +26,33 @@ class PiSd(Driver):
         act.die("'%s' is not a bench system's boot partition on %s" % (p, self.c("device")))
 
     def state(self, addr):
-        r = self.card("second-state", addr)
+        r = self.ch.card("second-state", addr)
         return r.out.replace("\r", "") if r.ok else None
 
-    def arm(self, p, order=""):
+    def arm_sequence(self, p, image):
         slot = self.slot(p)
-        addr = "%s@%s" % (self.c("device"), slot)
+        return [self.record_step(image), ("os_prefix    the rescue's config.txt boots the %s system next" % slot, lambda: self.arm(slot)),
+                self.reboot_step(image)]
+
+    def arm(self, slot):
+        name, addr = self.c("name"), "%s@%s" % (self.c("device"), slot)
         state = self.state(addr)
         if state is None:
-            act.die("could not read %s's arming on %s: its rescue has to be up and carry the card helper."
-                    % (self.c("device"), self.c("name")))
+            act.die("could not read %s's arming on %s: its rescue has to be up and carry the card helper." % (self.c("device"), name))
         if "present=yes" not in state:
             act.die("%s on %s holds no bench system at %s.\n    Write one first:  wk sysimage write --from <path> --disk <reader>:%s"
-                    % (self.c("device"), self.c("name"), slot, addr))
+                    % (self.c("device"), name, slot, addr))
         if "armed_prefix=%s" % slot in state:
-            act.debug("%s is already armed for %s" % (self.c("name"), slot))
-            return 0
-        if not self.card("second-arm", addr, mutates=True).ok:
-            act.die("could not arm the %s system on %s" % (slot, self.c("name")))
+            return
+        if not self.ch.card("second-arm", addr, mutates=True).ok:
+            act.die("could not arm the %s system on %s" % (slot, name))
         if "armed_prefix=%s" % slot not in (self.state(addr) or ""):
-            act.die("%s on %s is not armed for the %s system after being told to." % (self.c("device"), self.c("name"), slot))
-        return 0
+            act.die("%s on %s is not armed for the %s system after being told to." % (self.c("device"), name, slot))
 
-    def disarm(self):
+    def disarm(self, spent=False):
         addr = self.c("device") + "@second"
         state = self.state(addr)
-        if not state or "armed=yes" not in state:
-            return 0
-        if not self.card("second-disarm", addr, mutates=True).ok:
+        if state and "armed=yes" in state and not self.ch.card("second-disarm", addr, mutates=True).ok:
             act.die("could not disarm the bench system on %s" % self.c("name"))
         return 0
 
@@ -86,7 +85,7 @@ class PiTryboot(Driver):
     on the rescue's SD beside a `tryboot.txt` that `reboot "0 tryboot"` makes the firmware read."""
 
     name = "pi-tryboot"
-    arming = "medium"
+    on_medium = True
     system_parts = (1, 3)
     failsafe = "tryboot-self-disarm.sh"
 
@@ -97,9 +96,13 @@ class PiTryboot(Driver):
         return {"WK_SD": self.sd()}
 
     def tryboot(self, do, mutates=False, **params):
-        return self.run("tryboot.sh", mutates=mutates, WK_DO=do, WK_SD=self.sd(), **params)
+        return self.run(self.ob("tryboot.sh", WK_DO=do, WK_SD=self.sd(), **params).argv(), mutates=mutates)
 
-    def arm(self, p, order=""):
+    def arm_sequence(self, p, image):
+        return [self.record_step(image), ("stage        %s's kernel onto the SD's second/ beside tryboot.txt" % p, lambda: self.arm(p)),
+                self.reboot_step(image, tryboot=True)]
+
+    def arm(self, p):
         if not self.tryboot("stage", mutates=True, WK_SRC=p, WK_DTB=self.c("dtb")).ok:
             act.die("could not stage the tryboot files on %s: the board has to answer and read both the SD and %s."
                     % (self.c("name"), self.c("device")))
@@ -108,12 +111,14 @@ class PiTryboot(Driver):
         if not want or staged != want:
             act.die("the staging on %s's SD boots root=%s, not the selected system's root=%s (on %s)"
                     % (self.c("name"), staged or "?", want or "?", p))
-        return 0
 
     def reboot(self, armed=False):
-        return self.reboot_tryboot() if armed else Driver.reboot(self)
+        r = self.ch.reboot(tryboot=armed)
+        if not r.ok:
+            raise act.Refused(r.rc)
+        return 0
 
-    def disarm(self):
+    def disarm(self, spent=False):
         self.tryboot("disarm", mutates=True)
         return 0
 
@@ -160,37 +165,52 @@ class Rpi5Usb(Driver):
     system_parts = (1, 3)
     selects_by_partition = True
 
-    def arm(self, p, order=""):
-        if not self.ch.call("boot_priv_require").ok:
-            raise act.Refused(1)
-        n = partno(p) if p else "1"
+    def arm_sequence(self, p, image):
+        n = partno(p) or "1"
         if n not in ("1", "3"):
             act.die("'%s' is not a boot partition this stick selects between (1 or 3)" % p)
-        self.select_pair(n)
-        r = self.ch.call("boot_priv", "order", order, mutates=True)
+        return [("helper       the boot helper on %s answers" % self.c("name"), self.require_helper), self.record_step(image),
+                ("pair         %s's autoboot.txt selects pair %s" % (self.c("device"), n), lambda: self.select_pair(n)),
+                ("boot order   %s, one-shot; the normal order %s is untouched" % (self.order_image, self.order_normal),
+                 lambda: self.order(self.order_image)),
+                self.reboot_step(image)]
+
+    def require_helper(self):
+        if not self.ch.priv("status").ok:
+            act.die("%s cannot be armed: its boot helper is missing or its sudoers rule is not in force.\n"
+                    "    What fails:  sudo -n %s status\n    The remedy, from a terminal on %s:  ./setup --stage quiesce"
+                    % (self.c("name"), BOOT_PRIV, self.c("name")))
+
+    def order(self, order):
+        r = self.ch.priv("order", order, mutates=True)
         if not r.ok:
             act.die("the firmware mailbox call failed on %s" % self.c("name"))
         words = r.out.split()
         if words[1:2] != ["0x80000000"]:
             act.die("the firmware refused the boot order (%s, wanted 0x80000000)\n    reply: %s"
                     % (words[1] if len(words) > 1 else "", r.out.strip()))
-        act.debug("mailbox reply: %s" % r.out.strip())
-        return 0
 
     def select_pair(self, pair):
         dev, name = self.c("device"), self.c("name")
-        if not self.ch.call("disk_unmount", dev, mutates=True).ok:
-            raise act.Refused(1)
-        if not self.card("autoboot", dev, pair, mutates=True).ok:
+        self.ch.unmount(dev)
+        if not self.ch.card("autoboot", dev, pair, mutates=True).ok:
             act.die("could not write %s's pair selector on %s" % (dev, name))
-        out = self.medium_read(part(dev, 1), "autoboot.txt") or ""
-        if "boot_partition=%s" % pair not in out:
+        if "boot_partition=%s" % pair not in (self.medium_read(part(dev, 1), "autoboot.txt") or ""):
             act.die("%s on %s does not select pair %s after being told to: its card helper is older than the pair argument.\n"
                     "    The remedy, from a terminal on %s:  ./setup --stage quiesce" % (dev, name, pair, name))
 
+    def disarm(self, spent=False):
+        if not spent:
+            self.order(self.order_normal)
+        return 0
+
     def evidence(self):
         # The one-shot order is write-only from userspace, so the EEPROM's persistent order is the only evidence.
-        return self.run("eeprom-order.sh").out.rstrip("\n")
+        for argv in (["vcgencmd", "bootloader_config"], ["rpi-eeprom-config"]):
+            order = kv(self.run(argv).out.replace("\r", "")).get("BOOT_ORDER", "")
+            if order:
+                return "eeprom_boot_order=" + order
+        return ""
 
     def media(self):
         dev, mode = self.c("device"), self.mode

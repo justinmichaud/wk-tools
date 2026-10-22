@@ -1,4 +1,4 @@
-"""Boot drivers: the interface (driver.py), the Pi arrangements (pi.py) and the Macs (mac.py)."""
+"""Boot drivers: the interface and its Channel (driver.py), the Pi arrangements (pi.py) and the Macs (mac.py)."""
 
 
 def drivers():
@@ -11,6 +11,6 @@ def driver_class(name):
     return drivers().get(name, driver.Driver)
 
 
-def open_driver(root, conf, env=None, via=None, channel="none", mode="", name=None):
-    cls = driver_class(conf.get("driver", "") if name is None else name)
-    return cls(root, conf, cls.transport(root, conf, channel, env=env, via=via), mode=mode)
+def open_driver(root, conf, env=None, via=None):
+    cls = driver_class(conf.get("driver", ""))
+    return cls(root, conf, cls.channel(root, conf, env=env, via=via))

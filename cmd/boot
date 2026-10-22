@@ -24,7 +24,7 @@ from wk import images  # noqa: E402
 
 ROOT = images.root()
 
-from wk import act, decl  # noqa: E402
+from wk import act, decl, record  # noqa: E402
 from wk.act import Refused, die  # noqa: E402
 from wk.boot import cli, eeprom, pi  # noqa: E402
 from wk.places import Registry  # noqa: E402
@@ -57,7 +57,11 @@ def main(argv):
     if conf is None:
         die("unknown machine '%s' (wk boot --list)" % name)
     act.terminate_as_interrupt()
-    held = cli.hold(ROOT, name, action, os.environ) if action in ("arm", "back") else None
+    held = None
+    if action in ("arm", "back"):   # the two that move the board out from under whatever is measuring on it
+        records = record.Records(env=os.environ)
+        held = record.hold(records, lambda r: record.fleet_holders(r, records, record.fleet_stores(ROOT, os.environ, records.machine)),
+                           name, "boot", name, "kill %d" % os.getpid(), "", ["%s %s" % (action, name)], os.getpid(), os.environ)
     rc = 1
     try:
         boot = cli.Boot(ROOT, conf, cli.driver_for(ROOT, conf))

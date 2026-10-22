@@ -445,10 +445,13 @@ class Channel:
     def __init__(self, **answers):
         self.answers, self.calls, self.channel = answers, [], "host"
 
-    def call(self, fn, *args, input=None, mutates=False):
-        self.calls.append((fn,) + args)
-        rc, out = self.answers.get(args[0] if fn == "card_priv" else fn, (0, ""))
-        return Result(rc, out)
+    def card(self, *args, input=None, mutates=False):
+        self.calls.append(("card_priv",) + args)
+        return Result(*self.answers.get(args[0], (0, "")))
+
+    def run(self, argv, side=None, input=None, mutates=False):
+        self.calls.append(("m_ssh", argv[-1]))
+        return Result(*self.answers.get("m_ssh", (0, "")))
 
 
 def step(fn, *args, kw=None, **answers):

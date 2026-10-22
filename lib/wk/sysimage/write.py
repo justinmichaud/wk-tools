@@ -209,18 +209,18 @@ class Write:
 
     def attach(self, conf):
         self.conf = conf
-        self.ch = Channel(self.root, conf, "none", env=self.env, via=self.machine)
+        self.ch = Channel(self.root, conf, env=self.env, via=self.machine)
         self.drv = driver_class(conf["driver"])(self.root, conf, self.ch)
         self.disks = disk.Disks(self.ch, conf)
 
     def card(self, *args, input=None, mutates=True):
-        return self.ch.call("card_priv", *args, input=input, mutates=mutates)
+        return self.ch.card(*args, input=input, mutates=mutates)
 
     def piped(self, reader):
         return self.ch.through(Piped(self.machine, reader))
 
     def ssh(self, command, mutates=False):
-        return self.ch.call("m_ssh", command, input="", mutates=mutates)
+        return self.ch.run(["sh", "-c", command], "host", input="", mutates=mutates)
 
     def resolve(self, spec):
         if spec.startswith(("vm:", "/", "./", "../")):
@@ -323,8 +323,7 @@ class Write:
     def unmount(self, dev):
         if self.step("unmount whatever is mounted from %s on %s" % (dev, self.c("name"))):
             return
-        if not self.ch.call("disk_unmount", dev, mutates=True).ok:
-            raise act.Refused(1)
+        self.ch.unmount(dev)
 
     def tailnet_save(self, dev):
         """tailscaled's state, kept aside by the helper and put back after: the new system comes up as the old node."""
@@ -357,7 +356,7 @@ class Write:
                     "(apt spells xz 'xz-utils')." % (name, tool, tool, name))
         act.info("writing to %s on %s (streamed; decompressed there with %s)" % (dev, name, filt))
         far = "exec 3>&1; %s | python3 -c %s | sudo -n %s write %s" % (filt, shlex.quote(METER), CARD_PRIV, shlex.quote(dev))
-        r = self.piped(reader).call("m_ssh", far, mutates=True)
+        r = self.piped(reader).run(["sh", "-c", far], "host", mutates=True)
         if not r.ok:
             size = self.ssh("lsblk -dno SIZE %s" % shlex.quote(base(dev))).out.replace("\r", "").strip()
             act.die("could not write the image onto %s (%s) on %s; it was read through:  %s"
@@ -441,8 +440,7 @@ class Write:
                 self.machine.mkdir(os.path.join(seed, d))
             for rel, text in sorted(staged.items()):
                 self.machine.write(os.path.join(seed, rel), text)
-            r = self.piped(["tar", "-cf", "-", "-C", seed, "systemd", "sysctl.d", "init.d"]).call(
-                "card_priv", "units", dev, mutates=True)
+            r = self.piped(["tar", "-cf", "-", "-C", seed, "systemd", "sysctl.d", "init.d"]).card("units", dev, mutates=True)
         finally:
             self.machine.remove(seed)
         out = said(r)
@@ -659,7 +657,7 @@ class Write:
     def after(self, dev, disk_machine):
         if base(dev) == self.c("device"):
             # A medium-armed machine's arming is firmware the image brings its own copy of, so it would boot it next.
-            if self.drv.arming == "medium":
+            if self.drv.on_medium:
                 self.drv.disarm()
             act.log("  %s is configured to boot from this disk; writing it armed nothing. To boot it once:  wk boot %s"
                     % (disk_machine, disk_machine))
