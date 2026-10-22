@@ -92,7 +92,7 @@ HUES = {"good": ("ok", "present", "running", "done"),
         "idle": ("absent", "stopped", "exited", "-", "clean", "cancelled")}
 ANSI = {"good": "\033[32m", "busy": "\033[33m", "bad": "\033[31m", "idle": "\033[2m", "dim": "\033[2m", "bold": "\033[1m",
         "head": "\033[1;36m"}
-COLUMNS = ("workspace", "state", "branch", "base", "work", "snap", "build")
+COLUMNS = ("workspace", "state", "branch", "base", "work", "build")
 STEP_MARKS = {"done": ("[x]", "good"), "failed": ("[!]", "bad"), "skipped": ("[-]", "dim"), "pending": ("[ ]", "dim")}
 
 
@@ -117,7 +117,7 @@ def ws_cells(ws):
     subs = ws.get("subs") or []
     state = "disagree (%s vs %s)" % tuple(ws["disagree"]) if ws.get("disagree") else ws.get("state", "?")
     return [ws.get("name", "?"), state, branch, ws.get("base") or "?", work or ("clean" if ws.get("ws") == "present" else ""),
-            "-%s" % ws["snap_behind"] if ws.get("snap_behind") else "", sub_text(subs[0]) if subs else ""]
+            sub_text(subs[0]) if subs else ""]
 
 
 def notes(items, indent, colour):

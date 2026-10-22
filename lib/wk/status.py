@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from wk import fleet, git, places, record, statusview
 from wk.clock import Clock
 from wk.kv import ANSI
-from wk.store import Snapshots, dispatch_place
+from wk.store import dispatch_place
 
 ENDED_AS_ASKED = ("ok", "cancelled", "stopped", "refused")
 TASK_EXIT = {"running": 2, "starting": 2, "silent": 2, "died": 4, "unreadable": 4, "unanswered": 4,
@@ -115,7 +115,7 @@ class Walk:
         self.this_machine = record.row_label(self.env) or record.machine_name(self.env)
         self.is_self = record.host_self(self.env) or not record.row_label(self.env)
         self.lock = threading.Lock()
-        self.tasks_said, self.bases, self._loaded = set(), {}, {}
+        self.tasks_said, self._loaded = set(), {}
         self.worst = 0
 
     def places(self):
@@ -190,12 +190,6 @@ class Walk:
         recs, w = self.tasks(records)
         return out + recs, bump(worst, w)
 
-    def current_base(self, driver):
-        with self.lock:
-            if driver.name not in self.bases:
-                self.bases[driver.name] = Snapshots(driver.store, driver.store_machine).current()
-            return self.bases[driver.name]
-
     def workspace(self, driver, gm, ws, records):
         info = driver.info(ws)
         st = driver.state(ws, info=info)
@@ -212,12 +206,6 @@ class Walk:
                 or (probe.get("wsbase") if probe.get("wsbase") != "?" else None))
         if base:
             r["base"] = base
-        snap = driver.store.ws_snapshot_id(ws)
-        if snap:
-            r["snap"] = snap
-            cur = self.current_base(driver)
-            if cur and cur != snap:
-                r["snap_behind"] = len([b for b in Snapshots(driver.store, driver.store_machine).ids() if b > snap])
         new = records.find("new", ws) if st == "creating" else None
         if st == "creating" and new and new.alive(None):
             note(r, "being created right now -- its 'new' task says how far it is")

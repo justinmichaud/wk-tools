@@ -28,7 +28,7 @@ class TestOneTable(unittest.TestCase):
         return out.getvalue(), err.getvalue()
 
     def test_every_answering_place_s_rows_are_merged_and_a_silent_one_named(self):
-        far = {"name": "w1", "place": "box", "state": "present", "base": "main", "snap": "-", "arch": "native", "changes": "1G"}
+        far = {"name": "w1", "place": "box", "state": "present", "base": "main", "arch": "native", "changes": "1G"}
         box = FakeDriver("box", out=json.dumps({"workspaces": [far]}))
         down = FakeDriver("down", side="unreachable", why="timed out")
         out, err = self.listed([box, down], "--json")
@@ -36,7 +36,7 @@ class TestOneTable(unittest.TestCase):
         self.assertEqual(box.asked[0][0], ("ls", "--json"))
         self.assertIn("down: unreachable over ssh: timed out, so its workspaces are not listed", err)
         out, _ = self.listed([box])
-        self.assertEqual(out.splitlines()[1].split(), ["w1", "box", "present", "main", "-", "native", "1G"])
+        self.assertEqual(out.splitlines()[1].split(), ["w1", "box", "present", "main", "native", "1G"])
 
     def test_an_answer_that_is_no_json_is_named(self):
         _, err = self.listed([FakeDriver("box", out="not json")], "--json")
@@ -56,7 +56,7 @@ class TestInsideAWorkspace(unittest.TestCase):
         with fake_workspace() as ws:
             table = self.listed(ws).splitlines()
             doc = json.loads(self.listed(ws, "--json"))
-        self.assertEqual(table[1].split(), ["selftest-ws", "local", "running", "n/a", "-", "native", "n/a"])
+        self.assertEqual(table[1].split(), ["selftest-ws", "local", "running", "n/a", "native", "n/a"])
         (row,) = doc["workspaces"]
         self.assertEqual((row["base"], row["changes"]), ("n/a", "n/a"))
 
