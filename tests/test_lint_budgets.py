@@ -55,7 +55,7 @@ INTERIM = {"dispatcher": (773, 932),
            "sysimage": (3759, 3060),
            "guest": (2221, 3514),
            "cmd": (928, 0),
-           "lint rules": (0, tests),
+           "lint rules": (0, 2072),
            "live bodies": (0, 151),
            "fixtures": (0, 1805)}
 
