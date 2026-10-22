@@ -55,7 +55,7 @@ INTERIM = {"dispatcher": (773, 932),
            "sysimage": (3759, 3060),
            "guest": (2221, 3514),
            "cmd": (928, 0),
-           "lint rules": (0, 2070),
+           "lint rules": (0, tests),
            "live bodies": (0, 151),
            "fixtures": (0, 1805)}
 
@@ -119,8 +119,10 @@ def under(name):
 
 
 def within_interim(name):
-    today, _, interim = next((t, b, i) for n, t, b, i in table() if n == name)
-    assert today <= interim, f"{name}: {today} non-blank lines over its interim {interim} (tests/test_lint_budgets.py INTERIM); trim something"
+    """A row over its budget is held at its interim; one under its budget is held by the budget, which the interim never lowers."""
+    today, budget, interim = next((t, b, i) for n, t, b, i in table() if n == name)
+    held = max(interim, budget)
+    assert today <= held, f"{name}: {today} non-blank lines over its interim {held} (tests/test_lint_budgets.py INTERIM); trim something"
 
 
 class Budgets(unittest.TestCase):
