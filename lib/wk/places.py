@@ -423,8 +423,11 @@ class Driver:
     def egress_filtered(self, ws):
         return False
 
+    agents_cache = agents.HOME_CACHE
+
     def install_agents(self, ws):
-        agents.install(self.root, self.env, self.here, lambda argv: self.act_exec(ws, argv), ws, self.tools(ws), self.src(ws))
+        agents.install(self.root, self.env, self.here, lambda argv: self.act_exec(ws, argv), ws, self.tools(ws), self.src(ws),
+                       self.agents_cache)
 
     def agent_secret_remedy(self, ws, secret):
         return secrets.Secrets(self.root, self.env, self.machine).agent_secret_remedy(secret)
@@ -922,7 +925,8 @@ class Container(Driver):
         return self.machine.run(self.podman() + ["container", "exists", self.ctr(ws)]).ok
 
     store_dirs = ("git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/yocto/sstate", "cache/buildroot/dl",
-                  "cache/buildroot/ccache", "cache/bench", "skills")
+                  "cache/buildroot/ccache", "cache/bench", "cache/agents", "skills")
+    agents_cache = "/cache/agents"
 
     def store_init(self):
         super().store_init()
@@ -976,7 +980,7 @@ class Container(Driver):
         res = Resources(self.machine, self.env, self.os())
         flags = ["--volume", "%s:%s:ro" % (self.tools_src(), TOOLS), "--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws)] + self.checkout_flags(ws, base, repo)
         for sub, dest in (("cache/ccache", "/ccache"), ("cache/yocto", "/cache/yocto"), ("cache/buildroot", "/cache/buildroot"),
-                          ("cache/bench", "/cache/bench"), ("skills", "/skills")):
+                          ("cache/bench", "/cache/bench"), ("cache/agents", "/cache/agents"), ("skills", "/skills")):
             flags += ["--volume", "%s/%s:%s" % (store, sub, dest)]
         flags += ["--volume", "%s:/secrets:ro" % self.store.keyring_view_dir("container"),
                   "--memory", "%dm" % res.envelope_mem_mb(), "--cpus", str(res.envelope_cores())]

@@ -24,10 +24,12 @@ from wk.machine import Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
 LINK = 'mkdir -p "$HOME/.local/bin" && ln -s "$OK_BIN" "$HOME/.local/bin/%s"'
+CLAUDE_INSTALLER = ('v="$1"; mkdir -p "$HOME/.local/share/claude/versions" "$HOME/.local/bin" && cp "$OK_BIN" "$HOME/.local/share/claude/versions/$v" '
+                    '&& ln -s "$HOME/.local/share/claude/versions/$v" "$HOME/.local/bin/claude"')
 STUBS = {
     "curl": ('echo curl >> "$LOG"\nwhile [ "$1" != -o ]; do shift; done\n'
              'if [ -n "$CURL_REFUSES" ]; then echo "$CURL_REFUSES" > "$2"; echo "curl: (22) 401" >&2; exit 22; fi\n'
-             '[ "${CURL_INSTALLS:-1}" = 1 ] && echo \'%s\' > "$2"\nexit 0\n' % (LINK % "claude")),
+             'sleep "${CURL_SLEEP:-0}"\n[ "${CURL_INSTALLS:-1}" = 1 ] && echo \'%s\' > "$2"\nexit 0\n' % CLAUDE_INSTALLER),
     "node": 'case "$1" in -v) echo "$NODE_V" ;; -e) [ "$NODE_OK" = 1 ] ;; esac\n',
     "npm": 'echo "npm $*" >> "$LOG"\n[ "${NPM_OK:-1}" = 1 ] || exit 1\n%s\n' % (LINK % "pi"),
 }
@@ -41,14 +43,14 @@ class TestTheScript(unittest.TestCase):
         self.home, self.bin, self.sys = self.tmp / "home", self.tmp / "bin", self.tmp / "sys"
         for d in (self.home, self.bin, self.sys):
             d.mkdir()
-        for tool in ("bash", "mkdir", "ln", "mktemp", "rm", "head"):
+        for tool in ("bash", "mkdir", "ln", "cp", "mv", "sleep", "rm", "head", "python3"):
             (self.sys / tool).symlink_to(shutil.which(tool))
         self.ok = self.tmp / "ok"
         self.stub(self.ok, "exit 0\n")
         for name, body in STUBS.items():
             self.stub(self.bin / name, body)
         self.env = {"HOME": str(self.home), "PATH": "%s:%s" % (self.bin, self.sys), "LOG": str(self.tmp / "log"),
-                    "OK_BIN": str(self.ok), "NODE_V": "v22.19.0", "NODE_OK": "1"}
+                    "OK_BIN": str(self.ok), "WK_AGENTS_CACHE": str(self.tmp / "cache"), "WK_CLAUDE_VERSION": "9.9.9", "NODE_V": "v22.19.0", "NODE_OK": "1"}
 
     def stub(self, path, body):
         path.write_text("#!/bin/sh\n" + body)
@@ -75,7 +77,52 @@ class TestTheScript(unittest.TestCase):
     def test_pi_goes_into_the_users_own_prefix_without_install_scripts(self):
         self.run_script()
         npm = [l for l in self.log() if l.startswith("npm ")]
-        self.assertEqual(["npm install -g --ignore-scripts --prefix %s/.local @earendil-works/pi-coding-agent" % self.home], npm)
+        self.assertEqual(["npm install -g --ignore-scripts --prefer-offline --prefix %s/.local @earendil-works/pi-coding-agent" % self.home], npm)
+
+    def artifact(self):
+        return self.tmp / "cache" / "claude" / "9.9.9"
+
+    def curls(self):
+        return [l for l in self.log() if l == "curl"]
+
+    def test_the_first_install_fetches_into_the_artifact_and_the_next_workspace_makes_no_network_call(self):
+        self.assertEqual("installed", self.run_script()[1]["claude"])
+        self.assertTrue((self.artifact() / ".local/share/claude/versions/9.9.9").is_file())
+        self.assertFalse((self.tmp / "cache" / "claude" / ".stage").exists())
+        other = self.tmp / "home2"
+        other.mkdir()
+        self.assertEqual("installed", self.run_script(HOME=str(other))[1]["claude"])
+        self.assertEqual(1, len(self.curls()), self.log())
+        self.assertTrue(os.access(other / ".local/bin/claude", os.X_OK))
+        self.assertEqual(str(other / ".local/share/claude/versions/9.9.9"), os.readlink(other / ".local/bin/claude"))
+
+    def test_a_present_artifact_installs_with_no_curl_at_all(self):
+        (self.artifact() / ".local/share/claude/versions").mkdir(parents=True)
+        shutil.copy(self.ok, self.artifact() / ".local/share/claude/versions/9.9.9")
+        self.assertEqual("installed", self.run_script()[1]["claude"])
+        self.assertEqual([], self.curls())
+
+    def test_two_creations_at_once_fetch_once_and_the_second_waits_for_the_artifact(self):
+        other = self.tmp / "home2"
+        other.mkdir()
+        env = dict(self.env, CURL_SLEEP="1")
+        procs = [subprocess.Popen([shutil.which("bash"), str(REPO / agents.SCRIPT)], env=dict(env, HOME=h), stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True) for h in (str(self.home), str(other))]
+        said = [p.communicate(timeout=60)[0] for p in procs]
+        self.assertEqual([0, 0], [p.returncode for p in procs])
+        self.assertTrue(all("claude=installed" in s for s in said), said)
+        self.assertEqual(1, len(self.curls()), self.log())
+
+    def test_a_failed_fetch_leaves_no_artifact_for_the_next_try_to_trust(self):
+        self.script(CURL_INSTALLS="0")
+        self.assertFalse(self.artifact().exists())
+        self.assertFalse((self.tmp / "cache" / "claude" / ".stage").exists())
+        self.assertEqual("installed", self.run_script()[1]["claude"])
+
+    def test_pi_goes_through_npms_own_cache_in_the_artifact_directory(self):
+        self.stub(self.bin / "npm", 'echo "$npm_config_cache" >> "$LOG"\n' + LINK % "pi" + "\n")
+        self.run_script()
+        self.assertIn(str(self.tmp / "cache" / "npm"), self.log())
 
     def test_a_claude_on_path_that_does_not_run_is_replaced(self):
         self.stub(self.bin / "claude", "exit 1\n")
@@ -158,7 +205,7 @@ class TestInstall(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             try:
-                agents.install(str(REPO), {}, Fake(), self.ws, "demo", "/opt/wk-tools", "/src/WebKit")
+                agents.install(str(REPO), {}, Fake(), self.ws, "demo", "/opt/wk-tools", "/src/WebKit", "/cache/agents")
                 status = 0
             except Refused as e:
                 status = e.status
@@ -169,6 +216,7 @@ class TestInstall(unittest.TestCase):
         self.assertEqual(0, status, err)
         self.assertIn("pi installed in 'demo'", err)
         self.assertIn("claude.ai/install.sh", self.ws.argvs[0][-1])
+        self.assertTrue(self.ws.argvs[0][-1].startswith("export WK_AGENTS_CACHE=/cache/agents WK_CLAUDE_VERSION=%s\n" % agents.CLAUDE_VERSION))
         self.assertEqual("python3 /opt/wk-tools/claude/workspace-config.py /src/WebKit", self.ws.argvs[1][-1])
 
     def test_a_failed_install_refuses_naming_the_rerun(self):

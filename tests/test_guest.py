@@ -302,7 +302,7 @@ class TestTheSteps(GuestTest):
         g = self.the_guest()
         self.assertTrue(quiet(INSTALL_AGENTS, g)[0])
         cmds = [c for c, _ in self.w.guest_cmds]
-        self.assertIn(shlex.join(["bash", "-lc", agents.script(str(REPO))]), cmds)
+        self.assertIn(shlex.join(["bash", "-lc", "export WK_AGENTS_CACHE=%s WK_CLAUDE_VERSION=%s\n%s" % (agents.HOME_CACHE, agents.CLAUDE_VERSION, agents.script(str(REPO)))]), cmds)
         self.assertIn(shlex.join(["bash", "-lc", "python3 %s/claude/workspace-config.py %s" % (self.vm.tools("demo"), self.vm.src("demo"))]),
                       cmds)
 

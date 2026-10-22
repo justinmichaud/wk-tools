@@ -292,7 +292,7 @@ class Guest:
     def install_agents(self):
         try:
             agents.install(self.host.root, self.host.env, self.host.machine, self.m.act_run, self.ws, self.vm.tools(self.ws),
-                           self.vm.src(self.ws))
+                           self.vm.src(self.ws), agents.HOME_CACHE)
         except Refused:
             return False
         return True

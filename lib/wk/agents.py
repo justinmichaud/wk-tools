@@ -10,6 +10,8 @@ from wk.secrets import Secrets, first_line
 
 AGENTS = ("claude", "pi")
 SCRIPT = "container/agents.sh"
+CLAUDE_VERSION = "2.1.308"
+HOME_CACHE = "$HOME/.cache/wk/agents"
 
 
 def script(root):
@@ -35,9 +37,9 @@ def pi_models(endpoint, ids):
     }}}, indent=2)
 
 
-def install(root, env, machine, run, ws, tools, src):
-    """`run(argv)` is an effect in the workspace; `machine` holds this machine's store."""
-    r = run(["bash", "-lc", script(root)])
+def install(root, env, machine, run, ws, tools, src, cache):
+    """`run(argv)` is an effect in the workspace; `machine` holds this machine's store; `cache` is the workspace's own path to the agents artifacts."""
+    r = run(["bash", "-lc", "export WK_AGENTS_CACHE=%s WK_CLAUDE_VERSION=%s\n%s" % (cache, CLAUDE_VERSION, script(root))])
     said = kv(r.out)
     for agent in AGENTS:
         if said.get(agent) == "installed":

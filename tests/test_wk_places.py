@@ -654,7 +654,8 @@ class TestContainerWrite(DriversTest):
         for pair in (("--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.t.store.snapshot_tree(self.base), ws_dir, ws_dir)),
                      ("--volume", "%s:/opt/wk-tools:ro" % self.t.tools_src()), ("--memory", "19749m"), ("--cpus", "7"),
                      ("--volume", "%s:/secrets:ro" % self.t.store.keyring_view_dir("container")), ("--env", "WK_WORKSPACE=new"),
-                     ("--env", "NO_PROXY=localhost,127.0.0.1,::1"), ("--device", "/dev/dri")):
+                     ("--env", "NO_PROXY=localhost,127.0.0.1,::1"), ("--device", "/dev/dri"),
+                     ("--volume", "%s/cache/agents:/cache/agents" % self.t.store.store_dir())):
             self.assertIn(pair, pairs)
         head = argv[argv.index("--network"):argv.index("--additional-flags")]
         self.assertEqual(head, ("--network", "none", "--isolated", "--name", "wk-new", "--shell", "/bin/bash", "--user", u, "--group", u,
@@ -798,7 +799,7 @@ class TestContainerWrite(DriversTest):
         with mock.patch.object(secrets.Secrets, "store_publish") as sp:
             self.t.store_init()
             sp.assert_called_once_with()
-        for d in ("git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/buildroot/ccache", "cache/bench", "skills"):
+        for d in ("git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/buildroot/ccache", "cache/bench", "cache/agents", "skills"):
             self.assertIn(os.path.join(root, d), self.fake.dirs)
         conf = os.path.join(root, "cache", "ccache", "ccache.conf")
         self.assertEqual(self.fake.files[conf], "max_size = 40G\n")
