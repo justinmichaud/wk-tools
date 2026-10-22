@@ -213,6 +213,14 @@ class TestOutputReachesTheTerminal(ProfileTest):
         capturing = [e for e in self.w.effects if e[0] == "run" and e[1][:2] == ("exec", "ws") and "bash" in e[1]]
         self.assertEqual([], capturing, "the run and post must not go through the capturing exec")
 
+    def test_a_post_step_that_fails_ends_the_run_claiming_no_recording(self):
+        calls = []
+        self.w.react(["exec-tty", "ws", "bash", "-lc"], lambda a, f: (calls.append(a), Result(1 if len(calls) == 2 else 0, ""))[1])
+        e, err = self.refused("--preset", "gtk-release", "--profile=bytecode", "--", "x.js")
+        self.assertEqual(e.status, 1, err)
+        self.assertIn("nothing was recorded in 'ws'", err)
+        self.assertNotIn("==> recorded in", err)
+
     def test_the_next_step_it_names_is_the_command_that_ran(self):
         self.w.answer(["exec-tty", "ws", "bash", "-lc"], out="")
         _, err = self.run_("--preset", "gtk-release", "--profile=sampling", "--", "x.js")

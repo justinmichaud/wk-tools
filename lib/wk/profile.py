@@ -338,8 +338,8 @@ def main(args, cmd, reg=None):
     if not r.ok:
         raise Refused(r.rc)
 
-    if post:
-        driver.exec_tty(name, ["bash", "-lc", post])   # its own failure never stops the report below
+    if post and not driver.exec_tty(name, ["bash", "-lc", post]).ok:
+        die("nothing was recorded in '%s': the step after the run failed (above)" % name)
 
     info("recorded in '%s': %s" % (name, artifact))
 
