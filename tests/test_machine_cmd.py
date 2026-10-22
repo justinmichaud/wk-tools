@@ -55,7 +55,7 @@ SECRETS = ("claude        claude-token        .wk-agent-token             CLAUDE
 class World:
     """One Fake for both ends: its effects are the flow's effects, wherever they land."""
 
-    def __init__(self, tmp, conf=None, deps=DEPS_PROBE, old_tools=(), answers=True, ws=()):
+    def __init__(self, tmp, conf=None, deps=DEPS_PROBE, answers=True, ws=()):
         self.fake = Fake("both")
         self.tmp = Path(tmp)
         self.fleet = self.tmp / "machines"
@@ -68,8 +68,6 @@ class World:
                     "WK_HOST_SECRETS": str(self.tmp / "store" / "secrets"), "PATH": os.environ.get("PATH", "")}
         f = self.fake
         f.dirs |= {HOME + "/wk", HOME + "/wk/ws"}
-        for d in old_tools:
-            f.dirs.add(d)
         for w in ws:
             f.dirs.add(HOME + "/wk/ws/" + w)
         self.answers = answers
@@ -104,12 +102,8 @@ class World:
             return Result(0, SHA + "\n")
         if text == build.MOTD:
             return Result(0, self.motd)
-        if text == build.OLD_TOOLS:
-            return Result(0, "".join(d + "\n" for d in sorted(fake.dirs) if d.endswith("wk-tools")))
         if text.startswith("umask 077 && cat > "):
             fake.files[HOME + "/" + text.rsplit("/", 1)[1].strip("'")] = "copy"
-        if text == build.DEPROVISION:
-            fake.files.pop(HOME + "/.wk-remote", None)
         return Result(0, "")
 
     def env_run(self, argv, fake):
@@ -302,26 +296,14 @@ class TestSetup(MachineTest):
         self.assertIn("hots is not a key a build machine's conf takes", err)
         self.assertEqual(self.runs(w), [])
 
-    def test_an_old_checkout_is_asked_about_once_and_removed_and_a_declined_one_left(self):
-        old = HOME + "/Development/wk-tools"
-        with mock.patch.object(act, "confirm", return_value=True) as asked:
-            w, _ = self.verb(0, "setup", "box", conf=BUILD, old_tools=(old,))
-        self.assertEqual(asked.call_count, 1)
-        self.assertNotIn(old, w.fake.dirs)
-        self.assertIn(("rm", "-rf", old), self.runs(w))
-        with mock.patch.object(act, "confirm", return_value=False):
-            w, _ = self.verb(0, "setup", "box", conf=BUILD, old_tools=(old,))
-        self.assertIn(old, w.fake.dirs)
-        self.assertIn(HOME + "/.wk-remote", w.fake.files)
-
     def test_a_setup_killed_after_any_effect_and_rerun_converges(self):
-        self.converges(lambda: self.world(old_tools=(HOME + "/wk-tools",)), "setup", "box", "build")
+        self.converges(self.world, "setup", "box", "build")
 
     def test_a_dry_run_is_the_wet_runs_plan_and_touches_nothing(self):
-        wet, _ = self.verb(0, "setup", "box", "build", old_tools=(HOME + "/wk-tools",))
+        wet, _ = self.verb(0, "setup", "box", "build")
         acted = [r for r in self.runs(wet) if r[0] in ("env", "rm") or (r[:2] == ("sh", "-c") and r[2].startswith(("umask", "rm -f")))]
-        self.assertGreaterEqual(len(acted), 5)
-        dry = self.world(old_tools=(HOME + "/wk-tools",))
+        self.assertGreaterEqual(len(acted), 4)
+        dry = self.world()
         before = dry.state()
         _, err = self.verb(0, "setup", "box", "build", w=dry, env=DRY)
         self.assertEqual(dry.state(), before)
@@ -339,16 +321,18 @@ class TestRm(MachineTest):
     def deployed(self):
         w = self.world(conf=BUILD)
         w.fake.files[HOME + "/.wk-remote"] = "place=box\n"
+        w.fake.files[HOME + "/.zshrc"] = "keep\n# wk-tools shared shell configuration\n. %s/wk/tools/shell/bashrc\n" % HOME
         return w
 
     def test_a_machine_with_workspaces_is_refused_by_name(self):
         w, err = self.verb(1, "rm", "box", conf=BUILD, ws=("big",))
         self.assertIn("big", err)
-        self.assertFalse([r for r in self.runs(w) if r[:2] == ("sh", "-c") and r[2] == build.DEPROVISION])
+        self.assertFalse([e for e in w.fake.effects if e[0] in ("write", "remove")])
 
     def test_it_deprovisions_and_keeps_the_conf(self):
         w, err = self.verb(0, "rm", "box", w=self.deployed())
         self.assertNotIn(HOME + "/.wk-remote", w.fake.files)
+        self.assertEqual("keep\n", w.fake.files[HOME + "/.zshrc"])
         self.assertNotIn(HOME + "/wk", w.fake.dirs)
         self.assertTrue((w.fleet / "box.conf").exists())
         self.assertIn("git rm machines/box.conf", err.replace(str(w.fleet), "machines"))

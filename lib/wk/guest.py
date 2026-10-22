@@ -1,17 +1,14 @@
-"""A macOS guest's start, stop, convergence and admission, its desktop's readings, and the host daemons every guest shares
-(egress proxy, injector, push service, broker). A pidfile is a lock, never a record."""
+"""A macOS guest's start, stop, convergence and admission, its desktop's readings, and its host daemons' rows (lib/wk/daemons.py)."""
 
-import contextlib
 import os
-import re
 import shlex
-import signal
 import sys
 import time
 
-from wk import act, agents, claudelogin, git, images, project, secrets, tools
+from wk import act, agents, claudelogin, daemons, git, images, project, secrets, tools
 from wk.act import Refused, debug, die, info, log, warn
 from wk.clock import Clock
+from wk.daemons import Daemon
 from wk.lock import Lock
 from wk.machine import Local
 from wk.store import GUEST_BROKER_SOCKET, GUEST_PUSH_SOCKET, Store, no_such_workspace
@@ -24,64 +21,12 @@ BOOT_WAIT = 180
 FORWARD_WAIT = 4
 FORWARDS = ("push", "broker")
 
-# An `nc -z -U` answers 1 for a served socket on macOS, so the connect is made in python.
-SOCKET_ANSWERS = """import socket, sys
-s = socket.socket(socket.AF_UNIX); s.settimeout(2)
-try:
-    s.connect(sys.argv[1])
-except OSError:
-    sys.exit(1)
-"""
-
 # The one request a guest's start makes of the push service; its refusal is the exit status.
 PUSH_LISTEN = """import json, socket, sys
 s = socket.socket(socket.AF_UNIX); s.settimeout(5)
 s.connect(sys.argv[1])
 s.sendall((json.dumps({"verb": "listen", "workspace": sys.argv[2]}) + "\\n").encode())
 sys.exit(0 if "listening" in json.loads(s.makefile().readline()) else 1)
-"""
-
-# `tart clone` hands a clone the base's clock, and NTP is UDP, which the CONNECT proxy cannot carry.
-CLOCK = """set -u
-skew=$(( WK_NOW_EPOCH - $(date -u +%s) ))
-[ "$skew" -ge 0 ] || skew=$(( - skew ))
-[ "$skew" -gt "$WK_SKEW" ] || exit 0
-sudo -n date -u "$WK_NOW_SET" >/dev/null || exit 1
-echo "$skew"
-"""
-
-# The browser's network process reads no http_proxy, so the system proxy is set too; the CA bundle replaces the trust store.
-EGRESS = """set -u
-addr=$WK_ADDR port=$WK_PORT
-if [ -s /tmp/.wk-egress.new ]; then sed "s|\\$HOME|$HOME|g" /tmp/.wk-egress.new > "$HOME/.wk-egress"; rm -f /tmp/.wk-egress.new
-else rm -f "$HOME/.wk-egress"; fi   # written with the guest's own home, so a shell with another HOME (sudo) reads the same paths
-if [ -s /tmp/.wk-github-ca.new ]; then
-    mv /tmp/.wk-github-ca.new "$HOME/.wk-github-ca.pem"
-    cat /etc/ssl/cert.pem "$HOME/.wk-github-ca.pem" > "$HOME/.wk-ca-bundle.pem"
-else
-    rm -f "$HOME/.wk-github-ca.pem" "$HOME/.wk-ca-bundle.pem"
-fi
-dev=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
-[ -n "$dev" ] || { echo "no default route in the guest" >&2; exit 1; }
-svc=$(networksetup -listnetworkserviceorder | awk -v d="$dev" '
-    /^\\([0-9]+\\)/ { name = substr($0, index($0, ") ") + 2) }
-    index($0, "Device: " d ")") { print name; exit }')
-[ -n "$svc" ] || { echo "no network service owns $dev" >&2; exit 1; }
-read_state() {
-    networksetup -getsecurewebproxy "$svc" | awk '
-        /^Enabled:/ { e = $2 } /^Server:/ { s = $2 } /^Port:/ { p = $2 }
-        END { print e ":" s ":" p }'
-}
-if [ -z "$addr" ]; then
-    [ "$(read_state)" = "No::0" ] && exit 0
-    sudo -n networksetup -setwebproxystate "$svc" off &&
-    sudo -n networksetup -setsecurewebproxystate "$svc" off
-    exit
-fi
-[ "$(read_state)" = "Yes:$addr:$port" ] && exit 0
-sudo -n networksetup -setwebproxy "$svc" "$addr" "$port" &&
-sudo -n networksetup -setsecurewebproxy "$svc" "$addr" "$port" &&
-sudo -n networksetup -setproxybypassdomains "$svc" localhost 127.0.0.1
 """
 
 PASSWORD = "admin"
@@ -93,32 +38,9 @@ RESTART = "wk stop <name> && wk start <name>"
 REBUILD = BASE_BUILD + " --rebuild, then re-create this guest"
 HOST_FREE_WARN_GB, HOST_FREE_MIN_GB = 80, 25
 DISK_GB = 320
-SA_COUNT = "pgrep -f 'Setup Assistant.app/Contents/MacOS' | grep -c . || true"   # macOS pgrep has no -c
 QUIET, WINDOWS, PYOBJC = "bench/mac-quiet-desktop.sh", "bench/mac-window-probe.sh", "bench/mac-pyobjc.sh"
 LLDB_HEADER = "# wk: written by lib/wk/guest.py. See wk run --lldb, wk gui --lldb.\n"
-CLAUDE_CONFIG = """[ -d "$1/claude" ] || exit 1
-mkdir -p "$HOME/.claude"
-for f in settings.json hooks CLAUDE.md skills; do ln -sfn "$1/claude/$f" "$HOME/.claude/$f"; done
-"""
-
-CHECKOUT = """set -u
-git config --global --replace-all include.path "$WK_TOOLS/dotfiles/gitconfig"
-git config --global core.sshCommand "$WK_TOOLS/container/push/wk-push-client.py"
-git config --global ssh.variant ssh
-if [ -d "$WK_SRC/.git" ]; then
-    echo checkout=present
-elif [ ! -d "$WK_MIRROR" ]; then
-    echo "checkout=no-mirror: $WK_MIRROR is not there. The share is mounted at boot, so"
-    echo "  'wk stop <name>', then 'wk start <name>' -- or the host has no mirror yet: wk sync"
-    exit 1
-elif git clone --quiet --shared --branch main "$WK_MIRROR" "$WK_SRC"; then
-    echo checkout=cloned
-else
-    echo checkout=clone-failed; exit 1
-fi
-[ ! -r "$HOME/.wk-egress" ] || . "$HOME/.wk-egress"
-"""
-
+CLAUDE_LINKS = ("settings.json", "hooks", "CLAUDE.md", "skills")
 READINGS = """. "$0/%s"; . "$0/%s"; . "$0/%s"
 printf 'pin=%%s\\n' "$WK_PYOBJC_VERSION"
 [ -z "$3" ] || printf 'unexpected=%%s\\n' "$(wk_window_unexpected "$3")"
@@ -181,91 +103,47 @@ class Host:
             return None
         return int(pid) if pid.isdigit() and self.machine.alive(int(pid)) else None
 
-    def spawn(self, argv, log, pidfile=None):
+    def spawn(self, argv, log, pidfile):
         self.machine.remove(log)
         pid = self.machine.spawn(argv, log)
-        if pidfile:
-            self.machine.write(pidfile, "%d\n" % pid)
+        self.machine.write(pidfile, "%d\n" % pid)
         return pid
 
-    def launch(self, name, argv, up, wait, failed, pidfile=True):
-        log = self.path(name + ".log")
-        pid = self.spawn(argv, log, self.path(name + ".pid") if pidfile else None)
-        if act.dry_run() or self.clock.wait_until(lambda: up() or not self.machine.alive(pid), wait, 0.25) and up():
-            return True
-        warn(failed % log)
-        return False
+    def supervisor(self):
+        return daemons.Launchd(self.machine, self.root, Store(self.env).state_dir(), self.clock)
 
-    def listener(self, where):
-        pids = [int(p) for p in self.machine.run(["lsof", "-t", *where]).out.split() if p.isdigit()]
-        return pids[0] if pids else None
+    def daemons(self):
+        login = self.secrets.cred_path("claude-login")
+        self.secrets.ensure_dir(os.path.dirname(login), "0700")
+        store, push = Store(self.env), self.push_sock()
+        at = "%s:%s" % (self.proxy_addr(), self.port())
+        proxy = {"WK_PROXY_UNIX": "0", "WK_PROXY_TCP": at, "WK_STORE": self.vm.store.store_dir(),
+                 "WK_PUSH_SOCKET": push, **{k: v for k, v in self.inject_env().items() if k in ("WK_INJECT_SOCK", "WK_INJECT_READ_SOCK",
+                                                                                              "WK_INJECT_CA_OUT")}}
+        return {"github-inject": Daemon("github-inject", self.inject_env(), self.path("github-inject.sock"), lock=login),
+                "broker": Daemon("broker", {"WK_ROOT": self.root, "WK_STORE": store.store_dir(),
+                                            "WK_BROKER_PUBLISH_MACHINE": store.podman_machine()}, store.runtime_socket()),
+                "push": Daemon("push", {"WK_PUSH_SOCKET": push, "WK_PUSH_GUEST_DIR": self.dir}, push),
+                "proxy": Daemon("proxy", proxy, at, boot=False)}
 
-    def restart_if_stale(self, pidfile, what, where):
-        """One older than its source is stopped, and so is one serving `where` that no pidfile names (a kill lost it)."""
-        pid = self.daemon_pid(pidfile)
-        src = os.path.join(self.root, "container", "proxy")
-        if pid is not None:
-            if not self.machine.run(["find", src, "-name", "*.py", "-newer", pidfile]).out.strip():
-                return
-            why = "container/proxy changed since it started"
-        else:
-            pid = self.listener(where)
-            if pid is None:
-                return
-            why = "no pidfile names it"
-        info("restarting the %s: %s" % (what, why))
-        self.stop(pid, pidfile)
-
-    def stop(self, pid, pidfile):
-        self.machine.kill(pid)
-        if not act.dry_run() and not self.clock.wait_until(lambda: not self.machine.alive(pid), 5, 0.25):
-            self.machine.kill(pid, signal.SIGKILL)
-        self.machine.remove(pidfile)
-
-    def proxy_where(self):
-        return ["-nP", "-iTCP@%s:%s" % (self.proxy_addr(), self.port()), "-sTCP:LISTEN"]
-
-    def proxy_running(self):
-        return self.daemon_pid(self.path("proxy.pid")) is not None
+    def ensure(self, word):
+        self.machine.mkdir(self.dir)
+        sup = self.supervisor()
+        ok = sup.ensure(self.daemons()[word])
+        for line in sup.changes:
+            info(line)
+        return ok
 
     def start_proxy(self):
-        """The injector first, ahead of the liveness check, so its read token converges on every start."""
         if self.unfiltered():
             return True
         with self.lock().held("vm-daemons"):
-            return self._start_proxy()
-
-    def _start_proxy(self):
-        self.start_inject()
-        self.restart_if_stale(self.path("proxy.pid"), "egress proxy", self.proxy_where())
-        if self.proxy_running():
-            debug("host proxy already running")
-            return True
-        self.machine.mkdir(self.dir)
-        addr = self.proxy_addr()
-        if not self.clock.wait_until(lambda: ("inet %s " % addr) in self.machine.run(["ifconfig"]).out, 15, 0.5):
-            warn("the guest bridge never got address %s; not starting the proxy" % addr)
-            return False
-
-        def said():
-            try:
-                return ("listening on " + addr) in self.machine.read(self.path("proxy.log"))
-            except OSError:
+            self.start_inject()
+            addr = self.proxy_addr()
+            if not self.clock.wait_until(lambda: ("inet %s " % addr) in self.machine.run(["ifconfig"]).out, 15, 0.5):
+                warn("the guest bridge never got address %s; not starting the proxy" % addr)
                 return False
-        if not self.launch("proxy", ["env", "WK_PROXY_UNIX=0", "WK_PROXY_TCP=%s:%s" % (addr, self.port()),
-                                     "WK_STORE=" + self.vm.store.store_dir(), "WK_INJECT_SOCK=" + self.path("github-inject.sock"),
-                                     "WK_INJECT_READ_SOCK=" + self.path("github-inject-read.sock"), "WK_PUSH_SOCKET=" + self.push_sock(),
-                                     "WK_INJECT_CA_OUT=" + self.path("wk-github-ca.pem"), "/usr/bin/python3",
-                                     os.path.join(self.root, "container", "proxy", "wk-proxy.py")], said, 10,
-                           "the host egress proxy did not start; the guest will have no egress at all\n"
-                           "  (Softnet denies everything except the proxy address). See %s"):
-            return False
-        info("egress proxy on %s:%s" % (addr, self.port()))
-        return True
-
-    def inject_running(self):
-        sock = self.path("github-inject.sock")
-        return self.machine.exists(sock) and self.machine.run(["/usr/bin/python3", "-c", SOCKET_ANSWERS, sock]).ok
+            return self.ensure("proxy")
 
     def credentials_converge(self):
         """The one writer of what this injector serves every guest: each start and each `wk key set`."""
@@ -286,9 +164,8 @@ class Host:
                 "WK_INJECT_PUBLISH_MACHINE": Store(self.env).podman_machine()}
 
     def start_inject(self):
-        """launchd keeps it (host/macos/inject.sh); a start converges its credentials and asks whether it answers."""
         self.credentials_converge()
-        if self.inject_running():
+        if daemons.answers(self.machine, self.path("github-inject.sock")):
             return True
         warn("the credential injector is not running on this Mac, so '%s pr' and Claude in a guest get no\n"
              "  credential:  ./setup --stage inject" % project.get("PR_TOOL"))
@@ -297,22 +174,12 @@ class Host:
     def push_sock(self):
         return Store(self.env).push_socket()
 
-    def push_running(self):
-        sock = self.push_sock()
-        return self.machine.exists(sock) and self.machine.run(["/usr/bin/python3", "-c", SOCKET_ANSWERS, sock]).ok
-
     def start_push(self):
         """The push service every guest's push reaches, run here because a guest cannot see a unix socket across the hypervisor."""
         with self.lock().held("vm-daemons"):
-            if self.push_running():
-                return True
-            self.machine.mkdir(self.dir)
-            return self.launch("push", ["env", "WK_PUSH_SOCKET=" + self.push_sock(), "WK_PUSH_GUEST_DIR=" + self.dir, "/usr/bin/python3",
-                                        os.path.join(self.root, "container", "push", "wk-push.py")], self.push_running, 4,
-                               "the guests' push service did not start, so no guest can push;\n  see %s", pidfile=False)
+            return self.ensure("push")
 
     def push_listen(self, ws):
-        """The service's own socket for guest `ws`, which that guest's forward ends at: the socket names the guest."""
         if not self.start_push():
             return None
         if not self.machine.act_run(["/usr/bin/python3", "-c", PUSH_LISTEN, self.push_sock(), ws]).ok:
@@ -408,7 +275,7 @@ class Guest:
 
     def write_checkout(self):
         src, mirror, forks = self.vm.src(self.ws), self.vm.mirror_dir(), self.secrets.forks()
-        script = CHECKOUT + git.wiring_script(src, mirror, forks, images.mirror_branches(self.host.env)) \
+        script = tree(self.host.root, "vm/checkout.sh") + git.wiring_script(src, mirror, forks, images.mirror_branches(self.host.env)) \
             + git.pr_tool_setup_script(src, forks)
         t0 = self.host.clock.now()
         r = self.m.act_run(["env", "WK_SRC=" + src, "WK_MIRROR=" + mirror, "WK_TOOLS=" + self.vm.tools(self.ws), "bash", "-s"],
@@ -431,7 +298,9 @@ class Guest:
         return True
 
     def write_claude_config(self):
-        return self._said(self.m.act_run(["sh", "-c", CLAUDE_CONFIG, "sh", self.vm.tools(self.ws)]))
+        home = self.vm.home() + "/.claude"
+        return self._said(self.m.act_run(["mkdir", "-p", home])) and self._said(
+            self.m.act_run(["ln", "-sfn", *("%s/claude/%s" % (self.vm.tools(self.ws), f) for f in CLAUDE_LINKS), home]))
 
     def settle_desktop(self):
         """The password is the script's own first line: as an argument it would be in `ps` on both machines."""
@@ -459,14 +328,16 @@ class Guest:
             "    WK_VM_FORCE=1 hands the guest over anyway." % (self.ws, lines, BASE_BUILD))
 
     def set_guest_clock(self):
-        """Idempotent by measurement: a guest within WK_VM_CLOCK_SKEW costs no sudo."""
-        now = int(self.host.clock.now())
-        r = self.m.act_run(["env", "WK_NOW_EPOCH=%d" % now, "WK_NOW_SET=" + time.strftime("%m%d%H%M%Y.%S", time.gmtime(now)),
-                            "WK_SKEW=" + clock_skew(self.host.env), "bash", "-s"], input=CLOCK)
-        if not r.ok:
+        """`tart clone` hands a clone the base's clock, and NTP is UDP, which the CONNECT proxy cannot carry."""
+        now, r = int(self.host.clock.now()), self.m.run(["date", "-u", "+%s"])
+        if not r.out.strip().isdigit():
             return False
-        if r.out.strip():
-            info("%s's clock was %ss out; set from this host" % (self.ws, r.out.strip()))
+        skew = abs(now - int(r.out.strip()))
+        if skew <= int(clock_skew(self.host.env)):
+            return True
+        if not self.m.act_run(["sudo", "-n", "date", "-u", time.strftime("%m%d%H%M%Y.%S", time.gmtime(now))]).ok:
+            return False
+        info("%s's clock was %ds out; set from this host" % (self.ws, skew))
         return True
 
     def set_guest_egress(self):
@@ -478,7 +349,7 @@ class Guest:
             ca = ""
         ca = ca if "BEGIN CERTIFICATE" in ca else ""
         debug("guest egress in %s: %s" % (self.ws, addr or "off"))
-        script = here_doc("/tmp/.wk-github-ca.new", ca) + here_doc("/tmp/.wk-egress.new", self.egress_env(addr, ca)) + EGRESS
+        script = here_doc("/tmp/.wk-github-ca.new", ca) + here_doc("/tmp/.wk-egress.new", self.egress_env(addr, ca)) + tree(h.root, "vm/egress.sh")
         return self.m.act_run(["env", "WK_ADDR=" + addr, "WK_PORT=" + h.port(), "bash", "-s"], input=script).ok
 
     def egress_env(self, addr, ca):
@@ -633,7 +504,8 @@ def blockers(rd):
 
 
 def setup_assistant(g):
-    r = g.run(["sh", "-c", SA_COUNT])
+    """A count, not pgrep's status: tart exec failing says 1 as well."""
+    r = g.run(["sh", "-c", "pgrep -f 'Setup Assistant.app/Contents/MacOS' | grep -c . || true"])
     n = r.out.replace("\r", "").strip() if r.ok else ""
     return "unreachable" if not n else "gone" if n == "0" else "up"
 
@@ -813,59 +685,3 @@ def credentials_converge(root, env, machine):
 def inject_host(root, env):
     from wk import places
     return Host(places.Registry(root, env, Local()).load("vm"))
-
-
-def launchd_reload(host, label, plist, sock, lock):
-    """A bootstrap that fails after the bootout leaves no service, so every failure here names the label; success is `launchctl print` and `sock`."""
-    svc, domain = "gui/%d/%s" % (os.getuid(), label), "gui/%d" % os.getuid()
-    with lock:
-        host.machine.act_run(["launchctl", "bootout", svc])
-        if not act.dry_run() and not host.clock.wait_until(lambda: not host.machine.run(["launchctl", "print", svc]).ok, 10, 0.2):
-            warn("launchd still has %s 10 seconds after booting it out" % svc)
-            return False
-    r = host.machine.act_run(["launchctl", "bootstrap", domain, plist])
-    if not r.ok:
-        warn("launchctl bootstrap of %s failed after its bootout, so the service is not loaded: %s\n    launchctl print %s says why"
-             % (label, (r.err or r.out).strip(), svc))
-        return False
-    if act.dry_run():
-        return True
-
-    def back():
-        return host.machine.run(["launchctl", "print", svc]).ok and host.machine.run(["python3", "-c", SOCKET_ANSWERS, sock]).ok
-    if not host.clock.wait_until(back, 10, 0.2):
-        warn("%s is not back 10 seconds after its bootstrap: launchctl print %s or the socket %s does not answer" % (label, svc, sock))
-        return False
-    return True
-
-
-def inject_restart(host, label, plist):
-    """Booted out under the login's lock, so no refresh is cut short."""
-    login = host.secrets.cred_path("claude-login")
-    host.secrets.ensure_dir(os.path.dirname(login), "0700")
-    return launchd_reload(host, label, plist, host.path("github-inject.sock"), claudelogin.locked(login))
-
-
-def broker_restart(host, label, plist):
-    return launchd_reload(host, label, plist, Store(host.env).runtime_socket(), contextlib.nullcontext())
-
-
-def inject_plist(host, label, log, path):
-    import plistlib
-    return plistlib.dumps({"Label": label, "ProgramArguments": ["/usr/bin/python3", os.path.join(host.root, "container", "proxy",
-                                                                                                     "github-inject.py")],
-                           "EnvironmentVariables": dict(host.inject_env(), PATH=path), "RunAtLoad": True, "KeepAlive": True,
-                           "StandardOutPath": log, "StandardErrorPath": log}).decode()
-
-
-INJECT_VERBS = {"inject-plist": 3, "inject-restart": 2, "broker-restart": 2}
-
-if __name__ == "__main__":
-    verb, args = (sys.argv[1:2] or [""])[0], sys.argv[2:]
-    if INJECT_VERBS.get(verb) != len(args):
-        sys.exit("usage: python3 -m wk.guest inject-plist <label> <log> <PATH> | inject-restart <label> <plist> | broker-restart <label> <plist>")
-    h = inject_host(images.root(), os.environ)
-    if verb == "inject-plist":
-        sys.stdout.write(inject_plist(h, *args))
-    else:
-        sys.exit(0 if (inject_restart if verb == "inject-restart" else broker_restart)(h, *args) else 1)

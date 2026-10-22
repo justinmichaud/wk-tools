@@ -1,5 +1,5 @@
 """`wk machine`: set up and remove the build machines, peers, boards, and Macs in machines/, list the
-fleet, and probe for a machine or sweep for every device. Each kind's setup and rm is its own module here."""
+fleet, and probe for a machine or sweep for every device. SETUP and RM name each kind's method."""
 
 import json
 import os
@@ -11,11 +11,13 @@ from wk.kv import ConfError
 from wk.machine import Local, Ssh
 from wk.machine_cmd.board import BoardMachines
 from wk.machine_cmd.build import CONFS, BuildMachines
-from wk.machine_cmd.mac import MacMachines
 from wk.workspace import require_name
 
+SETUP = {"build": "setup_place", "peer": "setup_place", "board": "setup_board", "mac": "setup_mac"}
+RM = {"build": "rm_machine", "peer": "rm_machine", "board": "rm_board"}
 
-class Machines(BuildMachines, BoardMachines, MacMachines):
+
+class Machines(BuildMachines, BoardMachines):
     def __init__(self, root, env=None, here=None, far=None):
         self.root = str(root)
         self.env = os.environ if env is None else env
@@ -79,22 +81,19 @@ class Machines(BuildMachines, BoardMachines, MacMachines):
         elif kind and kind != conf["kind"]:
             die("%s says kind=%s, and --kind %s disagrees. The conf is the answer:\n"
                 "    edit it, or drop --kind." % (self.rel(self.fleet.path(name)), conf["kind"], kind))
-        if conf["kind"] == "board":
-            return self.setup_board(name, conf)
-        if conf["kind"] == "mac":
-            return self.setup_mac(name, conf)
-        if conf["kind"] not in fleet.PLACE_KINDS:
+        if conf["kind"] not in SETUP:
             die("'%s' is a %s (%s): 'wk machine setup' sets up a build machine, a peer, a board or a Mac"
                 % (name, conf["kind"], self.rel(self.fleet.path(name))))
+        return getattr(self, SETUP[conf["kind"]])(name, conf, path, new)
+
+    def setup_place(self, name, conf, path, new):
         t = self.driver(name, conf)
         ok, why = t.answers()
         if not ok:
             die("cannot ssh to '%s' non-interactively: %s\n"
                 "    A machine is named after an ssh destination that already works, keys and\n"
                 "    ProxyJump included:  ssh -o BatchMode=yes %s true" % (t.label(), why, t.label()))
-        if conf["kind"] == "peer":
-            return self.setup_peer(name, t, path, new)
-        return self.setup_build(name, t, path, new)
+        return (self.setup_peer if conf["kind"] == "peer" else self.setup_build)(name, t, path, new)
 
     def board_machine(self, dest):
         """Boards and Macs hold no places, so they take a Machine straight rather than `driver()`'s Remote."""
@@ -106,11 +105,9 @@ class Machines(BuildMachines, BoardMachines, MacMachines):
         if conf is None:
             die("no conf for '%s' (%s) -- nothing to remove" % (name, self.rel(self.fleet.conf_path(name))))
         path = self.fleet.path(name)
-        if conf["kind"] == "board":
-            return self.rm_board(name, conf, path)
-        if conf["kind"] not in fleet.PLACE_KINDS:
-            die("'%s' is a %s (%s): 'wk machine rm' removes a build machine or a peer" % (name, conf["kind"], self.rel(path)))
-        return self.rm_machine(name, conf, path)
+        if conf["kind"] not in RM:
+            die("'%s' is a %s (%s): 'wk machine rm' removes a build machine, a peer or a board" % (name, conf["kind"], self.rel(path)))
+        return getattr(self, RM[conf["kind"]])(name, conf, path)
 
     def ls(self, as_json=False, out=None):
         out = out or sys.stdout

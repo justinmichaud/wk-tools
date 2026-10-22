@@ -12,7 +12,6 @@
 #            a build machine: probe it (remote/deps.sh), push wk-tools, provision it (remote/provision.sh), place the
 #            agent credentials and run WebKit's install-dependencies; nothing changes until the probe passes. A peer:
 #            check its own wk answers. A name with no machines/<name>.conf needs --kind, which writes the conf.
-#            Asks once before removing an older wk-tools checkout or a redundant mirror.
 #   rm <name>
 #            a build machine, once no workspace is left on it: the wk-tools lines in its shell rc files, its
 #            ~/.wk-remote and its root; an unreachable one only loses its conf here. A peer: its conf. Asks once.

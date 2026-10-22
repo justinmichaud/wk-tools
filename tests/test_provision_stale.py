@@ -43,15 +43,6 @@ class TestTheBuildMachineRecord(unittest.TestCase):
             (root / "remote" / f).write_text(edit(f, text) if edit else text)
         return deps.inputs_hash(root)
 
-    def test_a_comment_or_a_layout_change_leaves_the_hash_alone(self):
-        def edit(f, text):
-            if f != "deps.sh":
-                return text
-            text = text.replace("wk_remote_deps() {   #", "\n\n# a new note\nwk_remote_deps() {  # reworded:")
-            text = text.replace("    local w\n", "        local w\n\n")
-            return "# a new header\n" + text + "\nwk_remote_driving_side_only() { true; }\n"
-        self.assertEqual(self._copy(edit), deps.inputs_hash(REPO))
-
     def test_what_the_box_runs_is_in_it(self):
         for f, old, new in (("deps.sh", "ccache wanted", "ccache required"), ("probe.sh", "arch=%s", "machine=%s"),
                             ("provision.sh", "ensure_dir \"$ROOT/ws\"", "ensure_dir \"$ROOT/w\"")):

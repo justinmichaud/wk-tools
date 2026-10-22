@@ -72,9 +72,6 @@ class Session:
         m = MODE.search(self._wayland_info())
         return "%sx%s @ %sHz" % m.groups() if m else ""
 
-    def active(self, unit):
-        return self.m.run(["systemctl", "is-active", "--quiet", unit]).ok
-
     def state(self, unit):
         return (self.m.run(["systemctl", "is-active", unit]).out.splitlines() or [""])[0].strip()
 
@@ -83,15 +80,10 @@ class Session:
         return re.sub(r"[^a-z-]", "", line) or "none"
 
     def mode_warn(self):
-        m = self.mode()
-        if m == "bmc":
-            warn("SLOW SESSION: SOFTWARE RENDERING -- the BMC display chip, no GPU at all")
-            log("  nothing measured here means anything (a rendering score differs ~400x).\n"
-                "  measurable session again:  wk quiesce session on")
-        elif m == "off":
-            warn("SESSION IS OFF -- this socket is the screen-off placeholder, not a session")
-            log("  nothing rendered into it shows anywhere.\n"
-                "  a real session:  wk quiesce session on")
+        said = {"bmc": "SLOW SESSION: SOFTWARE RENDERING -- the BMC display chip, no GPU: nothing measured here means anything",
+                "off": "SESSION IS OFF -- this socket is the screen-off placeholder, not a session"}.get(self.mode())
+        if said:
+            warn(said + "\n  a measurable session:  wk quiesce session on")
 
     def bmc_drm_device(self):
         try:
@@ -137,12 +129,12 @@ class Session:
     def seated(self):
         seated = self.foreign()
         if seated:
-            info("a graphical session is already active on seat0 (session %s)" % seated)
-            log("  leaving it alone; 'wk quiesce session off' first for a clean start")
+            info("a graphical session is already active on seat0 (session %s); left alone -- 'wk quiesce session off' "
+                 "first for a clean start" % seated)
         return seated
 
     def on(self, bmc):
-        if self.m.exists(self.socket) and self.active(UNIT):
+        if self.m.exists(self.socket) and self.state(UNIT) == "active":
             wanted, running = ("bmc" if bmc else "gpu"), self.mode()
             if wanted == running:
                 info("wk quiesce session already running (%s, mode %s)" % (self.socket, running))
@@ -159,11 +151,8 @@ class Session:
             die("wayland-info missing -- a session nobody can verify is real is not started; "
                 "./setup --stage tools installs wayland-utils")
 
-        if bmc:
-            log("  the monitor goes dark: the session moves to the BMC, it is not duplicated")
-            info("starting a BMC session on seat0 (software-rendered)")
-        else:
-            info("starting the benchmark compositor on seat0 (GPU only, BMC excluded)")
+        info("starting a BMC session on seat0 (software-rendered; the monitor goes dark)" if bmc
+             else "starting the benchmark compositor on seat0 (GPU only, BMC excluded)")
         if not self.priv("session-on-bmc" if bmc else "session-on"):
             die("the compositor did not start; journalctl -u wk-session")
         if act.dry_run():
@@ -176,24 +165,16 @@ class Session:
             warn("the session is up but not on a BMC connector (outputs: %s)" % (" ".join(outs) or "none"))
 
         info("session up: %s (mode %s)" % (self.socket, self.mode()))
-        log("  outputs: %s  display: %s" % (" ".join(outs), self.display_mode()))
-        log("  workspaces see it at /run/wk/display/wayland-0")
-        log("  launch a browser in it with:  wk gui <workspace> [url]")
-        if bmc:
-            log("  watch it on the BMC's KVM-over-IP console")
+        log("  outputs: %s  display: %s\n  workspaces see it at /run/wk/display/wayland-0:  wk gui <workspace> [url]"
+            % (" ".join(outs), self.display_mode()))
         self.mode_warn()
         return 0
 
     def gdm(self, bmc):
         if self.seated():
             return 0
-        if self.active(UNIT):
-            info("stopping the benchmark compositor to start a desktop instead")
-        if bmc:
-            log("  the monitor goes dark: the GPU is hidden from seat0, not just idle")
-            info("starting gdm on seat0 (BMC only, software-rendered)")
-        else:
-            info("starting gdm on seat0 (GPU only, the BMC's chip hidden from seat0)")
+        info("starting gdm on seat0 (BMC only, software-rendered; the GPU is hidden from seat0)" if bmc
+             else "starting gdm on seat0 (GPU only, the BMC's chip hidden from seat0)")
         if not self.priv("session-gdm-bmc" if bmc else "session-gdm"):
             die("gdm did not start; journalctl -u gdm")
         if act.dry_run():
@@ -204,14 +185,10 @@ class Session:
         if greeter == "wayland":
             info("gdm is up on seat0 (wayland greeter) -- log in at the console")
         elif not greeter:
-            warn("gdm was started but no greeter session appeared on seat0")
-            log("  journalctl -u gdm")
+            warn("gdm was started but no greeter session appeared on seat0: journalctl -u gdm")
         else:
-            warn("the greeter came up on %s, not wayland -- the mode is not enforced" % greeter)
-            log("  NVIDIA's Xorg driver ignores seat tags, so wk's wayland override for gdm\n"
-                "  did not take -- check: sudo %s session-status" % PRIV)
-        if bmc:
-            log("  or over the BMC's KVM-over-IP console")
+            warn("the greeter came up on %s, not wayland -- the mode is not enforced: NVIDIA's Xorg driver ignores\n"
+                 "  seat tags, so wk's wayland override for gdm did not take (sudo %s session-status)" % (greeter, PRIV))
         return 0
 
     def off(self):
@@ -221,14 +198,10 @@ class Session:
             return 0
         lit = self.lit("not-ast")
         if lit:
-            warn("the screen is black but still lit: %s" % " ".join(lit))
-            log("  the modeset that darkens it needs wlr-randr:\n"
-                "    ./setup --stage tools   (then: wk quiesce session off)")
+            warn("the screen is black but still lit: %s -- the modeset that darkens it needs wlr-randr:\n"
+                 "    ./setup --stage tools   (then: wk quiesce session off)" % " ".join(lit))
         else:
             info("screen off -- outputs modeset off, placeholder compositor holding the seat")
-        bmc_lit = self.lit("ast")
-        if bmc_lit:
-            log("  still lit on the BMC's chip: %s (its console keeps its last frame)" % " ".join(bmc_lit))
         log("  a desktop back:  wk quiesce session gdm      a benchmark session:  wk quiesce session on")
         return 0
 
@@ -251,19 +224,13 @@ class Session:
             rows.append(("greeter", greeter + ("" if greeter == "wayland" else "  (mode NOT enforced -- see gdm notes)")))
         if priv.get("seat-hide:"):
             rows.append(("seat-hide", priv["seat-hide:"] + " (hidden from seat0)"))
-        if live:
-            known = self.m.have("wayland-info")
-            rows.append(("outputs", " ".join(self.outputs()) if known else "unknown (wayland-utils missing)"))
-            # Rendering scores scale with surface size, so runs on different display modes are not comparable.
-            shown = self.display_mode() if known else "unknown (wayland-utils missing)"
-            if shown:
-                rows.append(("display", shown))
-        else:
-            seated = self.foreign()
-            if seated:
-                rows.append(("foreign", "session " + seated))
-        for key, value in rows:
-            out.write("%-10s %s\n" % (key + ":", value))
+        if live and self.m.have("wayland-info"):
+            rows += [("outputs", " ".join(self.outputs())), ("display", self.display_mode())]
+        elif live:
+            rows += [("outputs", "unknown (wayland-utils missing)")]
+        elif self.foreign():
+            rows.append(("foreign", "session " + self.foreign()))
+        out.write("".join("%-10s %s\n" % (k + ":", v) for k, v in rows if v))
         self.mode_warn()
         return 0
 

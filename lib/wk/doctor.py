@@ -9,7 +9,7 @@ import shlex
 import sys
 import time
 
-from wk import fleet, guest, images, places, priv, project, quiet, reach, record, secrets
+from wk import daemons, fleet, guest, images, places, priv, project, quiet, reach, record, secrets
 from wk.bench import record as bench_record
 from wk.clock import Clock
 from wk.key.cli import Key
@@ -188,7 +188,7 @@ def vm_guest_git_findings(driver, want):
 
 def socket_answers(path, machine):
     """A socket file is no evidence of a daemon: a killed one leaves it behind, so the answer is a connect."""
-    return machine.run(["python3", "-c", guest.SOCKET_ANSWERS, path]).ok
+    return daemons.answers(machine, path)
 
 
 def launchd_daemons(store):
@@ -275,8 +275,7 @@ def sdk_row(container):
 
 def unit_stale(root, unit, machine):
     """A service keeps the program it exec'd: this tree's copy newer than the process is code nobody can read in the tree."""
-    prog = next((tok[len("@WK_ROOT@/"):] for line in Local().read(os.path.join(root, "host", "units", unit)).splitlines()
-                 if line.startswith("ExecStart=") for tok in line.split() if tok.startswith("@WK_ROOT@/")), "")
+    prog = daemons.PROGRAMS.get(unit[len("wk-"):-len(".service")], "")
     pid = machine.run(["systemctl", "--user", "show", "-p", "MainPID", "--value", unit]).out.strip()
     if not prog or not pid.isdigit() or pid == "0":
         return False
