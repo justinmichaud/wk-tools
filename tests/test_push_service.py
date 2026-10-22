@@ -581,6 +581,42 @@ class TestTheGate(unittest.TestCase):
                 self.assertIn(words, got.exception.why)
                 self.assertIn("wk enter demo", got.exception.remedy)
 
+    def test_a_bridge_is_judged_as_the_command_its_exec_became(self):
+        """The proxy asks with the pid of the bridge ensure-bridge.sh started, whose parent is the command that exec became."""
+        def bridge(parent):
+            return [(77, parent, "python3", ["python3", "/opt/wk-tools/container/proxy/bridge.py", str(parent)])]
+        for rows, kind in ((bridge(500) + person_chain(0)[1:], ""),
+                           (bridge(510) + [(510, 500, "sshd", ["/usr/sbin/sshd", "-i"])] + person_chain(0)[1:], ""),
+                           (bridge(600) + agent_chain(0)[1:], "agent"),
+                           (bridge(450) + [(450, 400, "bash", ["bash", "-lc", "make"])] + person_chain(0)[2:], "own")):
+            with self.subTest(parent=rows[0][1]):
+                shutil.rmtree(self.tmp, True)
+                self.proc.chain(rows)
+                try:
+                    pushgate.person(self.gate.proc, 77, "demo")
+                    got = ""
+                except pushgate.Denied as e:
+                    got = e.kind
+                self.assertEqual(kind, got)
+
+    def test_a_bridge_serves_only_its_commands_tree_with_no_agent_between(self):
+        """The bridge's own check, on the client of a connection: walked up to the command, pid 500, the bridge's parent."""
+        under_command = [(500, 400, "bash", ["/bin/sh", PERSON, "/bin/bash", "--login"])] + person_chain(0)[2:]
+        for rows, kind in (([(77, 500, "git", ["git", "fetch"])] + under_command, ""),
+                           ([(77, 600, "gh", ["gh", "pr", "create"]), (600, 500, "claude", ["/home/u/.local/bin/claude"])] + under_command, "agent"),
+                           (orphan_chain(77), "orphan"),
+                           (own_chain(77), "orphan")):
+            with self.subTest(rows=rows[:2]):
+                shutil.rmtree(self.tmp, True)
+                self.proc.chain(rows)
+                try:
+                    pushgate.bridged(self.gate.proc, 77, 500, "demo")
+                    got = ""
+                except pushgate.Denied as e:
+                    got = e.kind
+                self.assertEqual(kind, got)
+        pushgate.bridged(self.gate.proc, 500, 500, "demo")
+
     def test_a_gone_pid_and_a_loop_are_nobody_s(self):
         with self.assertRaises(pushgate.Denied) as got:
             pushgate.person(self.gate.proc, 77, "demo")

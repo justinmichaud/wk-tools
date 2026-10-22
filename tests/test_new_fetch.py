@@ -356,7 +356,7 @@ class TestWhatFirstRunSaysAboutTheMirror(unittest.TestCase):
     # it is `git-webkit setup`, which needs the injector.
     _FIRSTRUN = (REPO / "container" / "firstrun.sh").read_text()
     BLOCK = _FIRSTRUN[_FIRSTRUN.index('if [ -d "$SRC/.git" ]'):
-                      _FIRSTRUN.index("    # Through ensure-bridge.sh")]
+                      _FIRSTRUN.index("    _setup=$(_git_py pr-tool-setup-script")]
 
     HARNESS = """
 set -u

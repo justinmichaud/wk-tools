@@ -623,7 +623,7 @@ class TestContainerWrite(DriversTest):
         for pair in (("--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.t.store.snapshot_tree(self.base), ws_dir, ws_dir)),
                      ("--volume", "%s:/opt/wk-tools:ro" % self.t.tools_src()), ("--memory", "19749m"), ("--cpus", "7"),
                      ("--volume", "%s:/secrets:ro" % self.t.store.keyring_view_dir("container")), ("--env", "WK_WORKSPACE=new"),
-                     ("--env", "https_proxy=http://127.0.0.1:3128"), ("--device", "/dev/dri")):
+                     ("--env", "NO_PROXY=localhost,127.0.0.1,::1"), ("--device", "/dev/dri")):
             self.assertIn(pair, pairs)
         head = argv[argv.index("--network"):argv.index("--additional-flags")]
         self.assertEqual(head, ("--network", "none", "--isolated", "--name", "wk-new", "--shell", "/bin/bash", "--user", u, "--group", u,
@@ -1124,11 +1124,14 @@ class TestLocalWrite(DriversTest):
         self.t.store_init()
         self.assertEqual(self.fake.effects, [("mkdir", self.t.store.ws_dir("ws"))])
 
-    def test_exec_tty_is_a_plain_local_exec(self):
+    def test_exec_tty_is_a_local_exec_through_a_bridge_of_its_own_in_a_container(self):
+        bridge = os.path.join(self.t.root, "container", "proxy", "ensure-bridge.sh")
         self.fake.answer(["bash"], out="")
-        r = self.t.exec_tty("ws", ["true"])
-        self.assertEqual(r.rc, 0)
-        self.assertEqual(self.fake.effects[-1], ("run_tty", ("bash", "-lc", "exec true"), None))
+        self.fake.answer([bridge], out="")
+        for system, want in (("macos", ("bash", "-lc", "exec true")), ("linux", (bridge, "bash", "-lc", "exec true"))):
+            with self.subTest(system=system), mock.patch.object(self.t, "os", return_value=system):
+                self.assertEqual(self.t.exec_tty("ws", ["true"]).rc, 0)
+                self.assertEqual(self.fake.effects[-1], ("run_tty", want, None))
 
 
 class TestBridges(DriversTest):

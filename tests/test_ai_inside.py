@@ -8,15 +8,19 @@ from unittest import mock
 from tests.support import REPO, WkTest, bash
 from tests.test_ai import AI, _Flow
 from tests.test_doctor_wall import _Wall
-from wk import repos, wall  # noqa: E402
+from wk import places, repos, wall  # noqa: E402
 from wk.act import Refused
 
 
 class _Inside(_Flow, _Wall):
+    """`wk ai claude` typed in a person's shell in a container: the process table is _Wall's, this process the `wk ai` under that shell."""
     kind = "local"
 
     def setUp(self):
         _Wall.setUp(self)
+        patch = mock.patch.object(places.LocalWorkspace, "os", lambda _: "linux")
+        patch.start()
+        self.addCleanup(patch.stop)
         self.setUpFlow()
         self.env.update(WK_NAME="demo", WK_PLACE="local")
         self.set("git config --global --get core.sshCommand", "%s/container/push/wk-push-client.py" % REPO)

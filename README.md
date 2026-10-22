@@ -664,9 +664,17 @@ The GitHub token and Bugzilla key are held by the injector
 (`container/proxy/github-inject.py`), which terminates TLS for those two hosts
 (and Claude's three, for the claude.ai login) and puts the credential on the
 request. It listens twice: a write goes through only on the writing socket.
-The egress proxy asks the push service whether the connecting process is a
-person's (the same rule), and sends any other to the reading socket, where a write is refused with 412 and a read is
-unchanged. A push service that does not answer is a no.
+In a container the toolchain reaches the egress proxy through a loopback
+bridge each exec starts as its own child (`container/proxy/ensure-bridge.sh`
+hands the command its port as `http_proxy`), so the process on the proxy's
+socket is that bridge, under the command the exec became. The egress proxy
+asks the push service whether that process is a person's (the same rule), and
+sends any other to the reading socket, where a write is refused with 412 and a
+read is unchanged. A push service that does not answer is a no. A bridge dies
+with its command, so a process left behind reaches nothing, and it serves only
+that command's own process tree with no agent between; a command run under
+sudo, whose sockets the bridge cannot read, is given its own:
+`sudo /opt/wk-tools/container/proxy/ensure-bridge.sh apt-get ...`.
 
 **Housekeeping**
 
