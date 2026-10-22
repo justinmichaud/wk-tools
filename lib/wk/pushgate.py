@@ -8,10 +8,10 @@ import struct
 PERSON = "container/bin/wk-person"
 # A macOS guest has no /proc; the process is `claude` from any install, or `node <prefix>/bin/pi`.
 AGENT_PS_SCAN = '''ps -Ao pid=,comm= | while read -r p c; do
-    case "$c" in */claude/versions/*|*/claude|claude) printf "%s\\n" "$p" ;; esac
+    case "$c" in */cla[u]de/versions/*|*/cla[u]de|cla[u]de) printf "%s\\n" "$p" ;; esac
 done
 ps -Ao pid=,command= | while read -r p c; do
-    case "$c" in "node "*/bin/pi|"node "*/bin/pi" "*|*/pi-coding-agent/*) printf "%s\\n" "$p" ;; esac
+    case "$c" in "node "*/bin/p[i]|"node "*/bin/p[i]" "*|*/pi-coding-ag[e]nt/*) printf "%s\\n" "$p" ;; esac
 done'''
 
 NOT_RUNNING = ("absent", "created", "configured", "exited", "stopped")

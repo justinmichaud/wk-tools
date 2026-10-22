@@ -59,6 +59,14 @@ def load(path, name):
     return m
 
 
+class TestTheAgentScan(unittest.TestCase):
+    def test_the_shell_running_the_scan_is_not_an_agent(self):
+        """The scan's text names the agents' paths, and a guest runs it under a login shell that carries that text."""
+        cp = subprocess.run(["sh", "-c", 'echo "$$ $PPID"; ' + pushgate.AGENT_PS_SCAN], capture_output=True, text=True, check=True)
+        own, found = cp.stdout.split("\n", 1)
+        self.assertEqual(set(own.split()) & set(found.split()), set(), cp.stdout)
+
+
 class Proc:
     """A /proc directory: `chain` writes one process per row, (pid, ppid, comm, argv), the first being the caller."""
 

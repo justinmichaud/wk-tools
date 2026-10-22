@@ -481,7 +481,7 @@ class PlaceSteps:
         self.assertRegex(r.out, r"a push from (wk's own run|an agent in the guest) is refused")
         if self.conf["chain"]:
             self.assertIn("a push from a person's shell is served", r.out)
-        self.assertIn("no ssh-agent socket and no $SSH_AUTH_SOCK: no key reaches this workspace", r.out)
+        self.assertRegex(r.out, r"(no ssh-agent socket and no \$SSH_AUTH_SOCK|the machine's own ssh-agent, which holds no identity): no key reaches this workspace")
 
     @step(11)
     def test_11_a_write_reaches_nothing_but_from_a_person(self):
