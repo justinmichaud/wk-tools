@@ -265,11 +265,11 @@ class TestCancellingARealBuild(WkTest):
         second = None
         for _ in range(30):   # the detached run takes the lock as it starts
             second = run("build", self.name, "jsc-debug", timeout=300)
-            if second.returncode != 0 and "already building" in second.stdout:
+            if second.returncode != 0 and "already has a job running in it" in second.stdout:
                 break
             time.sleep(2)
         self.assertNotEqual(second.returncode, 0, second.stdout)
-        self.assertIn("already building", second.stdout)
+        self.assertIn("already has a job running in it", second.stdout)
         self.assertIn("--kill", second.stdout)
 
         killed = run("build", self.name, "--kill", timeout=600)
