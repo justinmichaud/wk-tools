@@ -60,6 +60,16 @@ def load(path, name):
 
 
 class TestTheAgentScan(unittest.TestCase):
+    def test_the_session_filter_keeps_the_pids_whose_environment_names_the_session(self):
+        """The filter reads a process's environment the way this kernel gives it (/proc, or ps -E on macOS)."""
+        mine = subprocess.Popen(["sleep", "30"], env={"WK_SESSION": "abc", "PATH": os.environ["PATH"]})
+        other = subprocess.Popen(["sleep", "30"], env={"WK_SESSION": "xyz", "PATH": os.environ["PATH"]})
+        self.addCleanup(mine.kill)
+        self.addCleanup(other.kill)
+        cp = subprocess.run(["sh", "-c", pushgate.SESSION_FILTER % "abc"], input="%d\n%d\n" % (mine.pid, other.pid),
+                            capture_output=True, text=True, check=True)
+        self.assertEqual(cp.stdout.split(), [str(mine.pid)])
+
     def test_the_shell_running_the_scan_is_not_an_agent(self):
         """The scan's text names the agents' paths, and a guest runs it under a login shell that carries that text."""
         cp = subprocess.run(["sh", "-c", 'echo "$$ $PPID"; ' + pushgate.AGENT_PS_SCAN], capture_output=True, text=True, check=True)
