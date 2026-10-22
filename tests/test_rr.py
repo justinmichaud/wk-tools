@@ -12,7 +12,7 @@ from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import ldpath  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.act import Refused  # noqa: E402
 
 os.environ.setdefault("WK_ROOT", str(REPO))
@@ -51,7 +51,7 @@ class RrTest(unittest.TestCase):
 
     def go(self, mod, driver, argv, preset="gtk-release", **env):
         reg = mock.Mock()
-        reg.load.return_value = driver
+        reg.present.return_value = driver
         with mock.patch.object(mod.places, "Registry", return_value=reg), \
                 mock.patch.dict(os.environ, dict({"WK_NAME": "ws", "WK_PRESET": preset, "WK_QUIET": "1"}, **env)):
             if mod is GUI:
@@ -92,7 +92,7 @@ class TestRecordAndReplay(RrTest):
         driver = _driver(have_rr=False, paranoid="3")
         driver.exec_argv.return_value = (["ssh", "box", "rr record"], None)
         reg = mock.Mock()
-        reg.load.return_value = driver
+        reg.present.return_value = driver
         reg.machine = Fake()
         with mock.patch.object(RUN.places, "Registry", return_value=reg), \
                 mock.patch("os.execvp", side_effect=AssertionError("ran it")), \

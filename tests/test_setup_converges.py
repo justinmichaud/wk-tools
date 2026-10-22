@@ -11,7 +11,8 @@ from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import dispatch, setupstate  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
@@ -77,13 +78,13 @@ class TestAMacAfterABoot(SetupTest):
         super().setUp()
         agents = self.tmp / "home" / "Library" / "LaunchAgents"
         agents.mkdir(parents=True)
-        (agents / "com.wk.inject.plist").write_text("<plist/>")
+        (agents / "com.wk.github-inject.plist").write_text("<plist/>")
         self.record()
         self.m.answer(["sysctl"], out="{ sec = 200, usec = 0 }, Tue")
 
     def test_an_agent_launchd_did_not_load_is_behind_once_per_boot(self, _):
         self.m.answer(["launchctl", "print"], rc=113)
-        self.assertEqual("launchd has not loaded com.wk.inject since this boot", self.behind())
+        self.assertEqual("launchd has not loaded com.wk.github-inject since this boot", self.behind())
         self.record()
         self.assertEqual("", self.behind(), "a run in this boot that could not load it is not repeated")
 

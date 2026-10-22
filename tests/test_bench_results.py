@@ -19,9 +19,15 @@ from tests.test_bench_task import TASK, add_run, make_task, refusal, registry
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
 from wk.bench import cli, record, report  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Local, Planted, PodmanVm, Ssh  # noqa: E402
+from wk.machine import Local, Planted, Ssh  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
+
+
+def kv(fields, bools=()):
+    """Fields as wk writes them into a record: key=value strings, and the bools as flags."""
+    return dict([f.split("=", 1) for f in fields] + [(b.split("=", 1)[0], bool(b.split("=", 1)[1])) for b in bools])
 
 HEAD, BASE = "afa2ed9e70103469f02732323fa7b874378d6a5d", "04abe09851b03b7ce6c8b9c208659c23a5ab7138"
 READING = {"benchmarks": {}, "combined": {}, "compressed": {}, "missing": [], "libraries": [], "plans": []}
@@ -30,7 +36,7 @@ READING = {"benchmarks": {}, "combined": {}, "compressed": {}, "missing": [], "l
 def complete_task(bench_dir, name=TASK):
     d = make_task(bench_dir, rounds=1, name=name)
     for slot, arm, sha in (("base", "a", BASE), ("pr1725", "b", HEAD)):
-        record.write_env(str(add_run(d, slot, 1, arm, "ok") / "env.json"), ["webkit_sha=" + sha], update=True)
+        record.write_env(str(add_run(d, slot, 1, arm, "ok") / "env.json"), kv(["webkit_sha=" + sha]), update=True)
     (d / "warmup").mkdir()
     (d / "warmup" / "rpi3-a.profile.json").write_text("{}")
     (d / "runs" / os.listdir(d / "runs")[0] / "run.log").write_text("not a deliverable\n")
@@ -87,7 +93,7 @@ class TestTheReportConfirmsWhatWasBuiltAndChecked(WkTest):
         d = complete_task(self.tmp)
         for r in (d / "runs").iterdir():
             arm = json.loads((r / "env.json").read_text())["ab"]["arm"]
-            record.write_env(str(r / "env.json"), ["webkit_sha=" + ("1" * 40 if arm == "b" else "")], update=True)
+            record.write_env(str(r / "env.json"), kv(["webkit_sha=" + ("1" * 40 if arm == "b" else "")]), update=True)
         out = self.report(d)
         self.assertIn("slot base: ?  unknown -- no run recorded the commit it measured", out)
         self.assertIn("slot pr1725: 111111111111  FAIL -- the task names afa2ed9e7010", out)
@@ -95,14 +101,14 @@ class TestTheReportConfirmsWhatWasBuiltAndChecked(WkTest):
     def test_a_forced_preflight_fails_its_check(self):
         d = complete_task(self.tmp)
         r = sorted((d / "runs").iterdir())[0]
-        record.write_env(str(r / "env.json"), ["preflight_notes=cpu governor: powersave; "], bool_fields=["forced=1"], update=True)
+        record.write_env(str(r / "env.json"), kv(["preflight_notes=cpu governor: powersave; "], ["forced=1"]), update=True)
         self.assertIn("FAIL     preflight     1 of 2 runs forced past failing checks: cpu governor: powersave;", self.report(d))
 
     def test_a_pgo_build_is_judged_by_the_reading_its_run_carries(self):
         d = complete_task(self.tmp)
         runs = sorted((d / "runs").iterdir())
         for r in runs:
-            record.write_env(str(r / "env.json"), ["preset=mac-release-pgo"], update=True)
+            record.write_env(str(r / "env.json"), kv(["preset=mac-release-pgo"]), update=True)
         self.assertIn("unknown  PGO profile   2 of 2 PGO runs carry no profile-check.json reading", self.report(d))
         for r in runs:
             (r / "profile-check.json").write_text(json.dumps(READING))
@@ -115,11 +121,12 @@ class TestTheReportConfirmsWhatWasBuiltAndChecked(WkTest):
     def test_a_board_pgo_slot_and_the_warmup_round_are_checks_too(self):
         d = complete_task(self.tmp)
         for r in (d / "runs").iterdir():
-            record.write_env(str(r / "env.json"), ["build_preset=wpe-cross-pgo-use"], update=True)
-        (d / "warmup" / "rpi3-a.evidence.json").write_text(json.dumps({"elf": {}, "gl": {}, "jit": {}, "problems": []}))
+            record.write_env(str(r / "env.json"), kv(["build_preset=wpe-cross-pgo-use"]), update=True)
+        (d / "warmup" / "rpi3-a.evidence.json").write_text(json.dumps({"elf": {}, "gl": {}, "jit": {}}))
         out = self.report(d)
         self.assertIn("unknown  PGO profile", out)
-        self.assertIn("FAIL     warmup        rpi3: arm B produced no warmup evidence", out)
+        self.assertIn("FAIL     warmup        rpi3: arm A: the web process mapped no DRI driver", out)
+        self.assertIn("arm B produced no warmup evidence", out)
 
     def test_a_task_stopped_short_says_how_to_restart_it(self):
         d = make_task(self.tmp)
@@ -405,7 +412,7 @@ class TestAPlantedLinkIsNotWrittenThrough(PlantedTest):
     def test_an_env_record_replaces_a_link(self):
         (self.run_dir / "env.json").unlink()
         self.plant(self.run_dir / "env.json")
-        record.write_env(str(self.run_dir / "env.json"), ["plan=x"])
+        record.write_env(str(self.run_dir / "env.json"), kv(["plan=x"]))
         self.assertEqual(SECRET, self.key.read_bytes())
 
     def test_a_task_html_report_replaces_a_link(self):
@@ -469,13 +476,13 @@ class TestTheSeamReadsATree(PlantedTest):
             self.read(far)
         self.assertIn("%s is a symbolic link" % link, str(e.exception))
 
-    def test_the_podman_vm_reads_through_the_same_script_and_still_refuses_a_copy(self):
+    def test_the_podman_vm_reads_through_the_same_script_and_a_failed_copy_raises(self):
         via = Fake("here")
         via.answer(["podman", "machine", "ssh"], rc=1, err="no such directory")
-        vm = PodmanVm("wk", via=via)
+        vm = Ssh.podman("wk", via=via)
         with self.assertRaises(OSError):
             vm.read_tree("/var/lib/wk/ws/w", "bench/t", ("*",))
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(OSError):
             vm.copy_tree_out("/f", str(self.tmp / "x"))
 
     def test_a_fake_refuses_a_link_it_holds(self):
@@ -492,23 +499,23 @@ class TestTheSeamReadsATree(PlantedTest):
             self.assertIsNone(c.task_store())
         with mock.patch.object(places.Container, "is_here", return_value=False):
             m, root = c.task_store()
-        self.assertEqual((type(m), root), (PodmanVm, "/var/lib/wk"))
-        box = types.SimpleNamespace(peer=False, is_local=False, machine="ssh", root_there=lambda: "/srv/wk")
+        self.assertEqual((m.kind, root), ("podman", "/var/lib/wk"))
+        box = types.SimpleNamespace(is_local=False, machine="ssh", root_there=lambda: "/srv/wk")
         self.assertEqual(places.Remote.task_store(box), ("ssh", "/srv/wk"))
-        for peer, local in ((True, False), (False, True)):
-            self.assertIsNone(places.Remote.task_store(types.SimpleNamespace(peer=peer, is_local=local)))
+        self.assertIsNone(places.Remote.task_store(types.SimpleNamespace(is_local=True)))
+        self.assertIsNone(places.Peer.task_store(box))
 
     def peer(self, rc=0, out=""):
         far = Fake("peer")
         far.answer(["sh", "-c"], rc=rc, out=out, err="" if rc == 0 else "ssh: connect to host peer1: refused")
-        p = places.Remote.__new__(places.Remote)
-        p.peer, p.is_local, p.machine, p.host, p.env = True, False, far, "peer1", {"WK_REMOTE_TOOLS": "/t"}
+        p = places.Peer.__new__(places.Peer)
+        p.is_local, p.machine, p.host, p.env, p._probed = False, far, "peer1", {"WK_REMOTE_TOOLS": "/t"}, None
         return p, far
 
     def test_a_peer_names_its_tasks_home_through_the_hops_its_own_wk_reaches_it_by(self):
         p, far = self.peer(out=json.dumps({"via": [["podman", "wk"]], "path": "/var/lib/wk/ws/w/bench"}))
         m, path = p.results("w")
-        self.assertEqual((type(m), m.dest, m.via, path), (PodmanVm, "wk", far, "/var/lib/wk/ws/w/bench"))
+        self.assertEqual((m.kind, m.dest, m.via, path), ("podman", "wk", far, "/var/lib/wk/ws/w/bench"))
         self.assertIn("wk.bench.record home w", far.effects[-1][1][-1])
 
     def test_a_peer_that_does_not_answer_is_named_with_what_it_said(self):
@@ -523,4 +530,4 @@ class TestTheSeamReadsATree(PlantedTest):
 
     def test_a_machine_is_named_as_its_hops_nearest_first(self):
         self.assertEqual(record.hops(Local()), [])
-        self.assertEqual(record.hops(PodmanVm("wk", via=Ssh("box"))), [["ssh", "box"], ["podman", "wk"]])
+        self.assertEqual(record.hops(Ssh.podman("wk", via=Ssh("box"))), [["ssh", "box"], ["podman", "wk"]])

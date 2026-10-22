@@ -14,7 +14,7 @@ from tests.bashlift import lift as _lift
 from tests.support import REPO, WkTest, bash, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.sysimage import write  # noqa: E402
 
 CARD_PRIV = REPO / "admin" / "wk-card-priv"

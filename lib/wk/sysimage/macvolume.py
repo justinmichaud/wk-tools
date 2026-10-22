@@ -369,7 +369,7 @@ class MacVolume:
         if self.m.act_run(["sudo", "install", "-d", "-o", "501", "-g", "20", "-m", "0755", sroot]).ok:
             info("staging root ready: %s (uid 501, the first account on both installs)" % sroot)
         else:
-            warn("  could not create %s -- 'wk bench stage' will fail" % sroot)
+            warn("  could not create %s -- 'wk bench deploy' to it will fail" % sroot)
         if act.dry_run():
             log("  would copy this Mac's Wi-Fi identity into the bench payload")
         else:

@@ -24,8 +24,9 @@ from tests import test_pr_workflow, test_wk_places
 from tests.support import REPO, WkTest, requires_container_place
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import git, guest, pushgate, repos, secrets  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk import git, pushgate, repos, secrets  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 SERVICE = REPO / "container" / "push" / "wk-push.py"

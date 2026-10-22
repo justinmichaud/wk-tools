@@ -14,7 +14,8 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import machine, places, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import cli, record  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 
 class RmResultsTest(WkTest):
@@ -66,7 +67,7 @@ class TestATaskNoExportHoldsIsNotDestroyed(RmResultsTest):
     def test_an_export_of_an_earlier_state_holds_nothing(self):
         self.exported_to(self.home / "Downloads" / (TASK + ".zip"))
         run_dir = sorted((self.task / "runs").iterdir())[0]
-        record.write_env(str(run_dir / "env.json"), ["wall_time_s=999"], update=True)
+        record.write_env(str(run_dir / "env.json"), {"wall_time_s": "999"}, update=True)
         self.assertNotEqual(self.rm().returncode, 0)
         self.assertFalse(self.gone())
 
@@ -122,6 +123,7 @@ class _Holder:
     """A place whose workspace's bench tasks are read through another machine, the way a Mac reads the podman machine's."""
 
     name = "container"
+    peer = False
 
     def __init__(self, machine, bench):
         self.machine, self.bench = machine, bench

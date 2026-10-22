@@ -321,7 +321,6 @@ class Local(Machine):
         else:
             os.execvpe(argv[0], argv, env)
 
-    # Both ends are this host's own filesystem, so a real copy needs no transport.
     def copy_in(self, src, dest):
         if not self._would("copy", "%s -> %s" % (src, dest)):
             shutil.copyfile(src, dest)
@@ -431,14 +430,26 @@ MTIME = "import os, sys; print(os.path.getmtime(sys.argv[1]))"
 
 
 class Ssh(Machine):
-    """A host over ssh, each call one bounded non-interactive round trip run by `via` (this host)."""
+    """A host over ssh, or `podman`'s or `tart`'s channel: each call one bounded round trip run by `via` (this host)."""
 
-    def __init__(self, dest, opts=None, timeout=10, via=None, control_dir=None):
+    def __init__(self, dest, opts=None, timeout=10, via=None, control_dir=None, channel=None, kind="ssh"):
         self.dest = dest
         self.name = dest
         self.control_dir = control_dir
         self.opts = list(opts or []) + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=%d" % timeout]
         self.via = via or Local()
+        self.channel = channel
+        self.kind = kind
+
+    @classmethod
+    def podman(cls, name, via=None):
+        return cls(name, via=via, kind="podman", channel=lambda tty: ["podman", "machine", "ssh", name, "--"])
+
+    @classmethod
+    def tart(cls, tart, vm, via=None):
+        """A macOS guest through `tart exec`, the guest agent's channel: no network, so local-network privacy never applies."""
+        return cls(vm, via=via, kind="tart",
+                   channel=lambda tty: [tart, "exec", "-i"] + (["-t"] if tty else []) + [vm, "/bin/zsh", "-lc"])
 
     def _up(self):
         """ssh creates no ControlPath directory; it is made on `via` before the first ssh that names it."""
@@ -446,12 +457,13 @@ class Ssh(Machine):
             self.via.mkdir_now(self.control_dir)
 
     def argv(self, remote, tty=False):
+        if self.channel:
+            return self.channel(tty) + [remote]
         # The far sshd runs a command under a non-login shell, so ~/.local/bin and Homebrew are off its PATH.
         return ["ssh"] + (["-t"] if tty else []) + self.opts + [self.dest, LOGIN + shlex.quote(remote)]
 
     def _ssh(self, remote, input=None, timeout=None, how=None, stream=False):
         self._up()
-        # An empty stdin, not the caller's: ssh drinks whatever it is handed.
         return (how or self.via.run)(self.argv(remote), input="" if input is None else input, timeout=timeout,
                                      **({"stream": True} if stream else {}))
 
@@ -553,6 +565,9 @@ class Ssh(Machine):
         """A context holding `ssh -R`: the far side's 127.0.0.1:<port> is this host's while it is held; it yields the ssh's pid, 0 in a dry run."""
         from contextlib import contextmanager
 
+        if self.channel:
+            raise NotImplementedError("a port forward into %s goes over its sshd, not %s" % (self.dest, self.kind))
+
         @contextmanager
         def held():
             self._up()
@@ -565,393 +580,34 @@ class Ssh(Machine):
                     self.via.kill(pid)
         return held()
 
-    # scp/rsync, run by `via` (this host) reaching `self.dest`: a byte pipe through this Machine's own `run` would
-    # corrupt binary data both ways. --chmod=go-w: a tree crossing machines does not carry the pushing machine's umask.
-    def _copy(self, argv, src, dest, tree=""):
-        if self._would("copy", "%s -> %s%s" % (src, dest, tree)):
+    # A pipe run by `via` through the channel: bytes through this Machine's `run` would be decoded as text.
+    def _pipe(self, line, local, remote, src, dest):
+        if self._would("copy", "%s -> %s" % (src, dest)):
             return
         self._up()
-        r = self.via.run(argv)
+        r = self.via.run(["bash", "-c", "set -o pipefail; f=$1; shift; " + line, "bash", local] + self.argv(remote))
         if not r.ok:
             raise OSError(r.err.strip() or "copy between here and %s failed" % self.dest)
 
-    def _rsync(self, src, dest, exclude=()):
-        return ["rsync", "-a", "--chmod=go-w", "--delete", *excludes(exclude), "-e", "ssh " + shlex.join(self.opts),
-                src.rstrip("/") + "/", dest.rstrip("/") + "/"]
-
     def copy_in(self, src, dest):
-        self._copy(["scp", "-q", *self.opts, src, "%s:%s" % (self.dest, dest)], src, dest)
+        self._pipe('"$@" < "$f"', src, "cat > %s" % shlex.quote(dest), src, dest)
 
     def copy_out(self, src, dest):
-        self._copy(["scp", "-q", *self.opts, "%s:%s" % (self.dest, src), dest], src, dest)
+        self._pipe('"$@" < /dev/null > "$f"', dest, "cat %s" % shlex.quote(src), src, dest)
 
     def copy_tree_in(self, src, dest):
-        self._copy(self._rsync(src, "%s:%s" % (self.dest, dest)), src, dest, "/")
+        q = shlex.quote(dest)
+        self._pipe('COPYFILE_DISABLE=1 tar -C "$f" -cf - . | "$@"', src,
+                   "rm -rf %s && mkdir -p %s && tar -C %s -xf -" % (q, q, q), src, dest + "/")
 
     def copy_tree_out(self, src, dest, exclude=()):
-        self._copy(self._rsync("%s:%s" % (self.dest, src), dest, exclude), src, dest, "/")
-
-
-class PodmanVm(Ssh):
-    """A macOS host's podman machine, where the container store is, over `podman machine ssh`: reads and small writes only."""
-
-    def argv(self, remote, tty=False):
-        return ["podman", "machine", "ssh", self.dest, "--", remote]
-
-    def _refused(self, *a, **kw):
-        raise NotImplementedError("a copy into or out of the podman machine goes through its mounts, not %s" % self.dest)
-
-    run_tty = forward = copy_in = copy_out = copy_tree_in = copy_tree_out = _refused
-
-
-class TartExec(Ssh):
-    """A macOS guest through `tart exec`, the guest agent's channel: no network, so macOS local-network privacy never applies."""
-
-    def __init__(self, tart, vm, via=None):
-        super().__init__(vm, via=via)
-        self.tart = tart
-
-    def argv(self, remote, tty=False):
-        return [self.tart, "exec", "-i"] + (["-t"] if tty else []) + [self.dest, "/bin/zsh", "-lc", remote]
-
-    def _pipe(self, line, src, dest, *args):
-        self._copy(["sh", "-c", "set -o pipefail; " + line, self.tart, self.dest, src, dest, *args], src, dest)
-
-    def copy_in(self, src, dest):
-        self._pipe('"$0" exec -i "$1" /bin/sh -c \'cat > "$0"\' "$3" < "$2"', src, dest)
-
-    def copy_out(self, src, dest):
-        self._pipe('"$0" exec "$1" /bin/cat "$2" > "$3"', src, dest)
-
-    def copy_tree_in(self, src, dest):
-        self._pipe('tar -C "$2" -cf - . | "$0" exec -i "$1" /bin/sh -c \'rm -rf "$0" && mkdir -p "$0" && tar -C "$0" -xf -\' "$3"',
-                   src, dest)
-
-    def copy_tree_out(self, src, dest, exclude=()):
-        """bsdtar matches an --exclude unanchored, so a pattern without a slash names a path at any depth, as rsync's does."""
-        self._pipe('t=$0 g=$1 s=$2 d=$3; shift 3; "$t" exec "$g" /usr/bin/tar -cf - -C "$s" "$@" . '
-                   '| { rm -rf "$d" && mkdir -p "$d" && tar -C "$d" -xf -; }', src, dest, *excludes(exclude))
-
-    def _refused(self, *a, **kw):
-        raise NotImplementedError("a port forward into %s goes over its sshd (Vm.ssh_transport), not tart exec" % self.dest)
-
-    forward = _refused
+        self._pipe('rm -rf "$f" && mkdir -p "$f" && "$@" < /dev/null | tar -C "$f" -xf -', dest,
+                   shlex.join(["env", "COPYFILE_DISABLE=1", "tar", "-cf", "-", "-C", src, *excludes(exclude), "."]),
+                   src, dest + "/")
 
 
 def excludes(patterns):
     return [w for x in patterns for w in ("--exclude", x)]
-
-
-class Exited:
-    def __init__(self, pid, rc):
-        self.pid, self.returncode = pid, rc
-
-    def poll(self):
-        return self.returncode
-
-    def wait(self):
-        return self.returncode
-
-
-class Killed(Exception):
-    """The Fake's process died: raised in place of the effect `stop_after` names."""
-
-
-class Fake(Machine):
-    """An in-memory host: a command answers what `answer()` or `react()`
-    registered for the longest matching argv prefix (the latest among
-    equals), and every effect lands in `effects`; with `stop_after` set, the
-    effect after that many raises Killed instead of landing."""
-
-    def __init__(self, name="fake"):
-        self.name = name
-        self.files = {}
-        self.dirs = set()
-        self.links = set()
-        self.mtimes = {}
-        self.pids = {os.getpid()}
-        self.answers = []
-        self.effects = []
-        self.next_pid = 1000
-        self.stop_after = None
-        self.applied = 0
-        self.streamed = []
-        self._acting = False
-
-    def answer(self, prefix, rc=0, out="", err=""):
-        self.answers.append((tuple(prefix), Result(rc, out, err)))
-
-    def react(self, prefix, fn):
-        """`fn(argv, fake)` returns the Result and may move the fake's files and pids."""
-        self.answers.append((tuple(prefix), fn))
-
-    def effect(self, record):
-        if self.stop_after is not None and self.applied >= self.stop_after:
-            raise Killed(record)
-        self.applied += 1
-        self.effects.append(record)
-
-    def _record(self, record):
-        if self._acting:
-            self.effect(record)
-        else:
-            self.effects.append(record)
-
-    def record_run(self, argv):
-        self._record(("run", tuple(argv)))
-
-    def _answer(self, argv):
-        best = None
-        for prefix, result in self.answers:
-            if tuple(argv[:len(prefix)]) == prefix and (best is None or len(prefix) >= len(best[0])):
-                best = (prefix, result)
-        if best is None:
-            return Result(127, "", "%s: no answer registered" % argv[0])
-        if not callable(best[1]):
-            return best[1]
-        seen = list(argv)
-        if seen[0] == "ssh" and seen[-1].startswith(LOGIN):
-            seen[-1] = shlex.split(seen[-1])[-1]
-        return best[1](seen, self)
-
-    def act_run(self, argv, **kw):
-        self._acting = True
-        try:
-            return super().act_run(argv, **kw)
-        finally:
-            self._acting = False
-
-    def run(self, argv, input=None, timeout=None, stream=False):
-        self.record_run(argv)
-        r = self._answer(argv)
-        if not stream:
-            return r
-        self.streamed.append(tuple(argv))
-        sys.stderr.write(r.out + r.err)
-        return Result(r.rc)
-
-    def run_tty(self, argv, cwd=None, timeout=None):
-        self._record(("run_tty", tuple(argv), cwd))
-        return self._answer(argv)
-
-    def read(self, path):
-        if path not in self.files:
-            raise OSError("no such file: %s" % path)
-        return self.files[path]
-
-    def read_tree(self, anchor, rel, patterns, depth=3):
-        top = os.path.join(anchor, rel).rstrip("/")
-        path = anchor.rstrip("/")
-        for part in (p for p in rel.split("/") if p):
-            path += "/" + part
-            if path in self.links:
-                raise Planted(path)
-        if top not in self.dirs:
-            raise OSError("no such directory: %s" % top)
-        out = {}
-        for p in sorted(self.files):
-            r = p[len(top) + 1:]
-            if not p.startswith(top + "/") or r.count("/") >= depth:
-                continue
-            if p in self.links:
-                raise Planted(p)
-            if matches(r, patterns):
-                data = self.files[p]
-                out[r] = data if isinstance(data, bytes) else data.encode()
-        return out
-
-    def exists(self, path):
-        return path in self.files or path in self.dirs
-
-    def isdir(self, path):
-        return path in self.dirs
-
-    def listdir(self, path):
-        if path not in self.dirs:
-            raise OSError("no such directory: %s" % path)
-        prefix = path.rstrip("/") + "/"
-        names = set()
-        for p in list(self.files) + list(self.dirs):
-            if p.startswith(prefix):
-                names.add(p[len(prefix):].split("/")[0])
-        return sorted(names)
-
-    def alive(self, pid):
-        return pid in self.pids
-
-    def readlink(self, path):
-        return self.files[path] if path in self.files else None
-
-    def mtime(self, path):
-        if path not in self.files:
-            raise OSError("no such file: %s" % path)
-        return self.mtimes.get(path, 0.0)
-
-    def read_bytes(self, path, start=0):
-        data = self.read(path)
-        return (data if isinstance(data, bytes) else data.encode())[start:]
-
-    def _set_file(self, path, text):
-        self.files[path] = text
-        self.links.discard(path)
-        parent = os.path.dirname(path)
-        while parent and parent != "/":
-            self.dirs.add(parent)
-            parent = os.path.dirname(parent)
-
-    def write(self, path, text):
-        self.effect(("write", path))
-        if act.dry_run():
-            return
-        self._set_file(path, text)
-
-    def write_own(self, path, text):
-        self._set_file(path, text)
-
-    def remove_own(self, path):
-        self._drop(path)
-
-    def _drop(self, path):
-        self.files = {p: t for p, t in self.files.items() if p != path and not p.startswith(path.rstrip("/") + "/")}
-        self.links &= set(self.files)
-        self.dirs = {d for d in self.dirs if d != path and not d.startswith(path.rstrip("/") + "/")}
-
-    def remove(self, path):
-        self.effect(("remove", path))
-        if act.dry_run():
-            return
-        self._drop(path)
-
-    def remove_now(self, path):
-        self.effect(("remove", path))
-        self._drop(path)
-
-    def mkdir(self, path):
-        self.effect(("mkdir", path))
-        if act.dry_run():
-            return
-        self.dirs.add(path)
-
-    def mkdir_now(self, path):
-        self.effect(("mkdir", path))
-        self.dirs.add(path)
-
-    def symlink(self, target, path):
-        self.effect(("symlink", path))
-        parent = os.path.dirname(path)
-        if path in self.files or path in self.dirs or (parent not in ("", "/") and parent not in self.dirs):
-            return False
-        self.files[path] = target
-        self.links.add(path)
-        return True
-
-    def rename(self, path, dst):
-        self.effect(("rename", path, dst))
-        if path not in self.files:
-            return False
-        self.files[dst] = self.files.pop(path)
-        self.links.discard(dst)
-        if path in self.links:
-            self.links.discard(path)
-            self.links.add(dst)
-        return True
-
-    def kill(self, pid, sig=signal.SIGTERM):
-        self.effect(("kill", pid, int(sig)))
-        if act.dry_run():
-            return True
-        if pid in self.pids:
-            self.pids.discard(pid)
-            return True
-        return False
-
-    def spawn(self, argv, log):
-        self.effect(("spawn", tuple(argv), log))
-        if act.dry_run():
-            return 0
-        self.next_pid += 1
-        self.pids.add(self.next_pid)
-        self.files.setdefault(log, "")
-        return self.next_pid
-
-    def start(self, argv, out, cwd=None):
-        self.effect(("start", tuple(argv)))
-        r = self._answer(argv)
-        out.write((r.out + r.err).encode())
-        self.next_pid += 1
-        return Exited(self.next_pid, r.rc)
-
-    def _exec(self, argv, cwd, env):
-        self.effect(("exec", tuple(argv), cwd))
-
-    def forward(self, port, log=os.devnull):
-        from contextlib import contextmanager
-
-        @contextmanager
-        def held():
-            self.effect(("forward", port))
-            pid = 0
-            if not act.dry_run():
-                self.next_pid += 1
-                pid = self.next_pid
-                self.pids.add(pid)
-            try:
-                yield pid
-            finally:
-                self.pids.discard(pid)
-        return held()
-
-    # A real file on disk crosses into this fake host's in-memory files, and back.
-    def copy_in(self, src, dest):
-        self.effect(("copy_in", src, dest))
-        if act.dry_run():
-            return
-        with open(src, "rb") as f:
-            data = f.read()
-        self._set_file(dest, data)
-
-    def copy_out(self, src, dest):
-        self.effect(("copy_out", src, dest))
-        if act.dry_run():
-            return
-        data = self.read(src)
-        with open(dest, "wb") as f:
-            f.write(data if isinstance(data, bytes) else data.encode())
-
-    def copy_tree_in(self, src, dest):
-        self.effect(("copy_tree_in", src, dest))
-        if act.dry_run():
-            return
-        self._drop(dest)
-        self.dirs.add(dest)
-        for root, _, filenames in os.walk(src):
-            rel = os.path.relpath(root, src)
-            base = dest if rel == "." else os.path.join(dest, rel)
-            self.dirs.add(base)
-            for fn in filenames:
-                with open(os.path.join(root, fn), "rb") as f:
-                    self.files[os.path.join(base, fn)] = f.read()
-
-    def copy_tree_out(self, src, dest, exclude=()):
-        self.effect(("copy_tree_out", src, dest) + tuple(exclude))
-        if act.dry_run():
-            return
-        if src not in self.dirs:
-            raise OSError("no such directory: %s" % src)
-        if os.path.isdir(dest):
-            shutil.rmtree(dest)
-        os.makedirs(dest, exist_ok=True)
-        prefix = src.rstrip("/") + "/"
-        for p, data in self.files.items():
-            if not p.startswith(prefix):
-                continue
-            rel = p[len(prefix):]
-            if any(fnmatch.fnmatchcase(part, x) for part in rel.split("/") for x in exclude):
-                continue
-            out = os.path.join(dest, rel)
-            os.makedirs(os.path.dirname(out), exist_ok=True)
-            with open(out, "wb") as f:
-                f.write(data if isinstance(data, bytes) else data.encode())
 
 
 def here():

@@ -89,7 +89,7 @@ class Build:
             log("usage: wk build <preset>" if self.in_ws else "usage: wk build <workspace> <preset>")
             list_presets()
             raise Refused(2)
-        self.preset = presets.resolve(o["preset"], self.driver.os(), self.driver.kind, self.driver.env)
+        self.preset = presets.resolve_or_die(o["preset"], self.driver)
         for e in o.get("env", []):
             if not re.match(r"^[A-Za-z_][^=]*=", e):
                 die("--env takes NAME=VALUE, got %s" % shlex.quote(e))

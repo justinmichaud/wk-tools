@@ -58,10 +58,7 @@ def main(argv):
     if zed:
         reg.machine.exec([os.path.join(ROOT, "cmd", "zed"), name])
         return
-    try:
-        driver = reg.present(name)
-    except LookupError as e:
-        die(str(e))
+    driver = reg.present(name)
 
     if cmd:
         tty = sys.stdin.isatty() and sys.stdout.isatty()

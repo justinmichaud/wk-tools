@@ -58,7 +58,7 @@ ensure_dir "$ROOT"
 ensure_dir "$ROOT/ws"
 ensure_dir "$ROOT/cache/ccache"
 
-# inputs= is the hash of what this file, remote/probe.sh and remote/deps.sh run (comments and layout aside), computed on the driving side (inputs_hash, lib/wk/machine_cmd.py) so the two ends cannot hash differently; `wk doctor --all` recomputes it and compares.
+# inputs= is lib/treehash.py's digest of remote/, computed on the driving side (inputs_hash, lib/wk/machine_cmd/deps.py) so the two ends cannot hash differently; `wk doctor --all` recomputes it and compares.
 write_file "$HOME/.wk-remote" 0644 <<EOF
 # wk: this machine hosts wk remote workspaces. Written by remote/provision.sh.
 #

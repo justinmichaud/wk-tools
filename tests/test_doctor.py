@@ -20,7 +20,8 @@ sys.path.insert(0, str(REPO / "lib"))
 import credcheck  # noqa: E402
 from wk import doctor, priv  # noqa: E402
 from wk.key.cli import Key  # noqa: E402
-from wk.machine import HAVE, Fake, Local, Result  # noqa: E402
+from wk.machine import HAVE, Local, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 OK, MISS, UNK = doctor.OK, doctor.MISS, doctor.UNK

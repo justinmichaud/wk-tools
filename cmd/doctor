@@ -88,8 +88,8 @@ EXIT = {"intact": 0, "broken": 1, "publishing": 3}
 
 
 def inside(reg):
-    driver = reg.load("local")
-    v = wall.measure(ROOT, driver, driver.ws_name, reg.machine)
+    driver, name = reg.load("local"), reg.workspace_name()
+    v = wall.measure(ROOT, driver, name, reg.machine)
     disk.workspace_report(reg)
     return EXIT[v]
 

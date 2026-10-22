@@ -9,7 +9,7 @@ from tests.test_dispatch_speed import _LOCAL_CONF, _MACHINE_CONF, _WITNESS_SSH
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 _PROBE = '''#!/usr/bin/env python3
 #

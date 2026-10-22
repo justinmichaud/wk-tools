@@ -1,4 +1,4 @@
-"""The base a workspace tracks: the upstream WebKit line a checkout's HEAD descends from (places.upstream_line(),
+"""The base a workspace tracks: the upstream WebKit line a checkout's HEAD descends from (git.PROBE's `wsbase`,
 run inside the workspace by `wk ls` and `wk status`), against real disposable repositories; an image
 workspace's base from the preset conf this checkout ships."""
 import re
@@ -8,11 +8,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.support import REPO, bash
+from tests.support import REPO
 from tests.test_status import machine_rec, render
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places, statusview  # noqa: E402
+from wk import git, places, statusview  # noqa: E402
+from wk.machine import Local  # noqa: E402
 
 CONFIGS = REPO / "image" / "presets"
 
@@ -32,10 +33,8 @@ def _init_repo(repo):
 
 
 def upstream_line(repo):
-    """The script `wk status` runs inside a workspace, run with $PWD inside `repo`."""
-    cp = bash(places.upstream_line(), cwd=str(repo))
-    assert cp.returncode == 0, cp.stderr
-    return cp.stdout.strip()
+    """The probe `wk ls` and `wk status` run inside a workspace, run in `repo`."""
+    return git.probe(Local().run, str(repo))["wsbase"]
 
 
 class TestUpstreamLine(unittest.TestCase):

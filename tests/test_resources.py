@@ -12,7 +12,8 @@ from tests.support import REPO, WkTest, bash, stub_path
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, resources  # noqa: E402
 from wk.act import RETRY_EXIT, Refused  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.sysimage import guestbase, yocto  # noqa: E402
 
 MB_PER_JOB = yocto.WEBKIT_MB_PER_JOB

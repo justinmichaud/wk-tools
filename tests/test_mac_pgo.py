@@ -16,7 +16,8 @@ from tests.test_bench_mac import StubWatch  # noqa: E402
 from wk import presets, screen as wkscreen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import mac, mac_pgo, seed  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 PRESET = "mac-release-pgo"
 
@@ -259,14 +260,14 @@ class TestItIsThePolicyAndNotAnOption(WkTest):
 
     @unittest.skipUnless(os.path.exists("/usr/bin/python3"), "the collection's python is the Mac's /usr/bin/python3")
     def test_the_collection_runs_wk_tools_whatever_the_working_directory_holds(self):
-        """The build sources this in the checkout, whose files an agent writes; a wk/ there must not be imported.
-        The reclaim after a stage deletes what it names, so a second spelling deletes the wrong directory, or nothing."""
+        """The build sources this in the checkout, whose files an agent writes; a wk/ there must not be imported."""
         with scratch_dir() as tmp:
             (tmp / "wk").mkdir()
             (tmp / "wk" / "__init__.py").write_text("raise SystemExit('the checkout was imported')\n")
-            cp = subprocess.run(["bash", "-c", '. "$0"; _pgo_py pgo-instr /x/Release-pgo', str(REPO / "build" / "mac-pgo.sh")],
+            cp = subprocess.run(["bash", "-c", '. "$0"; _pgo_py', str(REPO / "build" / "mac-pgo.sh")],
                                 cwd=str(tmp), capture_output=True, text=True, timeout=30, env=dict(os.environ, PYTHONPATH=str(tmp)))
-        self.assertEqual((0, "/x/Release-pgo-instr"), (cp.returncode, cp.stdout.strip()), cp.stderr)
+        self.assertEqual(cp.returncode, 2, cp.stderr)
+        self.assertIn("usage: python3 -m wk.bench.mac_pgo", cp.stderr)
 
 
 class TestTheHarnessWrapper(WkTest):

@@ -15,7 +15,8 @@ from tests.support import REPO, bash, clean_env, run
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, dispatch, places, presets, project, repos, store, workspace  # noqa: E402
 from wk import decl as D  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 DECLS = [d for d in D.all_commands(REPO)]
 GLOBAL_WORDS = set(dispatch.GLOBALS) | {"-h", "--help", "--explain"}
@@ -299,7 +300,7 @@ class TestForceNamesWhatItCrosses(unittest.TestCase):
                 continue
             lines = p.read_text().splitlines()
             for i, line in enumerate(lines):
-                if not self.FORCED.search(line) or '"forced=" + ' in line:
+                if not self.FORCED.search(line) or '"forced=" + ' in line or '"forced": ' in line:
                     continue
                 if not any("barrier(" in l for l in lines[i:i + 3]):
                     offenders.append("%s:%d: %s" % (p.relative_to(REPO), i + 1, line.strip()))
@@ -380,8 +381,8 @@ class TestTheRepoValuesAreTheTables(unittest.TestCase):
 class TestHelpPreviewsTheCommandLine(unittest.TestCase):
 
     def test_the_preview_is_the_argv_and_where(self):
-        out = run("bench", "stage", "ws1", "--to=mbp", "--preset", "mac-release", "-h", timeout=30).stdout
-        self.assertIn("  this command line runs: WK_PRESET=mac-release %s stage ws1 --to mbp\n"
+        out = run("bench", "ab", "--devices=mbp", "--preset", "mac-release", "-h", timeout=30).stdout
+        self.assertIn("  this command line runs: WK_PRESET=mac-release %s ab --devices mbp\n"
                       % shlex.quote(str(REPO / "cmd" / "bench")), out)
         self.assertIn("    on: %s\n" % dispatch.where_prose(D.Decl(REPO / "cmd" / "bench"), "host"), out)
 

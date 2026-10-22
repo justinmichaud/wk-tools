@@ -1172,17 +1172,24 @@ exist.
      function; `completion` and help come from the table.
    7.3 ∥ **`Machine` and the `Driver` contract.** `places.py` to the twenty
      methods; `PodmanVm`/`TartExec` as `Ssh` argv; one readiness wait.
-   7.4 ∥ **The record and the fleet.** `holds=` absorbs `Budget` and
-     `busy_reason`; `fleet.each`. (The web page, the migration and the skew code are gone.)
-   7.5 ∥ **Diagnostics.** `doctor` owns health; `status` renders records.
+   7.4 ∥ **The record and the fleet.** *Landed 2026-10-22* (`record.Records.claim`/`holds=` absorb `Budget` and
+     `busy_reason`; `fleet.each`/`ask`/`listing` replace six fan-outs; `Clock.wait_until` is the one wait).
+     Row `record`: 1,155 of 550.
+   7.5 ∥ **Diagnostics.** *Landed 2026-10-22* (`doctor` owns the daemons, the guest desktop and load rows, the
+     machine-local table and `--all`; `status` reports machines, workspaces and tasks as text, `--json`, `--wait`).
+     Row `status`: 1,723 of 700.
    7.6 ∥ **Credentials and the wall.** One delivery, one verdict line,
      `credcheck` imported; the per-caller bridge (fix-bridge) is the rule.
-   7.7 ∥ **The bench `System`, `Run` and `AB`.** One of each; the Mac as a
-     system. (`ab-summary` is gone.)
-   7.8 ∥ **Boot.** One `Channel`, `arm_sequence` per driver.
-   7.9 ∥ **Images.** `CFG_NEEDS` plumbing kept; one dry-run printer; one
-     staged lifecycle. (The `fetch` builder is gone, and the SDK's edits are
-     the fork's `wk` branch at `SDK_PIN`.)
+   7.7 ∥ **The bench `System`, `Run` and `AB`.** *Landed 2026-10-22* (`systems.System` over Container, Guest,
+     Board and Mac `Volume`; one `Run`; `ab.AB` with `Arm(system, slot, args)` and `Rounds`; the fleet orchestrator
+     is `change.py`; `stage` is `deploy`, `staged` is `run --system`; the autorun runs the AB in process).
+     Row `bench`: 6,343 of 1,300 -- `change.py` (530), the statistics (650) and the record format (320) remain.
+   7.8 ∥ **Boot.** *Landed 2026-10-22* (one `Channel` with methods over two Machines; `arm_sequence` per driver;
+     `Boot.enter`/`release` the one retry rule the board A/B calls). Row `boot`: 1,263 of 650.
+   7.9 ∥ **Images.** *Landed 2026-10-22* (every builder is data and stages over `task.Stage`; `task.show` the one
+     dry-run printer; the `_ws` halves read their own preset; the old-helper probes and the never-varied knobs are
+     gone; the SDK's edits are the fork's `wk` branch at `SDK_PIN`). Row `sysimage`: 3,767 of 950 -- the card
+     verbs, the Mac volume's provisioning and the two in-workspace builder halves remain.
    7.10 ∥ **Guests and daemons.** The one supervisor; `guest.py`'s findings
      into `doctor`. (The conveniences in `container/bin/` are gone.)
    7.11 **Tests by cluster.** After each package lands: the push service,

@@ -19,8 +19,9 @@ sys.path.insert(0, str(REPO / "lib"))
 from wk import act, decl, dispatch, job, record, project, screen  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.bench import record as brecord, systems  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake, Local, Result, Ssh  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import Local, Result, Ssh  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 PLAN_JSON = json.dumps({"git_repository": {"url": "https://example.com/bench.git", "branch": "main"}})
@@ -167,8 +168,7 @@ def registry(w, driver=None):
 
 def invoke(w, argv):
     """cmd/bench's run arm: its options read off the declaration, then the pipeline."""
-    argv = as_dispatched("bench", argv, os.environ)
-    return CMD.run_arm(decl.Args(decl.Decl(REPO / "cmd" / "bench"), argv), registry(w), w.clock)
+    return CMD.run(as_dispatched("bench", argv, os.environ), registry(w), w.clock)
 
 
 class BenchTest(CleanTest):
@@ -264,9 +264,9 @@ class TestTheRecord(BenchTest):
         self.assertEqual(rc, 0, err)
         (t,) = self.w.recs().list()
         self.assertEqual((t.field("kind"), t.field("where"), t.field("name"), t.field("exit")), ("bench", "here", "ws", "0"))
-        self.assertEqual(len(t.plan()), 3)
-        self.assertTrue(t.plan()[1].startswith("run jetstream3 (jsc, 2 iteration(s))"), t.plan())
-        self.assertEqual(t.steps(), [(1, "done"), (2, "done"), (3, "running")])
+        self.assertEqual(len(t.plan()), 2)
+        self.assertTrue(t.plan()[0].startswith("run jetstream3 on 'ws' (jsc, 2 iteration(s))"), t.plan())
+        self.assertEqual(t.steps(), [(1, "done"), (2, "running")])
         self.assertEqual((t.field("kill"), t.field("abort_after")), ("wk bench run ws --kill", "5400"))
         self.assertEqual(Path(t.field("log")), self.run_dir() / "run-2.log")
 
@@ -395,8 +395,8 @@ class TestRefusals(BenchTest):
         w = World(self.tmp, "remote")
         self.assertIn("a container workspace or a macOS guest", self.said("run", "jetstream3", w=w))
 
-    def test_a_mac_is_not_a_system_of_run(self):
-        self.assertIn("wk bench staged", self.said("run", "jetstream3", "--system", "mbp"))
+    def test_a_mac_is_a_system_whose_run_measures_what_it_has_staged(self):
+        self.assertIn("wk bench deploy <workspace> mbp --slot a", self.said("run", "jetstream3", "--system", "mbp"))
 
     def test_a_failed_preflight_refuses_and_force_records_it(self):
         self.w.files[systems.GOVERNOR] = "powersave\n"
@@ -474,12 +474,12 @@ class TestRootDevice(unittest.TestCase):
     def test_a_linux_disk_names_its_bus_rotation_and_trim(self):
         w = World(Path(tempfile.mkdtemp(prefix="wk-rootdev-")))
         w.files["/sys/block/nvme0n1/queue/discard_max_bytes"] = "2199023255040\n"
-        self.assertEqual(systems.root_device(w.run, w.read, "/", False), "nvme0n1 Fast (nvme, ssd, trim)")
+        self.assertEqual(systems.linux_disk(w.run, w.read, "/"), "nvme0n1 Fast (nvme, ssd, trim)")
 
     def test_what_cannot_be_read_is_unknown(self):
         f = Fake()
-        self.assertEqual(systems.root_device(f.run, f.read, "/", True), "unknown")
-        self.assertEqual(systems.root_device(f.run, f.read, "/", False), "unknown")
+        self.assertEqual(systems.macos_facts(f.run, "/")["host.root_device"], "unknown")
+        self.assertEqual(systems.linux_disk(f.run, f.read, "/"), "unknown")
 
 
 class TestKill(BenchTest):

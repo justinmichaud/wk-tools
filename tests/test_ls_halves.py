@@ -12,7 +12,7 @@ from tests.support import REPO, fake_workspace, load_cmd
 from tests.test_options import run_impl
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 ls = load_cmd("ls")
 

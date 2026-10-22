@@ -4,6 +4,7 @@ import inspect
 import io
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -18,8 +19,9 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, git, machine, places, project, record, secrets  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import TIMED_OUT, Fake, Result, lib_argv  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import TIMED_OUT, Result, lib_argv  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.sysimage import guestbase  # noqa: E402
 
@@ -44,7 +46,7 @@ class DriversTest(unittest.TestCase):
     def conf(self, name, text):
         kind = "" if "kind=" in text.replace("driver=", "") else \
             "kind=%s\n" % ("peer" if "peer=1" in text else "build")
-        (self.registry_dir / (name + ".conf")).write_text(kind + text)
+        (self.registry_dir / (name + ".conf")).write_text(kind + text.replace("peer=1\n", ""))
 
     def stderr_of(self, fn):
         with contextlib.redirect_stderr(io.StringIO()) as err:
@@ -554,6 +556,24 @@ class DriverConformance:
         self.assertTrue(self.brought_up(t))
 
 
+class TestTheContract(unittest.TestCase):
+    DRIVERS = (places.Container, places.Vm, places.LocalWorkspace, places.Remote, places.Peer)
+
+    def test_every_driver_answers_every_method_of_the_contract(self):
+        for cls in self.DRIVERS:
+            for name in places.Driver.CONTRACT:
+                with self.subTest(driver=cls.__name__, method=name):
+                    self.assertTrue(callable(getattr(cls, name, None)))
+
+    def test_a_command_asks_a_driver_nothing_outside_the_contract(self):
+        asked = set()
+        for path in (p for p in (REPO / "cmd").iterdir() if p.is_file()):
+            text = path.read_text(errors="replace")
+            if text.startswith("#!/usr/bin/env python3"):
+                asked |= {a or b for a, b in re.findall(r"\bdriver\.([a-z_]+)|reg\.present\([^)]*\)\.([a-z_]+)", text)}
+        self.assertEqual(sorted(asked - set(places.Driver.CONTRACT) - set(places.Driver.FIELDS)), [])
+
+
 class TestContainerConformance(DriversTest, DriverConformance):
     cls, down = places.Container, "exited"
 
@@ -576,6 +596,18 @@ class TestRemoteConformance(RemoteTest, DriverConformance):
     def stopped(self):
         self.fake.answer_remote("ws/ws ]", out="present\n")
         return self.t
+
+    def brought_up(self, t):
+        return t.info(self.ws) == "present"
+
+
+class TestPeerConformance(RemoteTest, DriverConformance):
+    cls, down = places.Peer, "present"
+
+    def stopped(self):
+        self.conf("pal", "kind=peer\nhost=pal.example\ntools=/opt/wk-tools\n")
+        self.fake.answer_remote("wk ls --json", out=json.dumps({"workspaces": [{"name": "ws", "state": "stopped"}]}))
+        return self.reg.load("pal")
 
     def brought_up(self, t):
         return t.info(self.ws) == "present"
@@ -703,29 +735,33 @@ class TestContainerWrite(DriversTest):
         self.assertNotIn(os.path.join(self.t.store.ws_dir("new"), "home", "git"), self.fake.dirs)
         self.assertEqual(t.mirror_dir(), t.store.mirror_dir(), "the workspace sees the mirror at this machine's own path")
 
-    def test_ready_polls_the_marker_by_the_clock_until_it_is_there(self):
-        marker = os.path.join(self.t.store.ws_dir("a"), "home", places.READY_MARKER)
-        clock = MarkerClock(self.fake, marker, 3)
-        self.assertTrue(self.t.ready("a", clock))
-        self.assertEqual(clock.slept, [1, 1, 1])
+    def initialising(self, ws):
+        self.fake.answer(["podman", "inspect", "wk-" + ws], out="running\n")
+        self.fake.dirs.add(self.t.store.ws_dir(ws))
+        self.fake.files[os.path.join(self.t.store.ws_dir(ws), "base-id")] = self.base + "\n"
+        return os.path.join(self.t.store.ws_dir(ws), "home", places.READY_MARKER)
 
-    def test_ready_gives_up_at_the_timeout_and_shows_the_containers_last_words(self):
+    def test_its_own_wait_polls_the_marker_by_the_clock_until_it_is_there(self):
+        clock = MarkerClock(self.fake, self.initialising("a"), 3)
+        self.stderr_of(lambda: self.t.wait_ready("a", clock, own=True))
+        self.assertEqual(clock.slept, [2, 2, 2])
+
+    def test_its_own_wait_gives_up_at_the_timeout_and_shows_the_containers_last_words(self):
+        self.initialising("a")
         self.fake.answer(["podman", "logs", "wk-a"], out="one\n\ntwo\n")
         clock = FakeClock()
-        ok, err = self.stderr_of(lambda: self.t.ready("a", clock, timeout=4))
-        self.assertFalse(ok)
-        self.assertEqual(clock.slept, [1, 1, 1, 1])
-        self.assertIn("initialisation did not complete", err)
+        err = self.refused(lambda: self.t.wait_ready("a", clock, timeout=4, own=True))
+        self.assertEqual(clock.slept, [2, 2])
+        self.assertIn("never finished initialising", err)
         self.assertIn("    one\n    two\n", err)
-        self.env["WK_READY_TIMEOUT"] = "2"
+        self.env["WK_READY_WAIT"] = "2"
         clock = FakeClock()
-        self.stderr_of(lambda: self.reg.load("container").ready("a", clock))
-        self.assertEqual(clock.slept, [1, 1])
+        self.refused(lambda: self.reg.load("container").wait_ready("a", clock, own=True))
+        self.assertEqual(clock.slept, [2])
 
-    def test_ready_stops_waiting_when_the_container_vanished(self):
+    def test_its_own_wait_stops_when_the_container_vanished(self):
         clock = FakeClock()
-        ok, _ = self.stderr_of(lambda: self.t.ready("gone", clock))
-        self.assertFalse(ok)
+        self.refused(lambda: self.t.wait_ready("gone", clock, own=True))
         self.assertEqual(clock.slept, [])
 
     def test_destroy_removes_the_container_then_the_directory(self):
@@ -906,17 +942,14 @@ class TestVmWrite(VmTest):
         self.assertEqual(self.fake.effects[before:], [("mkdir", root), ("mkdir", os.path.join(root, "ws")), ("mkdir", self.t.vm_dir()),
                                              ("run", ("find", self.t.vm_dir(), "-maxdepth", "0", "-perm", "0700")), ("run", ("chmod", "0700", self.t.vm_dir()))])
 
-    def test_ready_is_the_shared_poll_of_info(self):
+    def test_its_own_wait_is_the_shared_one(self):
         marker = os.path.join(self.t.store.ws_dir("mac"), places.READY_MARKER)
         clock = MarkerClock(self.fake, marker, 2)
-        self.assertTrue(self.t.ready("mac", clock))
-        self.assertEqual(clock.slept, [1, 1])
+        self.stderr_of(lambda: self.t.wait_ready("mac", clock, own=True))
+        self.assertEqual(clock.slept, [2, 2])
         clock = FakeClock()
-        self.assertFalse(self.t.ready("gone", clock))
+        self.refused(lambda: self.t.wait_ready("gone", clock, own=True))
         self.assertEqual(clock.slept, [])
-        self.fake.files.pop(marker)
-        self.assertFalse(self.t.ready("mac", clock, timeout=3))
-        self.assertEqual(clock.slept, [1, 1, 1])
 
     def test_a_guest_without_a_store_of_its_own_refuses_to_be_driven(self):
         env = {k: v for k, v in self.env.items() if k != "WK_VM_STORE"}
@@ -939,12 +972,11 @@ class TestVmWrite(VmTest):
 class TestRemoteWrite(RemoteTest):
     def setUp(self):
         super().setUp()
-        self.conf("ref", "host=ref.example\nroot=/home/u/wk\nreference=/srv/WebKit\n")
+        self.conf("ref", "host=ref.example\nroot=/home/u/wk\n")
         self.ref = self.reg.load("ref")
         self.fake.answer_remote("ws/a ]", out="absent\n")
         self.fake.answer_remote("ws/half ]", out="creating\n")
         self.fake.answer_remote("ws/there ]", out="present\n")
-        self.fake.answer_remote("cat /etc/motd", out="")
         self.fake.answer_remote("git clone", out="")
         self.fake.answer_remote("git init --bare", out="mirror-fetch origin ok\nmirror-fetch wpe FAILED\n")
         self.fake.answer_remote("git remote set-url origin", out="")
@@ -955,31 +987,19 @@ class TestRemoteWrite(RemoteTest):
     def acts(self):
         """What the far shell was handed to run, in order, the reads left out."""
         texts = [shlex.split(c[-1])[-1] for c in self.fake.ssh_calls()]
-        return [t for t in texts if not any(n in t for n in ("uname -s", "echo absent", "test -f $HOME", "/etc/motd"))]
+        return [t for t in texts if not any(n in t for n in ("uname -s", "echo absent", "test -f $HOME"))]
 
-    def test_create_from_a_shared_checkout_is_four_round_trips_with_the_marker_last(self):
-        _, err = self.stderr_of(lambda: self.ref.create("a"))
-        acts = self.acts()
-        self.assertEqual(len(acts), 4)
-        self.assertIn("mkdir -p /home/u/wk/ws /home/u/wk/cache/ccache\n git clone --quiet -b main /srv/WebKit /home/u/wk/ws/a/WebKit", acts[0])
-        self.assertIn("cd /home/u/wk/ws/a/WebKit\n", acts[1])
-        self.assertIn("git remote add shared /srv/WebKit", acts[1])
-        self.assertIn("ssh -F /home/u/wk/ssh/config", acts[1])
-        self.assertIn("[ -f /home/u/wk/cache/ccache/ccache.conf ] || printf %s 'max_size = 40G", acts[2])
-        self.assertIn("touch /home/u/wk/ws/a/.wk-ready", acts[3])
-        self.assertEqual(shlex.split(shlex.split(self.fake.effects[-1][1][-1])[-1])[-1], acts[3])
-        self.assertIn(("mkdir", self.ref.store.ws_dir("a")), self.fake.effects[:-1])
-
-    def test_create_without_a_shared_checkout_refreshes_the_mirror_first(self):
+    def test_create_refreshes_the_mirror_first_and_puts_the_marker_down_last(self):
         _, err = self.stderr_of(lambda: self.t.create("a"))
         acts = self.acts()
         self.assertEqual(len(acts), 5)
         self.assertIn("M=/home/u/wk/mirror\n", acts[0])
         self.assertIn("git clone --quiet --shared -b main /home/u/wk/mirror /home/u/wk/ws/a/WebKit", acts[1])
         self.assertIn("git remote add mirror /home/u/wk/mirror", acts[2])
+        self.assertIn("[ -f /home/u/wk/cache/ccache/ccache.conf ] || printf %s 'max_size = 40G", acts[3])
         self.assertIn("touch /home/u/wk/ws/a/.wk-ready", acts[4])
         self.assertIn("  origin   ok\n  wpe      FAILED\n", err)
-        self.assertEqual(len(self.fake.ssh_calls("/etc/motd")), 1)
+        self.assertIn(("mkdir", self.t.store.ws_dir("a")), self.fake.effects[:-1])
 
     def test_create_refuses_what_is_there_and_names_the_remedy(self):
         err = self.refused(lambda: self.ref.create("half"))
@@ -999,8 +1019,8 @@ class TestRemoteWrite(RemoteTest):
             self.addCleanup(p.stop)
         self.fake.answer_remote("git clone", rc=128, err="fatal: not a git repository\n")
         err = self.refused(lambda: self.ref.create("a"))
-        self.assertIn("could not clone /srv/WebKit on ref.example", err)
-        self.assertEqual(len(self.acts()), 1)
+        self.assertIn("could not create the checkout on ref.example", err)
+        self.assertEqual(len(self.acts()), 2)
         self.fake.answer_remote("git clone", out="")
         self.fake.answer_remote("touch", rc=255)
         err = self.refused(lambda: self.ref.create("a"))
@@ -1086,7 +1106,7 @@ class TestRemoteWrite(RemoteTest):
         self.assertEqual(self.fake.ssh_calls("wk rm a"), [])
 
     def test_this_machine_as_the_remote_runs_every_round_trip_in_a_local_shell(self):
-        self.conf("me", "local=1\nroot=%s\nreference=/srv/WebKit\n" % (self.tmp / "rr"))
+        self.conf("me", "local=1\nroot=%s\n" % (self.tmp / "rr"))
         me = self.reg.load("me")
 
         def sh(argv, fake):
@@ -1098,9 +1118,9 @@ class TestRemoteWrite(RemoteTest):
         self.fake.react(["sh", "-c"], sh)
         self.stderr_of(lambda: me.create("a"))
         acts = [e[1][2] for e in self.fake.effects if e[0] == "run" and e[1][:2] == ("sh", "-c") and "uname -s" not in e[1][2] and "echo absent" not in e[1][2]]
-        self.assertEqual(len(acts), 4)
-        self.assertIn("git clone --quiet -b main /srv/WebKit", acts[0])
-        self.assertIn("touch %s/ws/a/.wk-ready" % (self.tmp / "rr"), acts[3])
+        self.assertEqual(len(acts), 5)
+        self.assertIn("git clone --quiet --shared -b main %s/mirror" % (self.tmp / "rr"), acts[1])
+        self.assertIn("touch %s/ws/a/.wk-ready" % (self.tmp / "rr"), acts[4])
         self.assertEqual(self.fake.ssh_calls(), [])
 
 

@@ -22,7 +22,8 @@ sys.path.insert(0, str(REPO / "lib"))
 import credcheck  # noqa: E402
 from wk import act, claudelogin, guest, repos, secrets  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 ROOT = str(REPO)

@@ -14,7 +14,7 @@ from tests.support import REPO, WkTest, stub_path
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, pr, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 # `ssh <opts> <host> <command>` run here, with no WK_* variable carried across, as a real ssh carries none,
 # and SHELL set as sshd sets it (a workspace's exec leaves it unset).
@@ -78,7 +78,6 @@ class PeerFixture(WkTest):
 
         (self.root / "machines" / "peerbox.conf").write_text(
             "kind=peer\ndriver=remote\n"
-            "peer=1\n"
             "host=peerbox\n"
             f"root={self.tmp / 'remote-root'}\n"
             f"tools={self.tools}\n"
@@ -177,7 +176,7 @@ class TestPeerDelegation(PeerFixture):
         self.assertIn("peerbox did not create 'refusedws'; what its own wk said is above.", cp.stdout)
 
     def test_this_machine_named_as_a_peer_is_its_own_default(self):
-        (self.root / "machines" / "me.conf").write_text("kind=peer\npeer=1\nlocal=1\n")
+        (self.root / "machines" / "me.conf").write_text("kind=peer\nlocal=1\n")
         reg = places.Registry(self.root, env=dict(os.environ, **self.env()), machine=Fake("host"))
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
             workspace.new_front(reg, None, "newws", {"place": "me"}, pr)

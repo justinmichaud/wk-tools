@@ -20,7 +20,7 @@ from wk import images, store  # noqa: E402
 
 ROOT = images.root()
 
-from wk import decl, dispatch, places  # noqa: E402
+from wk import decl, dispatch, guest, places  # noqa: E402
 from wk.act import Refused, die, log  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.workspace import require_name  # noqa: E402
@@ -85,7 +85,7 @@ def main(argv):
             "    A macOS guest needs booting first:  wk start %s" % (name, name))
 
     if driver.kind == "vm":
-        driver.login_note()
+        guest.login_note(driver.env)
 
     emit(url_only, zed, "ssh://%s%s" % (host, driver.src(name)))
     return 0

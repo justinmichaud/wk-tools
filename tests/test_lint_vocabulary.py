@@ -33,7 +33,7 @@ TARGET_DOMAINS = {
                                                "container/yocto/", "container/buildroot/", "tests/test_yocto_ws.py",
                                                "tests/test_yocto_stage.py", "tests/test_board_local_conf.py",
                                                "tests/test_buildroot_ws.py"),
-    "a systemd target": ("boot/firstboot/", "host/units/", "host/linux/rpi5/"),
+    "a systemd target": ("boot/firstboot/", "lib/wk/daemons.py", "host/linux/rpi5/"),
     "where a copy or a credential lands": ("tests/test_boot_priv.py", "lib/wk/key/creds.py"),
 }
 RETIRED = {

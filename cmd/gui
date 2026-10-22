@@ -84,10 +84,7 @@ def main(argv):
     opts = parse(argv)
 
     reg = places.Registry(ROOT)
-    try:
-        driver = reg.load(reg.ws_place(name))
-    except LookupError as e:
-        die(str(e))
+    driver = reg.present(name)
 
     if driver.kind == "remote":
         die("wk gui needs a benchmark seat -- a container, a guest or the workspace itself:\n"
@@ -95,10 +92,7 @@ def main(argv):
             "    of its own to draw into. Use a container or vm workspace instead." % name)
 
     preset_name = store.build_preset() or gui_default_preset(reg, name)
-    try:
-        preset = presets.resolve(preset_name, driver.os(), driver.kind, driver.env)
-    except LookupError:
-        die("unknown preset '%s'" % preset_name)
+    preset = presets.resolve_or_die(preset_name, driver)
 
     if preset.jsc_only:
         die("'%s' builds JavaScriptCore alone -- there is no browser in it.\n"

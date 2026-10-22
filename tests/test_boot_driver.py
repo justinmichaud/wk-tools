@@ -20,7 +20,8 @@ from wk.boot.cli import load_conf  # noqa: E402
 from wk.boot.driver import BOOT_PRIV, CARD_PRIV, Channel, Driver, Onboard, disk_of, part, partno  # noqa: E402
 from wk.boot.mac import MacVolume  # noqa: E402
 from tests.fake_boot import SLOTS_OF, board, conf_for, said  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 ONBOARD = REPO / "boot" / "onboard"
 

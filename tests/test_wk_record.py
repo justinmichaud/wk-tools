@@ -11,8 +11,8 @@ from pathlib import Path
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk import record, status, statusview  # noqa: E402
 from wk.act import Refused  # noqa: E402

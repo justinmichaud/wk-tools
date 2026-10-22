@@ -13,7 +13,8 @@ from wk import images, places, reach, screen  # noqa: E402
 from wk.boot.mac import MacGuest  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
-from wk.machine import Fake, Local, lib_argv  # noqa: E402
+from wk.machine import Local, lib_argv  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 
@@ -177,13 +178,6 @@ class TestEachOverrideReachesWhatItNames(WkTest):
         self.assertEqual(guest.password({"WK_VM_PASSWORD": "pw"}), "pw")
         t = places.Registry(REPO, env={"HOME": "/h", "WK_SDK": "/my/sdk"}, machine=Fake()).load("container")
         self.assertEqual(t.sdk(), "/my/sdk")
-
-    def test_wk_bench_machine_names_the_volume_in_host_mode(self):
-        from wk.bench.mac import Install
-        seen = []
-        env = {"HOME": "/h", "WK_MACHINES_DIR": str(REAL_MACHINES), "WK_BENCH_MACHINE": "mbp", "WK_ROOT": str(REPO)}
-        install = Install(REPO, Fake(), env, lambda root, conf: seen.append(conf["name"]) or types.SimpleNamespace(bench_root=lambda: "/v"))
-        self.assertEqual((install.staging_root(), seen), ("/v", ["mbp"]))
 
     def test_wk_bench_user_is_the_second_account_asked(self):
         asked = []

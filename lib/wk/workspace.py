@@ -7,9 +7,9 @@ import re
 import shlex
 import sys
 
-from wk import act, job, kv, project, record, repos, resources, sshalias
+from wk import act, git, job, project, record, repos, resources, sshalias
 from wk.act import Refused, die, info, log, warn
-from wk.machine import Killed, in_podman_machine
+from wk.machine import in_podman_machine
 from wk.store import Snapshots, no_such_workspace
 from wk.places import show
 
@@ -23,31 +23,6 @@ REFUSALS = {
     "unreachable": "cannot reach the machine behind place '{t}', so whether '{n}' is\n    already there cannot be known. "
                    "Try again when the machine answers.",
 }
-
-CHECKOUT_SCRIPT = r'''
-b=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
-if [ -z "$b" ]; then
-    echo "detached=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
-    exit 0
-fi
-echo "branch=$b"
-u=$(git rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "")
-[ -n "$u" ] || exit 0
-echo "upstream=$u"
-behind=$(git rev-list --count "$b..$u" 2>/dev/null || echo 0)
-echo "behind=$behind"
-if [ "$behind" != 0 ]; then
-    if git merge --ff-only --quiet "$u" 2>/dev/null; then
-        echo "moved=$behind"
-    else
-        echo "moved=refused"
-    fi
-fi
-# The first status re-reads every file the index cannot vouch for and rewrites the index: here, not in the person's first one.
-git status --porcelain >/dev/null 2>&1 || true
-echo "head=$(git rev-parse --short HEAD)"
-'''
-
 
 def require_name(name):
     if not NAME.match(name or ""):
@@ -96,17 +71,49 @@ def creation_state(driver, records, name):
 
 def new_front(reg, records, name, opts, prflow):
     """Refuse, start the detached run, follow it, then the --pr (`prflow`: lib/wk/pr.py) / hints / --zed tail. 0, or Refused."""
-    here, root, env = reg.machine, reg.root, reg.env
+    arch = new_asked(name, opts, prflow)
+    driver, repo = new_place(reg, name, opts)
+    if driver.kind == "remote" and (driver.peer or not driver.is_local):
+        return new_handed_over(driver, reg.machine, reg.root, name, arch, opts)
+    recs = record.of_driver(driver, records.clock, records.machine)
+    if opts.get("kill"):
+        return new_kill(driver, reg.machine, recs, reg.env, name, opts)
+    new_refuse_existing(driver, recs, name, arch)
+    if act.dry_run():
+        from wk.lock import Lock
+        return new_detached_run(driver, recs, Lock(driver.store, reg.machine, recs.clock), recs.clock, name,
+                                opts.get("base") or "", arch, repo)
+    pid, since = new_detach(driver, reg, name, arch, repo, opts.get("base") or ""), recs.clock.stamp()
+    if opts.get("no_wait"):
+        info("creating '%s' on %s, detached as pid %d -- this end can go away" % (name, driver.name, pid))
+        log("  follow:  wk status %s --log --follow" % name)
+        log("  state:   wk status %s" % name)
+    else:
+        new_follow(driver, recs, reg.env, name, pid, since)
+        info("workspace '%s' ready%s" % (name, "" if arch == "native" else " (%s)" % arch))
+        if opts.get("pr"):
+            prflow.checkout(driver, reg.machine, name, opts["pr"])
+        new_hints(driver, name, arch)
+    zed_after(reg.machine, reg.root, name, opts)
+    return 0
+
+
+def new_asked(name, opts, prflow):
+    """The refusals of what was asked, before any place is read; the canonical arch."""
     require_name(name)
     pr = opts.get("pr")
     if pr is not None and not pr:
         die("--pr needs a spec: <user>:<branch>, <n>, or wpe:<n>")
-    arch = resources.arch_canon(opts.get("arch") or "native")
+    if pr and opts.get("no_wait"):
+        die("--pr needs the workspace to be ready, and --no-wait returns before it is.\n"
+            "    Drop --no-wait, or check it out afterwards:  wk pr %s %s" % (name, pr))
     if pr:
-        if opts.get("no_wait"):
-            die("--pr needs the workspace to be ready, and --no-wait returns before it is.\n"
-                "    Drop --no-wait, or check it out afterwards:  wk pr %s %s" % (name, pr))
         prflow.parse_spec(pr)
+    return resources.arch_canon(opts.get("arch") or "native")
+
+
+def new_place(reg, name, opts):
+    """(driver, repo) of the place asked for, refusing what it cannot make."""
     tname = opts.get("place") or reg.default()
     try:
         driver = reg.load(tname)
@@ -116,42 +123,34 @@ def new_front(reg, records, name, opts, prflow):
     if repo.name != project.get("REPO") and driver.kind != "container":
         die("--repo %s is container-only for now (this is place '%s'): a guest or a build\n"
             "    box makes its checkout only from a %s mirror." % (repo.name, tname, project.get("CHECKOUT")))
-    if driver.kind == "remote" and (driver.peer or not driver.is_local):
-        return new_handed_over(driver, here, root, name, arch, opts)
-    recs = record.of_driver(driver, records.clock, records.machine)
-    if opts.get("kill"):
-        return new_kill(driver, here, recs, env, name, opts)
-    if arch != "native" and driver.kind != "container":
-        die("--arch %s is a container-only capability (this is place '%s')." % (arch, tname))
     if driver.kind == "local":
-        driver.create(name)
+        die("a workspace cannot create a workspace -- run 'wk new %s' on the host" % name)
+    return driver, repo
+
+
+def new_refuse_existing(driver, recs, name, arch):
+    if arch != "native" and driver.kind != "container":
+        die("--arch %s is a container-only capability (this is place '%s')." % (arch, driver.name))
     driver.store_init()
-    log_path = driver.create_log(name)
     st = creation_state(driver, recs, name)
     if st in ("present", "broken"):
-        die(REFUSALS[st].format(n=name, t=tname))
-    if st == "creating":
-        t = recs.find("new", name)
-        if t is not None and t.alive(None):
-            die("'%s' is already being created (pid %s, at stage\n    '%s'). Follow it:      tail -f %s\n"
-                "    Or ask for it and wait:  wk enter %s --zed   /   wk build %s <preset>"
-                % (name, t.field("pid"), " ".join(t.stage()), t.field("log"), name, name))
-    base = opts.get("base") or ""
-    if act.dry_run():
-        from wk.lock import Lock
-        new_detached_run(driver, recs, Lock(driver.store, here, recs.clock), recs.clock, name, base, arch, repo)
-        return 0
-    since = recs.clock.stamp()
-    pid = job.detach(here, [wk_of(root), "new", name, "--on", tname, "--arch", arch, "--repo", repo.name]
-                     + (["--base", base] if base else []) + ["--_detached"], log_path)
-    if opts.get("no_wait"):
-        info("creating '%s' on %s, detached as pid %d -- this end can go away" % (name, tname, pid))
-        log("  follow:  wk status %s --log --follow" % name)
-        log("  state:   wk status %s" % name)
-        zed_after(here, root, name, opts)
-        return 0
-    timeout = job._seconds(env, "WK_NEW_TIMEOUT", NEW_TIMEOUT)
-    st = recs.wait("new", name, log_path, timeout=timeout, pid=pid, floor=since, stream=sys.stderr)
+        die(REFUSALS[st].format(n=name, t=driver.name))
+    t = recs.find("new", name) if st == "creating" else None
+    if t is not None and t.alive(None):
+        die("'%s' is already being created (pid %s, at stage\n    '%s'). Follow it:      tail -f %s\n"
+            "    Or ask for it and wait:  wk enter %s --zed   /   wk build %s <preset>"
+            % (name, t.field("pid"), " ".join(t.stage()), t.field("log"), name, name))
+
+
+def new_detach(driver, reg, name, arch, repo, base):
+    return job.detach(reg.machine, [wk_of(reg.root), "new", name, "--on", driver.name, "--arch", arch, "--repo", repo.name]
+                      + (["--base", base] if base else []) + ["--_detached"], driver.create_log(name))
+
+
+def new_follow(driver, recs, env, name, pid, since):
+    """The detached run followed to its verdict; anything but ok dies naming what to do."""
+    tname, timeout = driver.name, job._seconds(env, "WK_NEW_TIMEOUT", NEW_TIMEOUT)
+    st = recs.wait("new", name, driver.create_log(name), timeout=timeout, pid=pid, floor=since, stream=sys.stderr)
     if st == "crashed":
         die("the process creating '%s' is gone without having said how it ended.\n"
             "    A re-run destroys what it left and starts again:  wk new %s --on %s   (its log: wk status %s --log --all)"
@@ -164,12 +163,6 @@ def new_front(reg, records, name, opts, prflow):
     if st != "ok":
         die("creating '%s' failed (%s) -- the reason is above, in full in 'wk status %s --log --all'.\n"
             "    A re-run destroys what is there and starts again:  wk new %s --on %s" % (name, st, name, name, tname))
-    info("workspace '%s' ready%s" % (name, "" if arch == "native" else " (%s)" % arch))
-    if pr:
-        prflow.checkout(driver, here, name, pr)
-    new_hints(driver, name, arch)
-    zed_after(here, root, name, opts)
-    return 0
 
 
 def zed_after(here, root, name, opts):
@@ -253,8 +246,6 @@ def new_detached_run(driver, records, lock, clock, name, base, arch, repo):
         lock.hold("store")
     try:
         _create(driver, records, task, clock, name, base, arch, repo, state)
-    except Killed:
-        raise
     except Exception as e:
         if task is not None:
             task.end(e.status if isinstance(e, Refused) else 1)
@@ -315,18 +306,13 @@ def _create(driver, records, task, clock, name, base, arch, repo, state):
     stage("create")
     driver.create(name, base, arch, repo)
     stage("init")
-    if not act.dry_run() and not driver.ready(name, clock):
-        die("'%s' was created but never finished initialising (above):\n"
-            "    wk new %s    (destroys it and retries)" % (name, name))
+    if not act.dry_run():
+        driver.wait_ready(name, clock, own=True)
     stage("agents")
     driver.install_agents(name)
     stage("fetch")
     freshen(driver, name, here, repo)
     stage("register")
-
-
-def checkout_script(src):
-    return "cd %s || exit 2\n" % shlex.quote(src) + CHECKOUT_SCRIPT
 
 
 def freshen(driver, name, here, repo):
@@ -363,23 +349,23 @@ def fetch_from_mirror(driver, name, here):
 
 
 def report_checkout(driver, name):
-    r = driver.exec(name, ["sh", "-c", checkout_script(driver.src(name))])
-    said = kv.kv(r.out if r.ok else "")
-    if said.get("detached"):
+    """Fast-forward the checkout onto what its branch tracks, and say where it is."""
+    src = driver.src(name)
+    said = git.probe(lambda argv: driver.exec(name, argv), src)
+    b, u, head = said.get("branch"), said.get("tracks"), said.get("head", "")
+    moved = ""
+    if b and u and said.get("behind", "0") != "0":
+        moved = said["behind"] if driver.exec(name, ["git", "-C", src, "merge", "--ff-only", "--quiet", u]).ok else "refused"
+        head = git.probe(lambda argv: driver.exec(name, argv), src).get("head", head)
+    if not b and head:
         warn("'%s' is not on a branch (detached at %s), so 'git status',\n"
              "    'git pull' and 'wk pr rebase' in there have no upstream to name:\n"
-             "        git checkout main    in the workspace" % (name, said["detached"]))
-        return
-    b = said.get("branch")
-    if not b:
+             "        git checkout main    in the workspace" % (name, head))
+    elif not b:
         warn("could not read the checkout in '%s' to say where it is\n    ('wk enter %s', then 'git status' in there)" % (name, name))
-        return
-    u = said.get("upstream")
-    if not u:
+    elif not u:
         warn("'%s' is on '%s', which tracks nothing -- 'git pull' and\n    'wk pr' have no upstream to name:  wk sync %s --fix" % (name, b, name))
-        return
-    head, moved = said.get("head", ""), said.get("moved", "")
-    if moved == "refused":
+    elif moved == "refused":
         warn("'%s' in '%s' and %s have diverged, so the checkout is left where\n    it is:  git rebase %s   in the workspace" % (b, name, u, u))
     elif not moved:
         info("'%s' is on %s at %s, up to date with %s" % (name, b, head, u))
@@ -483,7 +469,7 @@ def unsaved_results(reg, found):
         return []   # the workstation that handed `wk rm` over (refuse_unsaved_before_forward) read its own zips first
     out = []
     for n, driver, what in found:
-        if getattr(driver, "peer", False):
+        if driver.peer:
             continue   # its destroy runs the peer's own `wk rm`, which reads the exports there
         at = driver.results(n) if what != "record" else None
         if at:

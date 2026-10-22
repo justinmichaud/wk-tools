@@ -20,14 +20,15 @@ from tests.test_wk_places import LINUX_PROBE
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, places, pr, record, repos, secrets, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
 WK = str(REPO / "wk")
 ZED = str(REPO / "cmd" / "zed")
-CHECKOUT = "branch=main\nupstream=origin/main\nbehind=0\nhead=abc1234\n"
+CHECKOUT = "branch=main\nhead=abc1234\ntracks=origin/main\nbehind=0\n"
 
 
 def step(argv):
@@ -118,7 +119,7 @@ class World(Scratch, Fake):
         self.clock = FakeClock()
         self.containers, self.vms, self.far, self.unreachable = set(), {}, set(), None
         self.probe = "yes"
-        self.checkout = Result(0, CHECKOUT)
+        self.checkout, self.merged = Result(0, CHECKOUT), Result(0)
         self.bash = {}
         self.acted = set()
         self.dirs.add(self.env["WK_LOCK_DIR"])
@@ -275,7 +276,7 @@ class World(Scratch, Fake):
             return Result(0 if int(argv[4]) in f.pids else 1)
         if "echo yes || echo no" in argv[-1]:
             return Result(0, f.probe + "\n") if f.probe is not None else Result(1, "", "no such container")
-        return f.checkout
+        return f.merged if "merge" in argv else f.checkout
 
     def ws_dir(self, name="ws"):
         return self.driver.store.ws_dir(name)
@@ -828,17 +829,17 @@ class TestNewDriver(WorkspaceTest):
         self.attempt(w)
         self.assertEqual(self.runs(w, head="git"), [])
 
-    def test_a_workspace_that_never_initialises_is_refused_after_wk_ready_timeout(self):
+    def test_a_workspace_that_never_initialises_is_refused_after_wk_ready_wait(self):
         def no_firstrun(argv, f):
             f.containers.add(argv[argv.index("--name") + 1])
             return Result(0)
         self.w.wkdev_create = no_firstrun
-        self.w.env["WK_READY_TIMEOUT"] = "2"
+        self.w.env["WK_READY_WAIT"] = "4"
         self.w.driver = self.w.reg.load("fakebox")
         err = self.refused(lambda: self.detached())
         self.assertIn("'ws' was created but never finished initialising", err)
         self.assertIn("wk new ws    (destroys it and retries)", err)
-        self.assertEqual(self.w.clock.slept, [1, 1])
+        self.assertEqual(self.w.clock.slept, [2, 2])
         (t,) = self.w.records.list()
         self.assertEqual((t.verdict(), t.stage()), ("failed", ["init"]))
 
@@ -883,15 +884,16 @@ class TestFreshen(WorkspaceTest):
         self.assertIn("'ws' is there; fetching in it is what failed (above).\n    'wk sync ws' retries", err)
 
     def test_the_four_checkout_reports(self):
-        for out, words in ((Result(0, "detached=abc1234\n"), "'ws' is not on a branch (detached at abc1234)"),
-                           (Result(1, "", "gone"), "could not read the checkout in 'ws' to say where it is"),
-                           (Result(0, "branch=eng/local\n"), "'ws' is on 'eng/local', which tracks nothing -- 'git pull' and\n    'wk pr' have no upstream to name:  wk sync ws --fix"),
-                           (Result(0, "branch=main\nupstream=origin/main\nbehind=2\nmoved=refused\nhead=abc\n"),
-                            "'main' in 'ws' and origin/main have diverged, so the checkout is left where\n    it is:  git rebase origin/main   in the workspace"),
-                           (Result(0, "branch=main\nupstream=origin/main\nbehind=2\nmoved=2\nhead=def5678\n"),
-                            "'ws' is on main at def5678, 2 commit(s) on from its snapshot (origin/main)")):
+        behind = Result(0, "branch=main\ntracks=origin/main\nbehind=2\nhead=def5678\n")
+        for out, merged, words in ((Result(0, "branch=\nhead=abc1234\n"), None, "'ws' is not on a branch (detached at abc1234)"),
+                                   (Result(1, "", "gone"), None, "could not read the checkout in 'ws' to say where it is"),
+                                   (Result(0, "branch=eng/local\ntracks=\n"), None,
+                                    "'ws' is on 'eng/local', which tracks nothing -- 'git pull' and\n    'wk pr' have no upstream to name:  wk sync ws --fix"),
+                                   (behind, Result(1), "'main' in 'ws' and origin/main have diverged, so the checkout is left where\n"
+                                                       "    it is:  git rebase origin/main   in the workspace"),
+                                   (behind, Result(0), "'ws' is on main at def5678, 2 commit(s) on from its snapshot (origin/main)")):
             w = self.make_world()
-            w.checkout = out
+            w.checkout, w.merged = out, merged
             self.assertIn(words, self.freshen(w))
 
     def test_a_dry_run_names_the_fetch_and_asks_the_workspace_nothing(self):

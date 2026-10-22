@@ -10,11 +10,12 @@ from contextlib import redirect_stderr
 from unittest import mock
 
 from tests.support import REPO
+from tests import fakes
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import machine  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.store import Store  # noqa: E402
 
@@ -44,7 +45,7 @@ class LockTest(unittest.TestCase):
 class TestOnTheFake(LockTest):
     def setUp(self):
         super().setUp()
-        self.fake = machine.Fake("box")
+        self.fake = fakes.Fake("box")
         self.clock = FakeClock()
         self.lock = Lock(self.store, self.fake, self.clock)
 

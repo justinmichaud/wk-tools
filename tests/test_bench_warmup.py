@@ -13,7 +13,7 @@ from tests.test_slots import load_driver
 sys.path.insert(0, str(REPO / "lib"))
 from wk import samply  # noqa: E402
 from wk.bench import record, report, scores  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 
 def warmup_check(a, b, same_width=False):
@@ -59,9 +59,9 @@ class TestTheDriversEvidence(WkTest):
 
     def test_reads_width_and_machine_off_the_live_process(self):
         r = self.d.warmup_record(PROBE_32_HW)
-        self.assertEqual(r["elf"], {"bits": 32, "machine": "ARM"})
+        self.assertEqual(r["elf"], {"bits": 32, "machine": "armv7l"})
         r64 = self.d.warmup_record(PROBE_64_SOFTWARE)
-        self.assertEqual(r64["elf"], {"bits": 64, "machine": "AArch64"})
+        self.assertEqual(r64["elf"], {"bits": 64, "machine": "aarch64"})
 
     def test_names_the_driver_the_web_process_actually_mapped(self):
         r = self.d.warmup_record(PROBE_32_HW)
@@ -72,7 +72,7 @@ class TestTheDriversEvidence(WkTest):
     def test_a_software_rasterizer_is_named_as_one(self):
         r = self.d.warmup_record(PROBE_64_SOFTWARE)
         self.assertTrue(r["gl"]["software"])
-        self.assertIn("software rasterizer", " ".join(self.d.warmup_problems(r)))
+        self.assertIn("software rasterizer", " ".join(scores.warmup_problems(r)[0]))
 
     def test_executable_mappings_are_the_jit_evidence(self):
         r = self.d.warmup_record(PROBE_32_HW)
@@ -80,17 +80,17 @@ class TestTheDriversEvidence(WkTest):
         self.assertEqual(r["jit"]["exec_bytes"], 0xb8a00000 - 0xb6a00000 + 0x10000)
         # The maps probe alone answers width, renderer and JIT-took-memory; the
         # GPU and tier sections come from their own probes and are checked there.
-        maps_problems = [p for p in self.d.warmup_problems(r)
+        maps_problems = [p for p in scores.warmup_problems(r)[0]
                          if "GPU" not in p and "DRM engine" not in p and "tier" not in p]
         self.assertEqual(maps_problems, [])
 
     def test_no_executable_mapping_refuses(self):
         r = self.d.warmup_record(PROBE_NO_JIT)
         self.assertEqual(r["jit"]["exec_mappings"], 0)
-        self.assertIn("nothing was JITted", " ".join(self.d.warmup_problems(r)))
+        self.assertIn("nothing was JITted", " ".join(scores.warmup_problems(r)[0]))
 
     def test_a_process_that_never_started_refuses_rather_than_reporting_zero(self):
-        self.assertTrue(self.d.warmup_problems(self.d.warmup_record("pid=0\n")))
+        self.assertTrue(scores.warmup_problems(self.d.warmup_record("pid=0\n"))[0])
 
     BEFORE = ("gpudrv=v3d\n"
               "gpu=WPEWebProcess 417 render 1000000000\n"
@@ -112,7 +112,7 @@ class TestTheDriversEvidence(WkTest):
         rec = {"elf": {"bits": 64}, "gl": {"mapped": ["v3d_dri.so"], "software": False},
                "jit": {"exec_mappings": 1, "tiers": {"FTL": 3}}, "class": "cpu",
                "gpu": self.d.gpu_delta(self.BEFORE, self.BEFORE)}
-        self.assertEqual(self.d.warmup_problems(rec), [])
+        self.assertEqual(scores.warmup_problems(rec)[0], [])
         self.assertEqual(rec["gpu"]["busy_ms"], 0)
 
     def rec(self, measured, busy, nodes, mapped=("v3d_dri.so",), software=False):
@@ -130,12 +130,12 @@ class TestTheDriversEvidence(WkTest):
                                                           (False, 0, node, True, "software rasterizer")):
             with self.subTest(measured=measured, nodes=nodes, software=software):
                 r = self.rec(measured, busy, nodes, ("swrast_dri.so",) if software else ("v3d_dri.so",), software)
-                problems = " ".join(self.d.warmup_problems(r))
+                problems = " ".join(scores.warmup_problems(r)[0])
                 if problem:
                     self.assertIn(problem, problems)
                 else:
                     self.assertEqual(problems, "")
-                    self.assertTrue(any("unreadable on this driver" in n for n in r["notes"]))
+                    self.assertTrue(any("unreadable on this driver" in n for n in scores.warmup_problems(r)[1]))
 
     def record(self, bits, tiers):
         return {"elf": {"bits": bits}, "gl": {"mapped": ["v3d_dri.so"], "software": False},
@@ -153,7 +153,7 @@ class TestTheDriversEvidence(WkTest):
                                      (32, {"DFG": 0}, "reached no DFG compilation"),
                                      (64, {}, "no JSC compile-time report")):
             with self.subTest(bits=bits, tiers=tiers):
-                problems = " ".join(self.d.warmup_problems(self.record(bits, tiers)))
+                problems = " ".join(scores.warmup_problems(self.record(bits, tiers))[0])
                 if problem:
                     self.assertIn(problem, problems)
                 else:
@@ -161,8 +161,8 @@ class TestTheDriversEvidence(WkTest):
 
     def test_not_probed_is_a_note_and_not_a_problem(self):
         rec = self.record(64, None)
-        self.assertEqual(self.d.warmup_problems(rec), [])
-        self.assertTrue(any("not probed" in n for n in rec.get("notes", [])), rec.get("notes"))
+        self.assertEqual(scores.warmup_problems(rec)[0], [])
+        self.assertTrue(any("not probed" in n for n in scores.warmup_problems(rec)[1]))
 
 
 class TestWarmupCheck(WkTest):
@@ -190,7 +190,7 @@ class TestWarmupCheck(WkTest):
         for said, a, b, same_width in (("arm B produced no warmup evidence", self.record(), None, False),
                                        ("different drivers", self.record(), self.record(driver="/usr/lib/dri/swrast_dri.so", software=True), False),
                                        ("64-bit and 32-bit", self.record(bits=64), self.record(bits=32), True),
-                                       ("elf/gl/jit/problems", {"meta": {"interval": 1.0}, "threads": []}, self.record(), False)):
+                                       ("elf/gl/jit", {"meta": {"interval": 1.0}, "threads": []}, self.record(), False)):
             with self.subTest(said):
                 for f in self.tmp.glob("*.json"):
                     f.unlink()

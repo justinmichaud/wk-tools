@@ -20,7 +20,8 @@ from tests.support import FLEET_ENV, REPO, requires_machine
 sys.path.insert(0, str(REPO / "lib"))
 
 from wk import act, fleet, images, reach, tailnet  # noqa: E402
-from wk.machine import HAVE, Fake, Result  # noqa: E402
+from wk.machine import HAVE, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.sysimage import cli, disk, write  # noqa: E402
 
 IMAGE = "/imgs/webkit-2.52-yocto-rpi5-64.wic"

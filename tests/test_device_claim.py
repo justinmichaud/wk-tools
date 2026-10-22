@@ -15,8 +15,8 @@ from tests.support import REPO, WkTest
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, record  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 ROW = ("bench-rpi5-x-20260915T000000Z-9", "moose", "bench rpi5/speedometer3", "kill 4242")
 
@@ -216,7 +216,7 @@ class TestTheCommandsTakeIt(ClaimTest):
         err = io.StringIO()
         with mock.patch.dict(os.environ, self.env), contextlib.redirect_stderr(err), self.assertRaises(act.Refused):
             cli.Bench(str(REPO), places.Registry(REPO, env=dict(os.environ), machine=Local()), Clock()).deploy(
-                "webkit-2.52-yocto-rpi5-64", "fakeboard", "a")
+                "webkit-2.52-yocto-rpi5-64", "fakeboard", {"slot": "a"})
         out = err.getvalue()
         self.assertIn("bench fakeboard/speedometer3", out)
         self.assertIn("kill %d" % pid, out)

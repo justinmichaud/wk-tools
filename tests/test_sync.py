@@ -21,11 +21,12 @@ from tests.test_wk_workspace import FlowTest, RecordsActs, Scratch
 sys.path.insert(0, str(REPO / "lib"))
 from wk import git, images, places, pr, sync  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.decl import Decl  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.store import Store  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 CMD_SYNC = REPO / "cmd" / "sync"
 MAIN_SHA = "a" * 40
@@ -960,12 +961,9 @@ class TestEachDriversFurniture(SyncTest):
 
 
 class TestRemoteFurniture(SyncTest):
-    def remote(self, peer=False, reference=""):
-        env = dict(self.w.env, WK_REMOTE_LOCAL="1", WK_REMOTE_TOOLS="/far/wk-tools", WK_REMOTE_ROOT="/far/wk",
-                   WK_REMOTE_REFERENCE=reference)
-        if peer:
-            env["WK_REMOTE_PEER"] = "1"
-        return places.Remote("apeer" if peer else "box", str(REPO), env, self.w)
+    def remote(self, peer=False):
+        env = dict(self.w.env, WK_REMOTE_LOCAL="1", WK_REMOTE_TOOLS="/far/wk-tools", WK_REMOTE_ROOT="/far/wk")
+        return (places.Peer if peer else places.Remote)("apeer" if peer else "box", str(REPO), env, self.w)
 
     def answer_versions(self, theirs):
         self.w.answer(["git", "-C", str(REPO), "rev-parse", "HEAD"], out="abc\n")
@@ -981,8 +979,6 @@ class TestRemoteFurniture(SyncTest):
         if "sync --tools" in text:
             self.w.steps.append("ASKED: %s" % text)
             return Result(0, "published\n")
-        if "motd" in text:
-            return Result(0, "")
         if "echo \"$HOME\"" in text:
             return Result(0, "/far\nLinux\n4\n0.1 0 0\n===MEM===\nMemAvailable: 1024 kB\n===IONICE===\nno\n")
         return Result(0, "mirror-fetch origin ok\n")
@@ -1026,14 +1022,6 @@ class TestRemoteFurniture(SyncTest):
         self.assertTrue(ok, err)
         self.assertIn("box" + " " * 22 + "pushed f00d", err)
         self.assertIn("the WebKit mirror on box is up to date", err)
-
-    def test_a_build_box_cloning_from_its_admins_reference_keeps_no_mirror(self):
-        self.answer_versions("")
-        with mock.patch.object(places.Remote, "sync_tools", return_value=False):
-            ok, err = self.stderr(lambda: self.remote(reference="/srv/WebKit").sync())
-        self.assertFalse(ok)
-        self.assertIn("clone from /srv/WebKit", err)
-        self.assertNotIn("mirror on box", err)
 
 
 class TestWhyAPeerIsBehind(SyncTest):

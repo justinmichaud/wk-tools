@@ -152,16 +152,10 @@ def main(argv):
     opts = parse(argv)
 
     reg = places.Registry(ROOT)
-    try:
-        driver = reg.load(reg.ws_place(name))
-    except LookupError as e:
-        die(str(e))
+    driver = reg.present(name)
 
     preset_name = store.build_preset() or presets.default_preset(reg, name)
-    try:
-        preset = presets.resolve(preset_name, driver.os(), driver.kind, driver.env)
-    except LookupError:
-        die("unknown preset '%s'" % preset_name)
+    preset = presets.resolve_or_die(preset_name, driver)
 
     src = driver.src(name)
     jsc = preset.jsc_path(src)

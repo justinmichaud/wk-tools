@@ -20,7 +20,8 @@ sys.path.insert(0, str(REPO / "lib"))
 import credcheck  # noqa: E402
 from wk import agents  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 LINK = 'mkdir -p "$HOME/.local/bin" && ln -s "$OK_BIN" "$HOME/.local/bin/%s"'
 STUBS = {

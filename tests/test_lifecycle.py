@@ -10,7 +10,7 @@ from tests.support import REPO, WkTest, load_cmd, rand_suffix, requires_containe
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 
 # A podman machine that is up with nothing stopped, and a peer that refuses every connection.

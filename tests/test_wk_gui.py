@@ -12,7 +12,7 @@ from tests.support import REPO, load_cmd
 sys.path.insert(0, str(REPO / "lib"))
 from wk import presets  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 os.environ.setdefault("WK_ROOT", str(REPO))
 GUI = load_cmd("gui")
@@ -33,7 +33,7 @@ def _driver(kind="container", os_name="linux"):
 
 def _registry(driver):
     reg = mock.Mock()
-    reg.load.return_value = driver
+    reg.present.return_value = driver
     return reg
 
 

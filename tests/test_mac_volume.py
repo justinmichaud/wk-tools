@@ -4,7 +4,7 @@ import io
 import sys
 import unittest
 
-from tests.support import REPO, requires_machine, scratch_dir
+from tests.support import REPO, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 
@@ -110,17 +110,6 @@ class TestReturn(unittest.TestCase):
         for remedy in ("wk machine setup mbp", "wk boot mbp --disarm"):
             self.assertIn(remedy, err)
 
-    def test_the_restart_is_ready_only_when_the_helper_names_its_detach(self):
-        fake, d = volume()
-        d.probe()
-        self.assertTrue(d.restart_ready())
-        fake.helper_is = "old"
-        self.assertFalse(d.restart_ready())
-        self.assertIn("older than this tree", d.restart_detail())
-        fake.helper_is = None
-        self.assertIn("plain sudo there wants a password", d.restart_detail())
-
-
 class TestReports(unittest.TestCase):
     def test_a_bench_answer_reports_the_medium_as_that_installs_own_root(self):
         fake, d = volume()
@@ -155,63 +144,7 @@ class TestReports(unittest.TestCase):
         self.assertIsNone(d.systems())
 
 
-class TestStaging(unittest.TestCase):
-    """The staging root and the home, as the answering side reaches them; nothing lands on a running measurement."""
-
-    def test_the_staging_root_and_the_home_answer_on_that_side(self):
-        fake, d = volume()
-        d.probe()
-        self.assertEqual((d.bench_root(), d.bench_home()),
-                         ("/Volumes/WK Bench - Data/private/var/wk", "/Volumes/WK Bench - Data/Users/bench"))
-        fake.data = False
-        self.assertEqual(d.bench_root(), "/Volumes/WK Bench/var/wk")
-        fake.attached = False
-        self.assertIsNone(d.bench_root())
-        fake.enter_bench()
-        d.probe()
-        self.assertEqual((d.bench_root(), d.bench_home()), ("/var/wk", "/Users/bench"))
-
-    def test_nothing_is_staged_onto_a_running_measurement(self):
-        fake, d = volume()
-        fake.enter_bench()
-        d.probe()
-        for put in (d.bench_put, d.bench_put_file):
-            with self.subTest(put=put.__name__):
-                got, err = quiet(put, "/tmp", "/var/wk/x")
-                self.assertIs(got, act.Refused)
-                self.assertIn("running measurement", err)
-        self.assertEqual(fake.effects, [])
-
-    def test_a_tree_travels_as_a_tar_without_history_or_bytecode_and_replaces_the_one_there(self):
-        dest = "/Volumes/WK Bench - Data/private/var/wk/wk-tools"
-        with scratch_dir() as tmp:
-            for rel in ("a.txt", ".git/HEAD", "lib/__pycache__/x.pyc", "lib/x.py"):
-                (tmp / rel).parent.mkdir(parents=True, exist_ok=True)
-                (tmp / rel).write_text("x")
-            fake, d = volume()
-            d.probe()
-            self.assertEqual(d.bench_put(str(tmp), dest, ".git", "__pycache__"), 0)
-        tar = [e[1] for e in fake.effects if e[0] == "tar" and isinstance(e[1], tuple)][0]
-        self.assertIn("./lib/x.py", tar)
-        self.assertFalse([n for n in tar if ".git" in n or "__pycache__" in n], tar)
-        ran = [e for e in fake.effects if e[0] != "push" and isinstance(e[1], str)]
-        tmp_tar = ran[-1][-1]
-        self.assertTrue(tmp_tar.startswith("/tmp/wk-put-"), ran)
-        self.assertEqual(ran, [("rm", "-rf", dest), ("mkdir", "-p", dest), ("tar", "-xf", tmp_tar, "-C", dest), ("rm", "-f", tmp_tar)])
-
-
 class TestOnTheMac(unittest.TestCase):
-    def test_standing_on_the_mac_runs_it_here_and_stages_nothing(self):
-        conf = conf_for("mac-volume")
-        from wk.machine import Fake
-        via = Fake("here")
-        via.answer(["hostname", "-s"], out="Tolken\n")
-        via.answer(["sh", "-c"], out="id=x\n")
-        d = open_driver(REPO, conf, env={}, via=via)
-        self.assertEqual(d.probe(), "bench x")
-        self.assertTrue(d.bench_local(), "`wk bench stage --to mbp` on that Mac sends nothing")
-        self.assertIs(d.manager(), via)
-
     @requires_machine("tolken")
     def test_what_an_arming_proves_first_reads_true_on_mbp(self):
         """`live boot.arm[mbp]`, read-only as `requires_machine` is: host mode, the volume attached, and a firmware

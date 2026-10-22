@@ -12,7 +12,8 @@ from tests.support import DISPATCH_VARS, REPO, WkTest, load_cmd, run
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, sshalias  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import HAVE, Fake, Result  # noqa: E402
+from wk.machine import HAVE, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 os.environ.setdefault("WK_ROOT", str(REPO))
 ZED = load_cmd("zed")
@@ -33,7 +34,7 @@ class DriverTest(unittest.TestCase):
 
     def conf(self, name, text):
         kind = "kind=%s\n" % ("peer" if "peer=1" in text else "build")
-        (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text)
+        (self.tmp / "hosts" / (name + ".conf")).write_text(kind + text.replace("peer=1\n", ""))
 
 
 class ContainerTest(DriverTest):

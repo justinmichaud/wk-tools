@@ -13,17 +13,9 @@ from tests.support import REPO, WkTest, bash, scratch_dir, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, machine_cmd  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
-
-class TheToolsPathIsDeclared(WkTest):
-    def test_the_driver_answers_where_the_tree_is_and_searches_for_nothing(self):
-        from wk.boot.mac import MacVolume
-        m = Fake("tolken")
-        m.answer(["test", "-x", "Development/wk-tools/wk"], rc=0)
-        d = MacVolume(str(REPO), {"name": "mbp", "ssh": "tolken"}, None)
-        self.assertEqual("Development/wk-tools", d.manager_tools(m))
-        self.assertEqual([e[1] for e in m.effects], [("test", "-x", "Development/wk-tools/wk")])
 
 def git(cwd, *args):
     return subprocess.run(

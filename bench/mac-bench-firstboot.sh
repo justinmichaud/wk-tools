@@ -12,6 +12,12 @@ SELF=/usr/local/libexec/wk-bench-firstboot.sh
 BENCH_USER="${WK_BENCH_USER:-bench}"
 IMAGE_PRESET=perf-macos-tolken
 
+# Provisioned already: a daemon that outlived its run removes itself and touches nothing, so it never re-syncs an older tree or reboots.
+if grep -q "provisioning complete" "$LOG" 2>/dev/null; then
+    rm -f "$DAEMON" "$SELF"
+    exit 0
+fi
+
 exec >>"$LOG" 2>&1
 echo "=== wk-bench first boot: $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 

@@ -12,7 +12,8 @@ from tests.support import REPO, load_cmd
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sudo  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import HAVE, Fake, Result  # noqa: E402
+from wk.machine import HAVE, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.sudo import Sudo  # noqa: E402
 
 cmd = load_cmd("key")

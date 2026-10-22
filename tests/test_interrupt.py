@@ -12,7 +12,8 @@ from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import job  # noqa: E402
-from wk.machine import Fake, Local  # noqa: E402
+from wk.machine import Local  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 # A watched job as lib/wk/build.py runs one: under Signals, an Interrupted exits by its signal.
 DRIVER = '''

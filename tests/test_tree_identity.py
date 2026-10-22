@@ -73,9 +73,9 @@ class TwoClonesCase(unittest.TestCase):
             (d / "wk").symlink_to(REPO / "wk")
 
     def _peer_sync(self, mine_root, their_root):
-        """Remote.sync's peer arm with no ssh (WK_REMOTE_LOCAL)."""
+        """Peer.sync with no ssh (WK_REMOTE_LOCAL)."""
         env = {k: v for k, v in os.environ.items() if k != "WK_ROOT"}
-        t = places.Remote("peer", str(mine_root), dict(env, WK_REMOTE_PEER="1", WK_REMOTE_LOCAL="1",
+        t = places.Peer("peer", str(mine_root), dict(env, WK_REMOTE_LOCAL="1",
                                                         WK_REMOTE_HOST="peer", WK_REMOTE_TOOLS=str(their_root)), Local())
         with mock.patch.dict(os.environ, {"WK_ROOT": ""}), contextlib.redirect_stderr(io.StringIO()) as err:
             os.environ.pop("WK_ROOT")

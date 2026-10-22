@@ -1,5 +1,6 @@
-"""The script a macOS benchmark install runs by itself (lib/wk/bench/autorun.py)
-and the readings it judges the install by (bench/mac-quiet-desktop.sh)."""
+"""The planted A/B a macOS bench install runs by itself (lib/wk/bench/autorun.py): the machine readied, the job's AB
+handed what the job names, the machine handed back or off however it ends; and the readings it judges the install by
+(bench/mac-quiet-desktop.sh)."""
 import contextlib
 import io
 import json
@@ -7,15 +8,18 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from tests.support import REPO, WkTest, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import screen  # noqa: E402
-from wk.bench import autorun, mac  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from wk.bench import ab, autorun, mac  # noqa: E402
+from wk.images import MARKER  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 from wk.kv import kv  # noqa: E402
-from wk.machine import Fake, Killed, Result  # noqa: E402
+from wk.machine import Result  # noqa: E402
+from tests.fakes import Fake, Killed  # noqa: E402
 
 QUIET = REPO / "bench" / "mac-quiet-desktop.sh"
 
@@ -101,18 +105,15 @@ class TestATimedOutReadingIsUnknownAndNotAFault(WkTest):
 
 
 ROOT = "/var/wk"
-TOOLS = ROOT + "/wk-tools"
+TOOLS = autorun.TREE
 HOME = "/Users/bench"
 AGENT = HOME + "/Library/LaunchAgents/com.wk.bench-ab.plist"
 STATE = ROOT + "/autorun.state"
-STATE_TEXT = "phase=planted\njob_stamp=S1\nattempts=0\n"
-RUNS = ROOT + "/ab/S1"
+STATE_TEXT = "phase=planted\ntask=T1\nattempts=0\n"
+TASK = ROOT + "/results/T1"
 HOST = "/Volumes/Macintosh HD"
 WKMAC = ["python3", TOOLS + "/" + mac.WKMAC]
 CHECK = ["/usr/bin/python3", TOOLS + "/" + mac.CHECK]
-WK = ["env", "WK_STORE=" + ROOT, TOOLS + "/wk"]
-OK_ROWS = "ok\tApp Nap cannot throttle a backgrounded browser\t\n"
-WRONG_ROWS = "wrong\tnot so: the screen does not lock (askforpassword reads '1')\tfix\n"
 HALT = ("sudo", "-n", "/sbin/halt")
 REBOOT = ("sudo", "-n", "/sbin/reboot")
 
@@ -122,82 +123,69 @@ def lib(rel, fn):
 
 
 def job(**over):
-    d = {"plans": ["jetstream3"], "rounds": 2, "max_rounds": 4, "detect_pct": 0.3, "timeout": 1800, "count": "",
-         "display": "builtin 1512x982", "settle": 90, "n_arms": 2, "rehearsal": "", "aslr": "", "env_pad": "",
-         "path_pad": "", "shared_cache": "",
+    d = {"task": "T1", "workspace": "mac-rel", "machine": "mbp", "plans": ["jetstream3"], "rounds": "2", "max_rounds": "4",
+         "detect": "0.3", "timeout": "1800", "count": "", "display": "builtin 1512x982", "settle": "90", "rehearsal": "", "aslr": "",
+         "env_pad": "", "path_pad": "", "shared_cache": "",
          "arms": [{"label": "A", "id": "sa", "browser_args": ""}, {"label": "B", "id": "sb", "browser_args": ""}]}
     d.update(over)
     return d
 
 
 class World:
-    """A planted bench install: marker, job, state, agent, a staged arm A, one host install to hand back to."""
+    """A planted bench install: marker, job, state, agent, one host install to hand back to; the job's AB a recorder."""
 
-    def __init__(self, job_doc=None, env=None):
-        self.fake, self.clock, self.out = Fake("bench"), FakeClock(), io.StringIO()
-        self.env = dict({"HOME": HOME, "WK_AB_ROOT": ROOT}, **(env or {}))
-        self.armed, self.results, self.stamp = [], 0, "one"
+    def __init__(self, job_doc=None, env=None, outcome="resolved-at-round-2", legs=2):
+        self.fake, self.clock = Fake("bench"), FakeClock()
+        self.env = dict({"HOME": HOME, "WK_BENCH_ROOT": ROOT}, **(env or {}))
+        self.armed, self.abs, self.outcome, self.n_legs = [], [], outcome, legs
         f = self.fake
-        f._set_file(mac.MARKER, "id=perf-macos-tolken\n")
+        f._set_file(MARKER, "id=perf-macos-tolken\n")
         if job_doc is not False:
             f._set_file(ROOT + "/job.json", json.dumps(job() if job_doc is None else job_doc))
         f._set_file(STATE, STATE_TEXT)
         f._set_file(AGENT, "<plist/>")
-        for rel in ("wk", "bench/" + "mac-quiet-desktop.sh", screen.WINDOWS):
-            f._set_file(TOOLS + "/" + rel, "")
+        f._set_file(TOOLS + "/wk", "")
         f._set_file(HOST + "/System/Library/CoreServices/SystemVersion.plist", "")
-        for d in (ROOT + "/staged/sa/WebKitBuild/Release", ROOT + "/results", "/var/folders/T"):
-            while d != "/":
-                f.dirs.add(d)
-                d = os.path.dirname(d)
+        f.dirs.update({"/var/folders/T", TASK + "/runs"})
         answers = {("sysctl",): "{ sec = 1757000000, usec = 0 } Thu", ("stat", "-f", "%d", "/"): "1",
                    ("stat", "-f", "%d"): "2", tuple(WKMAC + ["brightness"]): "0.0", tuple(WKMAC + ["auto-brightness"]): "off",
                    tuple(WKMAC + ["display-mode"]): "1512x982", tuple(WKMAC + ["volume-group"]): "HOSTGRP",
                    tuple(WKMAC + ["boot-volume"]): "AAA:HOSTGRP", tuple(CHECK + ["--displays-only"]): "displays=built-in",
                    ("getconf",): "/var/folders/T", tuple(lib(screen.WINDOWS, "wk_window_probe")): "windows=MiniBrowser:Speedometer\n",
-                   tuple(lib(screen.WINDOWS, "wk_window_unexpected")): "",
-                   tuple(lib(autorun.DESKTOP, "wk_quiet_desktop_probe")): "askforpassword=0\n",
-                   tuple(lib(autorun.DESKTOP, "wk_quiet_desktop_findings")): OK_ROWS,
-                   tuple(WK + ["bench", "precision"]): "met=yes\n"}
+                   tuple(lib(screen.WINDOWS, "wk_window_unexpected")): ""}
         for prefix, out in answers.items():
             f.answer(list(prefix), out=out)
-        for prefix in (("test",), ("sudo", "-n"), ("sync",), tuple(CHECK + ["--build-directory"]), ("env",)):
+        for prefix in (("test",), ("sudo", "-n"), ("sync",), ("env",)):
             f.answer(list(prefix))
         f.answer(["pgrep"], rc=1)
         f.answer(["sudo", "-n", "launchctl", "print"], rc=1)
-        f.react(["/usr/bin/plutil"], lambda a, f: Result(0, '  "LastFullCheckDate" => %s\n' % self.stamp))
-        f.react(WK + ["bench", "staged"], self.staged)
-        f.react(["env", "WK_STORE=" + ROOT, "WK_BENCH_ASLR=off"], self.staged)
 
-    def staged(self, argv, fake):
-        if "staged" not in argv:
-            return Result(0)
-        self.results += 1
-        fake.dirs.add("%s/results/r%03d" % (ROOT, self.results))
-        return Result(0)
+    def ab(self, root, reg, clock, ws, names, o, kind, arms, reporter, defaults):
+        """The job's A/B as the autorun hands it over: each leg a run under the task the plant wrote."""
+        world = self
+        world.abs.append(dict(ws=ws, plans=names, o=o, kind=kind, arms=[(a.label, a.slot, a.args) for a in arms], defaults=defaults,
+                              env=reg.env, system=arms[0].system))
 
-    def autorun(self):
-        return autorun.Autorun(self.fake, self.clock, self.env, tools=TOOLS, out=self.out,
-                               background=self.armed.append)
+        class Recorded:
+            outcome = ""
+
+            def go(self):
+                for i in range(0 if os.environ.get("WK_DRY_RUN") else world.n_legs):
+                    world.fake._set_file("%s/runs/r%d/env.json" % (TASK, i), "{}")
+                self.outcome = world.outcome
+                return 0
+        return Recorded()
 
     def run(self):
-        with contextlib.redirect_stderr(io.StringIO()) as self.err:
-            return self.autorun().run()
+        with contextlib.redirect_stderr(io.StringIO()) as self.err, contextlib.redirect_stdout(io.StringIO()) as self.out, \
+                mock.patch.object(autorun, "AB", self.ab):
+            return autorun.Autorun(self.fake, self.clock, self.env, background=self.armed.append).run()
 
     def state(self):
         return kv(self.fake.files.get(STATE, ""))
 
-    def runs(self):
-        return self.fake.files.get(RUNS + "/runs.tsv", "")
-
     def calls(self, kind="run"):
         return [e[1] for e in self.fake.effects if e[0] == kind]
-
-    def legs(self):
-        return [a for a in self.calls("run_tty") if a[0] == "env" and TOOLS + "/wk" in a and "staged" in a]
-
-    def arm_ids(self):
-        return [a[a.index("--id") + 1] for a in self.legs()]
 
     def power(self):
         return [a for a in self.calls() if a in (HALT, REBOOT)]
@@ -207,7 +195,7 @@ class World:
 
 
 class TestTheJobRuns(unittest.TestCase):
-    def test_a_planted_job_measures_and_hands_the_machine_back(self):
+    def test_a_planted_job_measures_into_its_task_and_hands_the_machine_back(self):
         w = World()
         self.assertEqual(0, w.run(), w.log())
         s = w.state()
@@ -215,88 +203,31 @@ class TestTheJobRuns(unittest.TestCase):
         self.assertEqual([REBOOT], w.power())
         self.assertIn(AGENT, w.fake.files, "a finished job's next boot removes the agent, not this one")
 
-    def test_the_arms_are_counterbalanced_after_a_warmup_of_each(self):
-        w = World()
+    def test_the_ab_is_the_jobs_plans_arms_and_rule_over_this_volume_under_the_plants_task(self):
+        w = World(job(count="3", plans=["jetstream3", "speedometer3"], arms=[{"label": "A", "id": "sa", "browser_args": "--x"},
+                                                                             {"label": "B", "id": "sb"}]))
         w.run()
-        self.assertEqual(["sa", "sb", "sa", "sb", "sb", "sa"], w.arm_ids())
+        (a,) = w.abs
+        self.assertEqual((a["ws"], a["plans"], a["kind"], a["defaults"]), ("mac-rel", ["jetstream3", "speedometer3"], "slot", ab.PLANTED))
+        self.assertEqual(a["o"], {"rounds": "2", "max_rounds": "4", "detect": "0.3", "count": "3", "timeout": "1800", "task": "T1"})
+        self.assertEqual(a["arms"], [("A", "sa", "--x"), ("B", "sb", "")])
+        self.assertEqual((a["system"].kind, a["system"].machine_name, a["env"]["WK_STORE"]), ("mac-volume", "mbp", ROOT))
+        self.assertNotIn("WK_FORCE", a["env"])
 
-    def test_the_warmup_is_profiled_and_never_compared(self):
-        w = World()
+    def test_the_variance_rides_on_the_env_and_only_a_rehearsal_forces_a_leg(self):
+        w = World(job(aslr="off", rehearsal="1"))
         w.run()
-        profiled = [a[a.index("--profile") + 1] for a in w.legs() if "--profile" in a]
-        self.assertEqual([RUNS + "/warmup/jetstream3-A.json.gz", RUNS + "/warmup/jetstream3-B.json.gz"], profiled)
-        rows = [l.split("\t") for l in w.runs().splitlines()]
-        self.assertEqual(["1", "1", "2", "2"], [r[0] for r in rows])
-        self.assertEqual({"clean"}, {r[4] for r in rows})
+        env = w.abs[0]["env"]
+        self.assertEqual((env["WK_BENCH_ASLR"], env["WK_FORCE"]), ("off", "1"))
 
-    def test_the_stopping_rule_is_given_each_arms_clean_run_directories(self):
-        w = World()
+    def test_an_ab_that_ends_with_nothing_still_hands_back_and_records_it_failed(self):
+        w = World(outcome="")
         w.run()
-        ask = [a for a in w.calls() if "precision" in a][0]
-        self.assertEqual("%s/results/r003,%s/results/r006" % (ROOT, ROOT), ask[ask.index("precision") + 1])
-        self.assertEqual("0.3", ask[ask.index("--detect") + 1])
-
-    def test_detect_zero_runs_exactly_the_rounds_asked_for(self):
-        for zero in (0, 0.0, "0"):
-            w = World(job(detect_pct=zero, rounds=3))
-            w.run()
-            self.assertEqual(2 + 3 * 2, len(w.legs()), zero)
-            self.assertEqual("rounds-done", w.state()["outcome"])
-            self.assertFalse([a for a in w.calls() if "precision" in a])
-
-    def test_a_goal_it_cannot_reach_stops_at_the_ceiling(self):
-        w = World()
-        w.fake.answer(WK + ["bench", "precision"], out="met=no\n")
-        w.run()
-        self.assertEqual(("hit-max-rounds", "4"), (w.state()["outcome"], w.state()["rounds_done"]))
-
-    def test_a_scanned_arm_is_kept_and_left_out_of_the_comparison(self):
-        w = World()
-
-        def scanning(argv, fake):
-            if w.results == 3:
-                w.stamp = "two"
-            return w.staged(argv, fake)
-        w.fake.react(WK + ["bench", "staged"], scanning)
-        w.run()
-        self.assertIn("\tscanned\t", w.runs())
-        ask = [a for a in w.calls() if "precision" in a][0]
-        self.assertNotIn("r004", ask[ask.index("precision") + 2])
-
-    def test_every_arm_failing_stops_after_the_first_round(self):
-        w = World()
-        w.fake.answer(WK + ["bench", "staged"], rc=3)
-        w.run()
-        self.assertEqual("all-failed-round-1", w.state()["outcome"])
-        self.assertEqual("3", w.state()["fail_jetstream3_A_1"])
-        self.assertEqual(4, len(w.legs()))
-
-    def test_each_leg_carries_the_jobs_display_count_and_variance(self):
-        w = World(job(count="3", aslr="off", arms=[{"label": "A", "id": "sa", "browser_args": "--x"},
-                                                  {"label": "B", "id": "sb"}]))
-        w.run()
-        leg = w.legs()[-1]
-        self.assertEqual(["env", "WK_STORE=" + ROOT, "WK_BENCH_ASLR=off"], list(leg[:3]))
-        self.assertEqual("builtin 1512x982", leg[leg.index("--expect-display") + 1])
-        self.assertEqual("3", leg[leg.index("--count") + 1])
-        self.assertIn("--x", w.legs()[0])
-        self.assertNotIn("--force", leg)
-
-    def test_only_a_rehearsal_forces_a_leg(self):
-        w = World(job(rehearsal="1"))
-        w.run()
-        self.assertTrue(all("--force" in a for a in w.legs()))
-
-    def test_every_leg_re_pauses_the_daemons_first(self):
-        w = World()
-        w.run()
-        pause = ("sudo", "-n") + tuple(lib(autorun.DESKTOP, "wk_quiet_daemons_pause"))
-        tty = w.calls("run_tty")
-        self.assertTrue(all(tty[tty.index(leg) - 1] == pause for leg in w.legs()))
+        self.assertEqual("failed", w.state()["outcome"])
+        self.assertEqual(1, len(w.power()))
 
     def test_the_install_converges_itself_before_the_display_gates(self):
         w = World()
-        w.fake.dirs.add(ROOT + "/tailnet")
         w.run()
         tty = [a for a in w.calls("run_tty")]
         py = ("sudo", "-n", "env", "PYTHONPATH=%s/lib" % TOOLS, "python3", "-m")
@@ -310,24 +241,20 @@ class TestTheJobRuns(unittest.TestCase):
         for svc in autorun.UPDATERS:
             self.assertIn(("sudo", "-n", "launchctl", "bootout", svc), w.calls())
 
-    def test_a_window_in_front_is_closed_but_setup_assistant_is_left(self):
+    def test_a_window_in_front_is_closed_but_setup_assistant_is_left_and_an_auth_panel_is_killed(self):
         w = World()
         w.fake.answer(lib(screen.WINDOWS, "wk_window_unexpected"),
                       out="Setup Assistant:Welcome;Feedback Assistant:Report;Feedback Assistant:Other;")
+        w.fake.answer(["pgrep", "-x", "SecurityAgent"])
         w.run()
         self.assertIn(("sudo", "-n", "pkill", "-f", "Feedback Assistant.app"), w.calls())
         self.assertNotIn(("sudo", "-n", "pkill", "-f", "Setup Assistant.app"), w.calls())
-
-    def test_a_modal_authentication_panel_is_killed(self):
-        w = World()
-        w.fake.answer(["pgrep", "-x", "SecurityAgent"])
-        w.run()
         self.assertIn(("sudo", "-n", "killall", "-9", "SecurityAgent"), w.calls())
 
 
 class TestTheSettle(unittest.TestCase):
     def test_it_settles_for_the_jobs_time_once_the_phase_is_running(self):
-        w = World(job(settle=37))
+        w = World(job(settle="37"))
         slept = []
         w.clock.sleep = lambda s: slept.append((s, w.state().get("phase")))
         w.run()
@@ -344,8 +271,8 @@ class TestTheSettle(unittest.TestCase):
 
 class TestTheMachineEndsUpOff(unittest.TestCase):
     def leave(self, w):
-        a = w.autorun()
-        with contextlib.redirect_stderr(io.StringIO()):
+        a = autorun.Autorun(w.fake, w.clock, w.env, background=w.armed.append)
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()) as w.out:
             a.leave("the reason")
             a.leave("a second reason")
         return w
@@ -354,25 +281,22 @@ class TestTheMachineEndsUpOff(unittest.TestCase):
         w = self.leave(World())
         self.assertIn(("sudo", "-n", "bless", "--mount", HOST, "--setBoot"), w.calls())
         self.assertEqual([REBOOT], w.power())
+        self.assertIn("the reason", w.log())
+        self.assertNotIn("a second reason", w.log())
 
     def test_with_no_one_host_install_to_hand_back_to_it_halts(self):
         for why, setup in (("a bless that did not take", lambda f: f.answer(WKMAC + ["boot-volume"], out="AAA:BENCHGRP")),
                            ("no host install", lambda f: f._drop("/Volumes")),
-                           ("a volume carrying the bench marker", lambda f: f._set_file(HOST + mac.MARKER, "id=x\n")),
+                           ("a volume carrying the bench marker", lambda f: f._set_file(HOST + MARKER, "id=x\n")),
                            ("two host installs", lambda f: f._set_file("/Volumes/Other/System/Library/CoreServices/SystemVersion.plist", ""))):
             with self.subTest(why):
                 w = World()
                 setup(w.fake)
                 self.assertEqual([HALT], self.leave(w).power())
 
-    def test_the_first_reason_is_the_one_recorded(self):
-        w = self.leave(World())
-        self.assertIn("the reason", w.log())
-        self.assertNotIn("a second reason", w.log())
-
     def test_host_mode_is_the_one_exit_that_touches_nothing_but_the_agent(self):
         w = World()
-        w.fake._drop(mac.MARKER)
+        w.fake._drop(MARKER)
         w.run()
         self.assertEqual([], w.power())
         self.assertNotIn(AGENT, w.fake.files)
@@ -389,7 +313,7 @@ class TestTheMachineEndsUpOff(unittest.TestCase):
 class TestTheRefusals(unittest.TestCase):
     def refused(self, w, rc=0):
         self.assertEqual(rc, w.run(), w.log())
-        self.assertEqual([], w.legs())
+        self.assertEqual([], w.abs)
         self.assertEqual(1, len(w.power()), w.power())
         return w
 
@@ -408,7 +332,7 @@ class TestTheRefusals(unittest.TestCase):
         """A mode written once that still does not come up is unsettable; a tree with no wk is the one failing exit."""
         mode = lambda f: f.answer(WKMAC + ["display-mode"], out="1800x1169")   # noqa: E731
         for outcome, w, setup, rc in (
-                ("abandoned", World(), lambda f: f._set_file(STATE, "phase=running\nattempts=3\n"), 0),
+                ("abandoned", World(), lambda f: f._set_file(STATE, "phase=running\ntask=T1\nattempts=3\n"), 0),
                 ("no-display-expectation", World(job(display="")), lambda f: None, 0),
                 ("display-mode-unsettable", World(), lambda f: (mode(f), f._set_file(STATE, STATE_TEXT + "mode_declared=1512x982\n")), 0),
                 ("display-mode-unwritable", World(), lambda f: (mode(f), f.answer(["sudo", "-n"] + WKMAC, rc=1)), 0),
@@ -418,46 +342,23 @@ class TestTheRefusals(unittest.TestCase):
                 self.assertEqual(("done", outcome), (self.refused(w, rc).state()["phase"], w.state()["outcome"]))
                 self.assertNotIn(AGENT, w.fake.files)
 
-    def test_it_stands_aside_while_provisioning_is_running(self):
-        w = World()
-        w.fake.answer(["pgrep", "-f", "wk-bench-firstboot"])
-        self.assertEqual(0, w.run())
-        self.assertEqual([], w.power())
-        self.assertEqual([], [e for e in w.fake.effects if e[0] in ("write", "remove")])
-
-    def test_a_first_boot_daemon_that_outlived_provisioning_is_defused(self):
-        w = World()
-        w.fake._set_file(autorun.FB_PLIST, "")
-        w.run()
-        self.assertIn(("sudo", "-n", "rm", "-f", autorun.FB_PLIST, autorun.FB_SELF), w.calls())
-
-    def test_a_reboot_someone_else_scheduled_is_cancelled(self):
-        w = World()
-        w.fake.answer(["pgrep", "-x", "shutdown"])
-        w.run()
-        self.assertIn(("sudo", "-n", "pkill", "-x", "shutdown"), w.calls())
-
     def test_each_unmeasurable_state_measures_nothing(self):
         for why, setup in (("a panel that will not dim", lambda f: f.answer(WKMAC + ["brightness"], rc=1, out="0.4")),
                            ("ambient light judged by its reading", lambda f: (f.answer(WKMAC + ["auto-brightness", "--off"], out="off"),
-                                                                              f.answer(WKMAC + ["auto-brightness"], out="on"))),
-                           ("no quiet table to judge by", lambda f: f._drop(TOOLS + "/" + autorun.DESKTOP)),
-                           ("an arm with no products", lambda f: f._drop(ROOT + "/staged"))):
+                                                                              f.answer(WKMAC + ["auto-brightness"], out="on")))):
             with self.subTest(why):
                 w = World()
                 setup(w.fake)
                 self.refused(w)
 
-    def test_ambient_light_that_will_not_let_go_spends_no_attempt(self):
+    def test_ambient_light_that_will_not_let_go_spends_no_attempt_and_a_panel_with_no_sensor_is_none(self):
         w = World()
         w.fake.answer(WKMAC + ["auto-brightness"], out="on")
         self.assertEqual("0", self.refused(w).state()["attempts"])
-
-    def test_a_panel_with_no_sensor_is_not_a_refusal(self):
         w = World()
         w.fake.answer(WKMAC + ["auto-brightness"], out="none")
         w.run()
-        self.assertTrue(w.legs())
+        self.assertTrue(w.abs)
 
     def test_a_wrong_display_spends_no_attempt_and_writes_no_mode(self):
         w = World()
@@ -475,57 +376,30 @@ class TestTheRefusals(unittest.TestCase):
         self.assertNotIn(("sudo", "-n", "bless", "--mount", HOST, "--setBoot"), w.calls())
         self.assertEqual(("0", "1512x982"), (w.state()["attempts"], w.state()["mode_declared"]))
 
-    def test_a_setting_that_drifted_refuses_the_whole_job_once_after_the_quiesce(self):
-        w = World()
-        w.fake.answer(lib(autorun.DESKTOP, "wk_quiet_desktop_findings"), out=OK_ROWS + WRONG_ROWS)
-        w = self.refused(w)
-        self.assertIn("not so: the screen does not lock", w.log())
-        self.assertIn("wk sysimage build perf-macos-tolken --repair", w.log())
-        order = [e[1][:len(WK) + 1] for e in w.fake.effects if e[0] in ("run", "run_tty")]
-        self.assertLess(order.index(tuple(WK) + ("quiesce",)), order.index(tuple(lib(autorun.DESKTOP, "wk_quiet_desktop_probe"))[:4]))
-
-    def test_a_throttled_browser_stops_the_job_before_round_one(self):
-        w = World()
-        w.fake.answer(CHECK + ["--build-directory"], rc=1)
-        w = self.refused(w)
-        check = [a for a in w.calls("run_tty") if "--build-directory" in a][0]
-        self.assertEqual(ROOT + "/staged/sa/WebKitBuild/Release", check[check.index("--build-directory") + 1])
-        self.assertEqual(RUNS + "/browser-check.json", check[check.index("--json") + 1])
-
-
 
 class TestANumberlessBootIsHeld(unittest.TestCase):
-    def test_a_boot_with_no_runs_is_held_for_a_reader(self):
-        w = World(env={"WK_MAC_BENCH_HOLD": "120"})
-        w.fake.answer(CHECK + ["--build-directory"], rc=1)
+    def test_a_boot_with_no_runs_is_held_for_a_reader_unless_turned_off(self):
+        w = World(env={"WK_MAC_BENCH_HOLD": "120"}, legs=0)
         w.run()
         self.assertIn(120, w.clock.slept)
         self.assertIn("tail -120 %s/autorun.log" % ROOT, w.log())
-
-    def test_a_boot_whose_legs_landed_hands_back_at_once(self):
-        w = World(env={"WK_MAC_BENCH_HOLD": "120"})
-        w.run()
-        self.assertNotIn(120, w.clock.slept)
-
-    def test_a_boot_that_never_reached_the_job_is_not_held(self):
-        w = World(job_doc=False, env={"WK_MAC_BENCH_HOLD": "120"})
-        w.run()
-        self.assertNotIn(120, w.clock.slept)
-
-    def test_it_can_be_turned_off(self):
-        w = World(env={"WK_MAC_BENCH_HOLD": "0"})
-        w.fake.answer(CHECK + ["--build-directory"], rc=1)
+        w = World(env={"WK_MAC_BENCH_HOLD": "0"}, legs=0)
         w.run()
         self.assertEqual([REBOOT], w.power())
         self.assertNotIn("Holding", w.log())
 
+    def test_a_boot_whose_legs_landed_or_that_never_reached_the_job_is_not_held(self):
+        for w in (World(env={"WK_MAC_BENCH_HOLD": "120"}), World(job_doc=False, env={"WK_MAC_BENCH_HOLD": "120"})):
+            w.run()
+            self.assertNotIn(120, w.clock.slept)
+
 
 class TestTheWatchdog(unittest.TestCase):
     def watch(self, w, mtime):
-        a = w.autorun()
-        a.stall, a.runs = 1000, RUNS
+        a = autorun.Autorun(w.fake, w.clock, w.env, background=w.armed.append)
+        a.stall = 1000
         w.fake.react(["stat", "-f", "%m"], lambda argv, f: Result(0, str(mtime(a))))
-        with contextlib.redirect_stderr(io.StringIO()):
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
             a.watchdog()
         return a
 
@@ -546,21 +420,17 @@ class TestTheWatchdog(unittest.TestCase):
         self.assertEqual([autorun.WATCH_POLL] * 4, w.clock.slept)
         self.assertEqual([], w.power())
 
-    def test_its_bound_is_the_leg_timeout_and_a_grace(self):
-        w = World(job(timeout=600))
-        w.run()
-        self.assertIn("watchdog: %ds of silence" % (600 + autorun.STALL_GRACE), w.log())
-
-    def test_it_is_armed_before_the_panel_is_touched(self):
-        w = World()
+    def test_its_bound_is_the_leg_timeout_and_a_grace_and_it_is_armed_before_the_panel_is_touched(self):
+        w = World(job(timeout="600"))
         order = []
         w.fake.react(WKMAC + ["brightness"], lambda a, f: order.append(len(w.armed)) or Result(0, "0.0"))
         w.run()
+        self.assertIn("watchdog: %ds of silence" % (600 + autorun.STALL_GRACE), w.log())
         self.assertEqual([1], order)
 
 
 class TestAKilledRunResumes(unittest.TestCase):
-    """A kill is a power cut: the next boot starts the agent again and the job still ends done, off, with no warmup row compared."""
+    """A kill is a power cut: the next boot starts the agent again and the job still ends done and off."""
 
     def test_a_run_killed_after_any_effect_finishes_on_the_next_boot(self):
         for n in range(400):
@@ -578,32 +448,25 @@ class TestAKilledRunResumes(unittest.TestCase):
             with self.subTest(killed_after=n):
                 self.assertEqual("done", w.state().get("phase"))
                 self.assertEqual(1, len(w.power()))
-                self.assertFalse([l for l in w.runs().splitlines() if l.startswith("0\t")])
         self.fail("the run made more than 400 effects")
 
     def test_a_resumed_run_counts_its_attempt(self):
         w = World()
-        w.fake._set_file(STATE, "phase=running\njob_stamp=S1\nattempts=1\n")
+        w.fake._set_file(STATE, "phase=running\ntask=T1\nattempts=1\n")
         w.run()
         self.assertEqual("2", w.state()["attempts"])
 
 
 class TestDryRun(unittest.TestCase):
-    def setUp(self):
-        os.environ["WK_DRY_RUN"] = "1"
-        self.addCleanup(os.environ.pop, "WK_DRY_RUN", None)
-
     def test_a_dry_run_changes_nothing_and_names_the_power_off(self):
         w = World()
         files, dirs = dict(w.fake.files), set(w.fake.dirs)
-        w.run()
+        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
+            w.run()
         self.assertEqual((files, dirs), (w.fake.files, w.fake.dirs))
         self.assertEqual([], w.calls("run_tty"))
         self.assertRegex(w.err.getvalue(), r"would run[^:\n]*: sudo -n /sbin/reboot\n")
-        self.assertIn("would run: env WK_STORE=/var/wk %s/wk bench staged" % TOOLS, w.err.getvalue())
 
-
-class TestTheOverrides(unittest.TestCase):
     def test_it_takes_no_arguments(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(2, autorun.main(["--now"]))

@@ -19,7 +19,8 @@ from tests.support import (REPO, WkTest, container_side, container_store, run_he
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.bench import board  # noqa: E402
-from wk.machine import Fake, isolated_module  # noqa: E402
+from wk.machine import isolated_module  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 BUILD_ID = "3dca0e504a7438009c3eadf6113833fcc6297428"
 

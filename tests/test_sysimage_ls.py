@@ -14,7 +14,8 @@ from tests.support import NO_REGISTRY, REPO, WkTest, requires_machine, scratch_d
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, images, record  # noqa: E402
-from wk.machine import Fake, Local, Result  # noqa: E402
+from wk.machine import Local, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 from wk.sysimage import cli, ls, macvolume  # noqa: E402
 

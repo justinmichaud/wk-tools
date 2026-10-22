@@ -18,8 +18,9 @@ from tests.support import REPO, WkTest, as_dispatched, bash, func_body, load_cmd
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, decl, fleet, quiet  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
-from wk.machine import TIMED_OUT, Fake, Result  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
+from wk.machine import TIMED_OUT, Result  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 ROOT = str(REPO)
 STATE = "/state/wk/quiesce"

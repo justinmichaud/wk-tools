@@ -8,7 +8,7 @@ from tests.support import REPO
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sched  # noqa: E402
 from wk.act import RETRY_EXIT, Refused  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 
 class FakeRuns:
@@ -189,23 +189,24 @@ class TestAWkCommandStep(unittest.TestCase):
     def test_the_command_runs_through_the_machine_appending_to_its_log(self):
         f = Fake("here")
         f.answer(["sh", "-c", sched.LOGGED], rc=3)
-        s = sched.wk_step(f, "/t/wk", lambda st: "/logs/" + st.id, "a", "m", (), ("device:b",), None, ["bench", "deploy", "l", "b"])
+        s = sched.Wk(f, "/t", lambda st: "/logs/" + st.id).step("a", "m", (), ("device:b",), None, ["bench", "deploy", "l", "b"])
         self.assertEqual((s.command, s.holds, s.run()), ("wk bench deploy l b", ("device:b",), 3))
         self.assertEqual(f.effects, [("run", ("sh", "-c", sched.LOGGED, "sh", "/logs/a", "/t/wk", "bench", "deploy", "l", "b"))])
 
     def test_a_target_is_named_in_the_command_and_the_environment(self):
         f = Fake("here")
         f.answer(["sh", "-c", sched.LOGGED])
-        s = sched.wk_step(f, "/t/wk", lambda st: "/l", "a", "m", (), (), None, ["x"], "moose")
+        s = sched.Wk(f, "/t", lambda st: "/l").step("a", "m", (), (), None, ["x"], "moose")
         s.run()
         self.assertEqual(s.command, "WK_PLACE=moose wk x")
         self.assertEqual(f.effects[0][1][5:8], ("env", "WK_PLACE=moose", "/t/wk"))
 
     def test_the_verdict_is_the_last_line(self):
         f = Fake("here")
-        f.answer(["wk", "yes"], out="the machine is stopped\nyes\n")
-        f.answer(["wk", "no"], out="yes\nno\n")
-        self.assertEqual((sched.wk_yes(f, ["wk", "yes"])(), sched.wk_yes(f, ["wk", "no"])()), (True, False))
+        f.answer(["/t/wk", "sysimage", "holds", "yes"], out="the machine is stopped\nyes\n")
+        f.answer(["/t/wk", "sysimage", "holds", "no"], out="yes\nno\n")
+        w = sched.Wk(f, "/t", lambda st: "/l")
+        self.assertEqual((w.holds("yes", "ws")(), w.holds("no", "ws")()), (True, False))
 
 
 if __name__ == "__main__":

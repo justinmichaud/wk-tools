@@ -1,8 +1,11 @@
 """What a fresh workspace's checkout is: on a branch, tracking it, and as current as the machine's mirror."""
+import contextlib
+import io
 import os
 import subprocess
 import sys
 import time
+import types
 import unittest
 from pathlib import Path
 
@@ -479,28 +482,26 @@ class TestNewCheckoutScript(WorkspaceFixture):
     """`wk new`'s fast-forward and its report, run against the workspace checkout copied off the snapshot."""
 
     def _run(self):
-        out = subprocess.run(["sh", "-c", workspace.checkout_script(str(self.ws))], cwd=str(self.tmp),
-                             capture_output=True, text=True)
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        return dict(line.split("=", 1) for line in out.stdout.split())
+        """workspace.report_checkout over this host's own checkout: what it said, and the probe after it."""
+        driver = types.SimpleNamespace(src=lambda ws: str(self.ws), exec=lambda ws, argv: Local().run(argv))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            workspace.report_checkout(driver, "ws")
+        return err.getvalue(), git.probe(Local().run, str(self.ws))
 
     def test_a_snapshot_behind_the_mirror_is_fast_forwarded_onto_it(self):
         sha2 = self.advance_upstream()
         self.run_fetch()
-        got = self._run()
-        self.assertEqual(got["branch"], "main")
-        self.assertEqual(got["upstream"], "origin/main")
-        self.assertEqual(got["behind"], "1")
-        self.assertEqual(got["moved"], "1")
+        said, got = self._run()
+        self.assertIn("'ws' is on main at %s, 1 commit(s) on from its snapshot (origin/main)" % got["head"], said)
+        self.assertEqual((got["branch"], got["tracks"], got["behind"]), ("main", "origin/main", "0"))
         self.assertEqual(self.head(self.ws), sha2)
         self.assertEqual(
             git_run("status", "--porcelain", cwd=self.ws).stdout, "",
             "the fast-forward left the tree dirty")
 
     def test_a_current_checkout_moves_nothing_and_says_so(self):
-        got = self._run()
-        self.assertEqual(got["behind"], "0")
-        self.assertNotIn("moved", got)
+        said, got = self._run()
+        self.assertIn("up to date with origin/main", said)
         self.assertEqual(self.head(self.ws), self.sha1)
 
     def test_the_index_is_refreshed_before_the_person_runs_git_status(self):
@@ -510,22 +511,22 @@ class TestNewCheckoutScript(WorkspaceFixture):
 
     def test_a_detached_checkout_reports_the_sha_and_nothing_else(self):
         git_run("checkout", "-q", "--detach", "HEAD", cwd=self.ws)
-        got = self._run()
-        self.assertIn("detached", got)
-        self.assertNotIn("branch", got)
+        said, got = self._run()
+        self.assertIn("is not on a branch (detached at %s)" % got["head"], said)
+        self.assertEqual(got["branch"], "")
 
     def test_a_branch_with_no_upstream_stops_there(self):
         git_run("checkout", "-q", "-b", "eng/local", cwd=self.ws)
-        got = self._run()
-        self.assertEqual(got["branch"], "eng/local")
-        self.assertNotIn("upstream", got)
+        said, got = self._run()
+        self.assertIn("'ws' is on 'eng/local', which tracks nothing", said)
+        self.assertEqual((got["tracks"], got["upstream"]), ("", "origin/main"))
 
     def test_a_diverged_branch_is_left_where_it_is(self):
         self.advance_upstream()
         self.run_fetch()
         mine = git_commit(self.ws, "mine")
-        got = self._run()
-        self.assertEqual(got["moved"], "refused")
+        said, _ = self._run()
+        self.assertIn("have diverged, so the checkout is left where", said)
         self.assertEqual(self.head(self.ws), mine)
 
 

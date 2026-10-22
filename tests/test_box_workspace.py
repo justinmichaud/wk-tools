@@ -13,7 +13,7 @@ from tests.test_wk_places import LINUX_PROBE, RemoteTest
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, pr, record, repos, workspace  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.clock import FakeClock  # noqa: E402
+from tests.fakes import FakeClock  # noqa: E402
 
 
 class BoxTest(RemoteTest):
@@ -45,7 +45,7 @@ class TestTheBoxReadsItsWorkspace(BoxTest):
     def test_creating_on_the_box_needs_no_snapshot(self):
         me = self.on_the_box()
         records = record.Records(root=str(self.tmp / "records"), clock=FakeClock(), machine=self.fake)
-        with mock.patch.object(me, "create") as create, mock.patch.object(me, "ready", lambda ws, clock: True), \
+        with mock.patch.object(me, "create") as create, mock.patch.object(me, "wait_ready", lambda ws, clock, own: None), \
                 mock.patch.object(me, "install_agents"), mock.patch.object(workspace, "freshen"):
             workspace._create(me, records, None, FakeClock(), "fresh", None, "native", repos.default(), "absent")
         create.assert_called_once()
@@ -72,11 +72,11 @@ class TestTheWorkstationHandsTheLifecycleOver(BoxTest):
         self.assertEqual(self.t.records().list(), [])
 
     def test_a_detached_new_on_a_box_opens_no_zed_and_carries_its_timeouts(self):
-        os.environ.update(WK_NEW_TIMEOUT="7", WK_READY_TIMEOUT="9", WK_MB_PER_JOB="4096", WK_MAX_JOBS="3")
+        os.environ.update(WK_NEW_TIMEOUT="7", WK_READY_WAIT="9", WK_MB_PER_JOB="4096", WK_MAX_JOBS="3")
         rc, err = self.front(no_wait=True, zed=True)
         self.assertEqual(rc, 0, err)
         handed = [shlex.split(shlex.split(e[1][-1])[-1]) for e in self.fake.effects if e[0] == "run_tty"]
-        self.assertLessEqual({"WK_NEW_TIMEOUT=7", "WK_READY_TIMEOUT=9", "WK_MB_PER_JOB=4096", "WK_MAX_JOBS=3"}, set(handed[0]))
+        self.assertLessEqual({"WK_NEW_TIMEOUT=7", "WK_READY_WAIT=9", "WK_MB_PER_JOB=4096", "WK_MAX_JOBS=3"}, set(handed[0]))
         self.assertEqual([e for e in self.fake.effects if "cmd/zed" in str(e)], [])
 
     def test_a_box_at_another_wk_tools_commit_is_refused_the_new(self):

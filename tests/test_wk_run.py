@@ -13,7 +13,7 @@ from tests.support import REPO, load_cmd
 sys.path.insert(0, str(REPO / "lib"))
 from wk import presets  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Fake  # noqa: E402
+from tests.fakes import Fake  # noqa: E402
 
 os.environ.setdefault("WK_ROOT", str(REPO))
 RUN = load_cmd("run")
@@ -35,7 +35,7 @@ def a_driver(os_name="linux", kind="container"):
 def run_on(driver, argv, preset="gtk-release"):
     """The (args, kwargs) `wk run <argv>` handed `exec_argv`."""
     reg = mock.Mock()
-    reg.load.return_value = driver
+    reg.present.return_value = driver
     with mock.patch.object(RUN.places, "Registry", return_value=reg), \
             mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": preset}):
         RUN.main(argv)
@@ -74,7 +74,7 @@ class TestLldbGetsAPty(unittest.TestCase):
         driver = a_driver()
         driver.exec_argv.return_value = (["ssh", "box", "bash -lc 'jsc x.js'"], None)
         reg = mock.Mock()
-        reg.load.return_value = driver
+        reg.present.return_value = driver
         reg.machine = Fake()
         err = io.StringIO()
         with mock.patch.object(RUN.places, "Registry", return_value=reg), \
