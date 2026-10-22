@@ -208,7 +208,7 @@ def main(args, cmd, reg=None):
         if e:
             jsc_env.append(e)
 
-    needs, jsc_flags, tee, wrap, pre, post, artifact = "", "", "", "", "", "", ""
+    needs, jsc_flags, tee, wrap, post, artifact = "", "", "", "", "", ""
 
     if mode == "sampling":
         if attach:
@@ -231,17 +231,12 @@ def main(args, cmd, reg=None):
         if attach:
             die("the bytecode profiler is a JSC option and has to be on when the\n"
                 "    process starts -- there is nothing to attach to.")
-        jsc_env.append("JSC_useProfiler=true")
-        jsc_env.append("JSC_dumpProfilerDataAtExit=true")
-        # JSC writes JSCProfile-<pid>-<n>.json into the working directory, so the file is moved out afterwards -- identified by being newer than a stamp, not newest in the tree.
+        # jsc's own -p: the profiler on, and its json saved at exit where named (measured 2026-10-22: without it jsc writes a temp file and says it could not save)
         artifact = os.path.join(outdir, "JSCProfile.json")
-        pre = "touch %s" % shlex.quote(os.path.join(outdir, ".stamp"))
-        post = ('p=$(find %s -maxdepth 1 -name \'JSCProfile-*.json\' -newer %s 2>/dev/null | head -1)\n'
-               '[ -n "$p" ] || { echo \'no JSCProfile-*.json was written -- did the run reach exit?\'; exit 1; }\n'
-               'mv "$p" %s\n'
+        jsc_flags = "-p %s" % shlex.quote(artifact)
+        post = ('[ -s %s ] || { echo \'no JSCProfile.json was written -- did the run reach exit?\'; exit 1; }\n'
                'printf \'summary\\nquit\\n\' | %s/Tools/Scripts/display-profiler-output %s'
-               % (shlex.quote(src), shlex.quote(os.path.join(outdir, ".stamp")), shlex.quote(artifact),
-                  shlex.quote(src), shlex.quote(artifact)))
+               % (shlex.quote(artifact), shlex.quote(src), shlex.quote(artifact)))
     elif mode == "samply":
         needs = "samply"
         artifact = os.path.join(outdir, "profile.json")
@@ -318,8 +313,6 @@ def main(args, cmd, reg=None):
         target_cmd = "set -o pipefail; %s 2>&1 | tee %s" % (target_cmd, shlex.quote(tee))
 
     script = prelude(var, run_dir) + "\nmkdir -p %s\n" % shlex.quote(outdir)
-    if pre:
-        script += pre + "\n"
     if jsc_env:
         script += "export " + " ".join(jsc_env) + "\n"
     if wrap:
