@@ -257,9 +257,12 @@ class Wall:
 
     def push_refused(self):
         tools = self.driver.tools(self.ws)
-        agent = self.inside('test -S /run/wk/ssh-agent.sock && echo agent; printf %s "${SSH_AUTH_SOCK:+env}"')
-        rows = [miss("an ssh-agent reaches this workspace (%s)" % agent.replace("\n", " "), "no key may: nothing but the push service holds one")
-                if agent else ok("no ssh-agent socket and no $SSH_AUTH_SOCK: no key reaches this workspace")]
+        # macOS gives every login session its own keyless ssh-agent (measured in a guest: launchd loads it again after a disable), so what is judged is the identities
+        agent = self.inside('test -S /run/wk/ssh-agent.sock && echo agent; [ -n "${SSH_AUTH_SOCK:-}" ] && { ssh-add -l >/dev/null 2>&1 && echo env-keys || echo env; }').split()
+        rows = [miss("an ssh-agent reaches this workspace (%s)" % " ".join(agent), "no key may: nothing but the push service holds one")
+                if "agent" in agent or "env-keys" in agent else
+                ok("$SSH_AUTH_SOCK names the machine's own ssh-agent, which holds no identity: no key reaches this workspace") if agent else
+                ok("no ssh-agent socket and no $SSH_AUTH_SOCK: no key reaches this workspace")]
         client = "%s/container/push/wk-push-client.py" % tools
         if self.inside("git config --global --get core.sshCommand") != client:
             return rows + [miss("git's ssh transport in '%s' is not the push client (core.sshCommand)" % self.ws,
