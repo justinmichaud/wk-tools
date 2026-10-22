@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # wk-build-wall: _is_wall greps this prefix within the first 5 lines; without it two wk-tools trees on PATH exec each other until the process table gives out (measured).
 # Covers a bare name resolved on PATH in every shell that sources shell/path.sh; a path form is covered instead by the `Bash(*/<name> *)` deny rules in claude/settings.json and claude/settings-host.json.
-# One script under two kinds of name, because finding the real tool past itself on PATH is the same job for both: WALL_NAMES is refused for an agent; GATE_NAMES is never refused -- it runs the tool and explains a failure the sandbox caused.
+# One script under three kinds of name, because finding the real tool past itself on PATH is the same job for all: WALL_NAMES is refused for an agent; GATE_NAMES is never refused -- it runs the tool and explains a failure the sandbox caused; BRIDGE_NAMES runs the command under a bridge of root's own.
 
 set -euo pipefail
 
 WALL_NAMES="ninja cmake make xcodebuild build-webkit build-jsc run-javascriptcore-tests run-webkit-tests run-benchmark"
 
 GATE_NAMES="git"   # on a workspace's PATH only (shell/path.sh), where the wall is what a failure means
+BRIDGE_NAMES="sudo"   # on a workspace's PATH only: the exec's bridge refuses root's sockets, which it cannot read (container/proxy/bridge.py)
+BRIDGE=/opt/wk-tools/container/proxy/ensure-bridge.sh
 
 GIT_WRITE_VERBS="add am apply branch checkout cherry-pick commit fetch gc merge mv notes prune pull push rebase reset restore revert rm stash switch tag"   # what the commit wall (COMMIT_WALL_PATHS, lib/wk/wall.py) can make fail; read only after the command has failed, so a verb whose read-only form works -- `git tag`, `git stash list` -- costs nothing to name
 
 self=${0##*/}
+orig=("$@")
 
 # Follows the file bash is running, not $0, which the gate replaces with the tool's name (container/bin/ws/git); bitbake's tmp/hosttools copies have no sibling wall to find, and `readlink -f` is what macOS lacks.
 _resolve_self() {
@@ -34,14 +37,14 @@ WALL=$(_resolve_self) || :
     exit 1
 }
 
-case " $WALL_NAMES $GATE_NAMES " in
+case " $WALL_NAMES $GATE_NAMES $BRIDGE_NAMES " in
     *" $self "*) ;;
     *) printf '%s: nothing calls this by its own name -- it runs as one of: %s\n' \
-           "$self" "$WALL_NAMES $GATE_NAMES" >&2
+           "$self" "$WALL_NAMES $GATE_NAMES $BRIDGE_NAMES" >&2
        exit 1 ;;
 esac
 
-if [ "$self" != git ] && [ -z "${WK_BUILD:-}" ] \
+if [[ " $WALL_NAMES " == *" $self "* ]] && [ -z "${WK_BUILD:-}" ] \
    && { [ -n "${CLAUDECODE:-}" ] || [ -n "${WK_AGENT:-}" ]; }; then
     printf '%s: refused. An agent does not drive a build or a test run directly:\n' "$self" >&2
     printf '  wk carries the job count and the nice level this machine needs, and a raw\n' >&2
@@ -119,6 +122,54 @@ if [ "$self" = git ]; then
             fi
             exit "$rc" ;;
     esac
+fi
+
+# sudo's grammar (parse_args.c): a value option's argument is attached or the next word, a flag cluster may end in a value option, and `VAR=value` words precede the command. A form that runs no command (-l -v -K -V -e -h alone, a missing value, an option sudo would refuse) goes to sudo as it was.
+if [ "$self" = sudo ]; then
+    opts=() shell="" dashdash=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --) dashdash=--; shift; break ;;
+            --shell) shell=-s; shift ;;
+            --login) shell=-i; shift ;;
+            --askpass|--background|--bell|--preserve-env|--preserve-env=*|--set-home|--reset-timestamp|--non-interactive|--preserve-groups|--stdin) opts+=("$1"); shift ;;
+            --auth-type=*|--login-class=*|--close-from=*|--chdir=*|--group=*|--host=*|--prompt=*|--role=*|--chroot=*|--type=*|--command-timeout=*|--user=*|--other-user=*) opts+=("$1"); shift ;;
+            --auth-type|--login-class|--close-from|--chdir|--group|--host|--prompt|--role|--chroot|--type|--command-timeout|--user|--other-user)
+                [ $# -ge 2 ] || exec "$real" ${orig[@]+"${orig[@]}"}
+                opts+=("$1" "$2"); shift 2 ;;
+            --*) exec "$real" ${orig[@]+"${orig[@]}"} ;;
+            -[!-]*)
+                cluster=${1#-} keep="-"; shift
+                while [ -n "$cluster" ]; do
+                    c=${cluster:0:1} cluster=${cluster:1}
+                    case "$c" in
+                        s|i) shell=-$c ;;
+                        A|b|B|E|H|k|n|P|S) keep+=$c ;;
+                        a|c|C|D|g|h|p|r|R|t|T|u|U)
+                            if [ -n "$cluster" ]; then
+                                opts+=("$keep$c$cluster"); cluster=""
+                            elif [ $# -ge 1 ]; then
+                                opts+=("$keep$c" "$1"); shift
+                            else
+                                exec "$real" ${orig[@]+"${orig[@]}"}
+                            fi
+                            keep="" ;;
+                        *) exec "$real" ${orig[@]+"${orig[@]}"} ;;
+                    esac
+                done
+                [ "$keep" = - ] || [ -z "$keep" ] || opts+=("$keep") ;;
+            [A-Za-z_]*=*) [[ "${1%%=*}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || break; opts+=("$1"); shift ;;
+            *) break ;;
+        esac
+    done
+    if [ $# -gt 0 ]; then
+        exec "$real" ${opts[@]+"${opts[@]}"} ${shell:+"$shell"} ${dashdash:+--} "$BRIDGE" "$@"
+    fi
+    case "$shell" in
+        -s) exec "$real" ${opts[@]+"${opts[@]}"} ${dashdash:+--} "$BRIDGE" "${SHELL:-/bin/bash}" ;;
+        -i) exec "$real" ${opts[@]+"${opts[@]}"} ${dashdash:+--} "$BRIDGE" bash -l ;;
+    esac
+    exec "$real" ${orig[@]+"${orig[@]}"}
 fi
 
 exec "$real" "$@"

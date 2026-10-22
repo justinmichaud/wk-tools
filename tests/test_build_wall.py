@@ -157,6 +157,59 @@ class TestOneFileUnderEveryName(WallTest):
         self.assertIn("wk-build-wall", cp.stderr)
 
 
+BRIDGE = "/opt/wk-tools/container/proxy/ensure-bridge.sh"
+
+
+class TestSudoGivesRootABridge(WallTest):
+    """`sudo` in a workspace (container/bin/ws/sudo) is the wall, which puts ensure-bridge.sh between sudo's options
+    and the command; a form that runs no command reaches sudo as it was."""
+
+    def setUp(self):
+        super().setUp()
+        self.stub = self.fake / "sudo"
+        self.stub.write_text("#!/bin/sh\nfor a; do printf '%s\\n' \"$a\"; done\n")
+        self.stub.chmod(0o755)
+
+    def sudo(self, *args, env=None):
+        e = {"HOME": str(self.tmp), "PATH": f"{BIN}/ws:{BIN}:{self.fake}:/usr/bin:/bin", "TERM": "dumb"}
+        e.update(env or {})
+        cp = subprocess.run(["sudo", *args], cwd=str(self.tmp), env=e, capture_output=True, text=True, timeout=60)
+        self.assertEqual(cp.returncode, 0, cp.stderr)
+        return cp.stdout.splitlines()
+
+    def test_the_command_runs_under_the_bridge_after_sudo_s_options(self):
+        for argv, want in ((["apt-get", "install", "x"], [BRIDGE, "apt-get", "install", "x"]),
+                           (["-n", "-u", "root", "apt-get", "update"], ["-n", "-u", "root", BRIDGE, "apt-get", "update"]),
+                           (["-nu", "root", "cmd"], ["-nu", "root", BRIDGE, "cmd"]),
+                           (["-uroot", "-C3", "cmd"], ["-uroot", "-C3", BRIDGE, "cmd"]),
+                           (["-h", "box", "cmd"], ["-h", "box", BRIDGE, "cmd"]),
+                           (["--user=root", "cmd"], ["--user=root", BRIDGE, "cmd"]),
+                           (["--user", "root", "--", "cmd", "a", "b"], ["--user", "root", "--", BRIDGE, "cmd", "a", "b"]),
+                           (["VAR=1", "cmd"], ["VAR=1", BRIDGE, "cmd"]),
+                           (["-E", "-H", "cmd"], ["-E", "-H", BRIDGE, "cmd"]),
+                           (["-k", "cmd"], ["-k", BRIDGE, "cmd"]),
+                           (["-s", "cmd"], ["-s", BRIDGE, "cmd"])):
+            with self.subTest(argv=argv):
+                self.assertEqual(want, self.sudo(*argv))
+
+    def test_a_form_that_runs_no_command_passes_through_unchanged(self):
+        for argv in ([], ["-l"], ["-v"], ["-k"], ["-K"], ["-V"], ["-h"], ["--help"], ["-e", "f"], ["--"], ["-u"], ["--bogus", "cmd"]):
+            with self.subTest(argv=argv):
+                self.assertEqual(argv, self.sudo(*argv))
+
+    def test_a_bare_shell_is_the_shell_under_the_bridge_with_the_flag_dropped(self):
+        self.assertEqual([BRIDGE, "/bin/zsh"], self.sudo("-s", env={"SHELL": "/bin/zsh"}))
+        self.assertEqual(["-nu", "root", BRIDGE, "/bin/bash"], self.sudo("-nsu", "root", env={"SHELL": "/bin/bash"}))
+        self.assertEqual([BRIDGE, "bash", "-l"], self.sudo("-i"))
+        self.assertEqual(["-u", "root", BRIDGE, "bash", "-l"], self.sudo("-u", "root", "--login"))
+
+    def test_the_exit_status_is_sudo_s(self):
+        self.stub.write_text("#!/bin/sh\nexit 7\n")
+        cp = subprocess.run(["sudo", "cmd"], cwd=str(self.tmp), capture_output=True, text=True, timeout=60,
+                            env={"HOME": str(self.tmp), "PATH": f"{BIN}/ws:{BIN}:{self.fake}:/usr/bin:/bin"})
+        self.assertEqual(7, cp.returncode)
+
+
 class TestTwoWallsDoNotExecEachOther(WallTest):
     def _second_tree(self):
         other = self.tmp / "other-tools" / "container" / "bin"
