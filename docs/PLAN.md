@@ -1241,7 +1241,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A second spelling of a bench system (`system image`) or a warmup profile (`warmup capture`) fails lint; `round` and `slot` have no second spelling in the tree, and `device` is the CLI's word (`--devices`) for a bench machine | 5 | `lint.vocabulary` (landed 2026-10-21) |
 | A failed leg on a board leaves evidence readable afterwards: a persistent journal, browser and tunnel logs on every leg, a board-at-failure capture, and warmup evidence on a leg that timed out | 5 | `unit bench.failed_leg_keeps_evidence`, `live bench.evidence[<board>]` |
 | The live tier runs against the container place on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
-| The fleet view is one: the exit code is the worst state found anywhere, a name alive on two machines is a conflict `--on` disambiguates, two workstations reaching one box see one state and a disagreement names both views | 2 | `unit status.fleet_is_one` |
+| The fleet view is one: the exit code is the worst state found anywhere (a disagreement included), two workstations reaching one box see one state and a disagreement names both views | 2 | `unit status.fleet_is_one` |
+| A name alive on two machines is a conflict bare `wk status` marks and `--on` disambiguates; today `wk status <name>` refuses naming WK_PLACE, no command but `new`, `key` and `sync` takes `--on`, and the bare view shows the name under each machine unmarked | 2 | `unit status.duplicate_name` |
 | `wk status <ws> --log -f` follows a live build on any place | 2 | `live logs.follow[<place>]` |
 | Bare `wk stop` then `wk start` returns every workspace to running; `--keep-vm` leaves the podman machine up | 2 | `live start.roundtrip` (one workspace's stop and start is `tests.test_lifecycle.TestContainerLifecycle`) |
 | `wk doctor` on a freshly set-up machine reports ok, and each printed fix clears its line when run | 2 | `live doctor.fix_clears_line` |
@@ -1354,6 +1355,10 @@ decides is a row; one still open is listed under "Decisions for the user".
 
 Decisions are asked as questions, and their answers are recorded under "Decisions taken".
 
+- A workspace name alive on two machines (`unit status.duplicate_name`): is `--on` an option every
+  workspace-naming command takes from the dispatcher, and does bare `wk status` mark the duplicate and exit nonzero?
+- The store's `cache/agents`, `cache/ccache` and `skills` are mounted read-write into every container, so one
+  workspace can change the Claude CLI, the ccache objects and the skills every other workspace on the machine uses.
 - Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
   wk never blesses; the way back is the person's power-button pick. The default is not yet set (`wk boot mbp
   --status`, 2026-10-22 08:10 MST: `firmware_default=the host install`); the Mac rows run once it is. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`,

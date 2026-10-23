@@ -494,8 +494,7 @@ def wk_status(drivers, *argv, host="here"):
 
 
 class TestTheFleetViewIsOne(unittest.TestCase):
-    """`unit status.fleet_is_one`, less the clause a decision is owed for.
-    TODO: a name alive on two machines is a conflict `--on` disambiguates."""
+    """`unit status.fleet_is_one`, less the clause a decision is owed for."""
 
     def test_the_exit_is_the_worst_state_found_anywhere_in_every_mode(self):
         fleet = [answering("alpha", 1, ws_rec("alpha", "x", state="failed")), answering("beta", 3, ws_rec("beta", "y"))]
