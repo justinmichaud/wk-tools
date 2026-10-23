@@ -138,6 +138,13 @@ Answered 2026-10-05 (sixth batch): each repo has its own push identity (wk-tools
 
 Answered 2026-10-22: the Mac's bench default is set by hand in a later session (`wk boot mbp --status` read `firmware_default=the host install` at 08:10 MST, so `live boot.arm[mbp]`, `bench[mbp]` and `doctor.bench_readiness[mbp]` wait for it); a plain `sudo <command>` in a container workspace runs under a root bridge of its own through a `sudo` shim in `container/bin/ws`, an entry of the build wall (measured: a sudoers `env_keep` keeps the variables but the person's bridge cannot name a root client and refuses it 403, and the SDK's own `/etc/sudoers.d/sudoers` was not mode 0440, so a post-install `visudo -c` failed; the fork's `.wkdev-init` gives it the mode at `SDK_PIN` b267ff8, proven by `visudo -c` in a fresh workspace); the guest's three launchd jobs (nosleep, mirror, display) are `daemons.py` rows and the golden base is rebuilt in the session that lands them; `./setup --stage sdk` on Linux is owed to a session on moose (the podman VM's checkout is at `SDK_PIN`, the head of the fork's `wk` branch, measured); every bench, sysimage, secrets, places, workspace, status and guest behaviour stays except the snapshot's bookkeeping (the SNAP column, `snap_behind` and the `wk ls` footer; the overlay, the hard-linked snapshot refresh and `Snapshots.verify`, which defines the current snapshot for `wk new` and the refresh, stay), the ntfy publish and the build-box dependency findings, which go; a command the broker runs never runs `./setup` (the setup restarts the broker serving it, measured); the `cmd` row counts tables and `main` only (a command's docstring is its help, held by the help-text rule) and the bodies of `test`, `ai`, `run`, `pr`, `gui` and `stop` move into their lib modules; the budget table carries two numbers per row, the budget (10k and 15k stand) and the interim lint holds now -- the measured size after the day's cuts, lowered as each dedup pass lands and never raised; the tests are redesigned as regression tests (step 7.13), end to end through the dispatcher against the fake world, designed in this file first and rewritten module by module afterwards.
 
+Answered 2026-10-22 (second batch): the hung podman VM is restarted (`wk stop`, `wk start`); the store's
+`cache/agents`, `cache/ccache` and `skills` are read-only in every container, written only from the host side, each
+workspace building into a ccache of its own; a workspace name alive anywhere in the fleet is refused by `wk new`, so a
+duplicate cannot arise and `wk status <name>`'s refusal naming WK_PLACE stays for one made by hand; an unattended A/B
+past its wall-clock budget (`--budget`, 8 hours by default) starts no new round, finishes the one running, and the
+report says it stopped on budget.
+
 ## Cutting it down
 
 Measured 2026-10-21 (non-blank lines): 36k of Python core, 52k of tests, after
@@ -1242,7 +1249,9 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A failed leg on a board leaves evidence readable afterwards: a persistent journal, browser and tunnel logs on every leg, a board-at-failure capture, and warmup evidence on a leg that timed out | 5 | `unit bench.failed_leg_keeps_evidence`, `live bench.evidence[<board>]` |
 | The live tier runs against the container place on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
 | The fleet view is one: the exit code is the worst state found anywhere (a disagreement included), two workstations reaching one box see one state and a disagreement names both views | 2 | `unit status.fleet_is_one` |
-| A name alive on two machines is a conflict bare `wk status` marks and `--on` disambiguates; today `wk status <name>` refuses naming WK_PLACE, no command but `new`, `key` and `sync` takes `--on`, and the bare view shows the name under each machine unmarked | 2 | `unit status.duplicate_name` |
+| `wk new <name>` refuses a name alive on any machine of the fleet, naming where it lives, so no name is alive on two | 2 | `unit status.duplicate_name` |
+| `cache/agents`, `cache/ccache` and `skills` are read-only in every container and written only from the host side; each workspace builds into a ccache of its own | 3 | `unit places.shared_mounts_readonly`, `live places.shared_mounts_readonly` |
+| An unattended A/B past its wall-clock budget (`--budget`, 8 hours by default) starts no new round, finishes the one running, and its report says it stopped on budget | 5 | `unit bench.wall_budget` |
 | `wk status <ws> --log -f` follows a live build on any place | 2 | `live logs.follow[<place>]` |
 | Bare `wk stop` then `wk start` returns every workspace to running; `--keep-vm` leaves the podman machine up | 2 | `live start.roundtrip` (one workspace's stop and start is `tests.test_lifecycle.TestContainerLifecycle`) |
 | `wk doctor` on a freshly set-up machine reports ok, and each printed fix clears its line when run | 2 | `live doctor.fix_clears_line` |
@@ -1338,7 +1347,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | SIP is read on both Mac installs (`csrutil status`), on for the host and off for the bench volume, and `wk doctor mbp` reports each (`unit doctor.sip_rows` landed 2026-10-22: each install is read while it runs, the other one reported unread) | 5 | `live doctor.bench_readiness[mbp]` |
 | `wk boot mbp` refuses to arm while the bench volume's SIP is on. The arm runs on the host install and `csrutil status` reads only the running one, so how the host reads the bench volume's SIP is owed to a measurement on the Mac | 5 | `live boot.sip_refusal[mbp]` |
 | A run records the variance knobs it ran under (env size, path length, shared cache; the Mac's ASLR slide as a reading beside them) and the report pairs A's runs with B's by configuration, on the Mac and on Linux alike | 5 | `unit bench.variance_pairing` |
-| An A/B's rounds cross the variance factors (layout, env size, path length, shared cache); a side whose spread grows in one configuration is named; one measured run per arm runs under samply with a JIT dump; an unattended run stops at its wall-clock budget; run wall time is compared beside score | 5 | `unit bench.variance_crossing`, `live bench.linux_variance` |
+| An A/B's rounds cross the variance factors (layout, env size, path length, shared cache); a side whose spread grows in one configuration is named; one measured run per arm runs under samply with a JIT dump; run wall time is compared beside score | 5 | `unit bench.variance_crossing`, `live bench.linux_variance` |
 | Both arms of an A/B carry an identifier the tooling reads back from the running binary, so a linking slip or an interrupted deploy cannot pass as a measurement | 5 | `live bench.binary_identifier` |
 | The clangd flags in `container/helix/languages.toml` are measured (indexing time, peak memory) against a real checkout | 3 | `live clangd.measure` |
 | pi runs on a macOS guest and a build box, its TUI runs in a container, and one `~/.pi/agent/models.json` per machine replaces the one `wk new` writes per workspace | 3 | `live pi.session`, `unit agents.models_per_machine` |
@@ -1356,20 +1365,15 @@ decides is a row; one still open is listed under "Decisions for the user".
 
 Decisions are asked as questions, and their answers are recorded under "Decisions taken".
 
-- A workspace name alive on two machines (`unit status.duplicate_name`): is `--on` an option every
-  workspace-naming command takes from the dispatcher, and does bare `wk status` mark the duplicate and exit nonzero?
-- The store's `cache/agents`, `cache/ccache` and `skills` are mounted read-write into every container, so one
-  workspace can change the Claude CLI, the ccache objects and the skills every other workspace on the machine uses.
 - Crossing the variance factors (`unit bench.variance_crossing`): the knobs are one setting per A/B today (`WK_BENCH_*`,
   both arms). Which levels does each factor take, what is "layout" (no knob exists, and ASLR cannot be turned off on
   the Mac), and does round i run configuration i mod n?
 - What a side's spread growing means: the report pools every subtest's values into one sd per arm and names only B
   (measured: identical noise, one of two subtests 30% faster, B's sd 42.8 against A's 26.7 is flagged). Is it each
   subtest's relative sd, or the suite row's run-to-run sd, and is a noisier A named too?
-- The wall-clock budget (8 hours?): its flag, and whether a run past it stops between rounds or ends the leg; and is
-  the JIT-dumped samply run the warmup round, labelled no measurement, or a measured leg (`JSC_useJITDump=1` has been
+- Is the JIT-dumped samply run the warmup round, labelled no measurement, or a measured leg (`JSC_useJITDump=1` has been
   seen to crash the WebKitGTK UI process, lib/wk/profile.py)?
 - Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
   wk never blesses; the way back is the person's power-button pick. The default is not yet set (`wk boot mbp
   --status`, 2026-10-22 08:10 MST: `firmware_default=the host install`); the Mac rows run once it is. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`,
-  `unit bench.variance_crossing`).
+  `unit bench.wall_budget`).
