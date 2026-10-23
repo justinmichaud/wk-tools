@@ -1341,6 +1341,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | Speedometer 3 under MiniBrowser runs without its `wakeLock` error: an upstream WebKit patch, landed last, after every other owed row | end | `live bench.speedometer3_wakelock[mbp]` |
 | The podman machine boots an image the tree pins, on a kernel past the timer-migration soft lockup measured 2026-10-22 (Fedora CoreOS 41.20250215.3.0, kernel 6.12.13: `soft lockup - CPU#8 stuck` in `tmigr_handle_remote_cpu` on an idle vCPU from 17:54, 106 times, no OOM, sshd silent until a hard stop) | 2 | `live setup.vm_image_pinned` |
 | `wk stop` and `wk start` act on a podman machine that is stopped or not answering: `./setup`'s machine stage ran before vmtools started the machine (exit 125), and `wk stop` waited on that stage's ssh into the hung VM (measured 2026-10-22) | 2 | `unit setup.machine_stage_order`, `unit stop.hung_vm` |
+| A CMake port links with lld in a container: measured 2026-10-22, the SDK image (Ubuntu 26.04.1) puts the Swift 6.3.2 toolchain's `/opt/swift/usr/bin/ld.lld` first, which fails to load `libxml2.so.2` (the image has `libxml2.so.16`), so WebKit's `-fuse-ld=lld` probe fails, `USE_LD_LLD` turns itself off and every link runs GNU BFD `ld`: two gtk-debug links held 8.5 GB each; the image's own LLD 22.1.2 (`/usr/bin/lld-22`) runs | 3 | `live build.links_with_lld` |
 | A `gtk-release` build in a container on the Mac's 20 GB podman VM finishes under the default sizing: WebCore's unified and derived sources at -O3 -g hold 14.3 GB anonymous at four jobs (measured 2026-10-21 from the cgroup's `memory.stat`; three runs killed at 3072 MB per job), so a CMake web port is sized at 4608 MB per job; the watchdog reads `anon`+`shmem`, since `memory.current` carried 2.2 GB of page cache and slab at that peak; and the OOM advice it prints changes the next run's job count from a macOS host | 3 | `live build.preset[gtk-release]` |
 | `wk run --profile --browser --process ui\|web\|network\|gpu` attaches samply to a live MiniBrowser in a workspace with a display, heaptrack and massif reach `--browser` on the CMake ports, and the fixed-wait attach holds on a slow page | 3 | `live run.browser_profile` |
 | `wk run --lldb` in a fresh workspace symbolicates glibc, Mesa and GTK frames, and `gtk-debug` runs under lldb | 3 | `live run.debug_symbols` |
@@ -1377,6 +1378,9 @@ Decisions are asked as questions, and their answers are recorded under "Decision
 - The podman machine's image is not pinned in the tree; the fix for the measured kernel lockup is a pinned, newer
   image and a machine re-created from it, which removes every container and image inside the VM (workspaces are
   re-made from their store dirs). When, and which Fedora CoreOS stream?
+- The SDK image's lld (`live build.links_with_lld`): the fix is in the image's input, the `wk` branch of the
+  webkit-container-sdk fork. Make the toolchain's `ld.lld` the image's LLD 22, install a `libxml2.so.2`, or move
+  to a Swift toolchain built for Ubuntu 26.04?
 - Is the JIT-dumped samply run the warmup round, labelled no measurement, or a measured leg (`JSC_useJITDump=1` has been
   seen to crash the WebKitGTK UI process, lib/wk/profile.py)?
 - Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
