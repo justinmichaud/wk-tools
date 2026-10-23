@@ -147,8 +147,7 @@ class TestTheRecordARunWrites(BuildTest):
 class TestInterrupted(BuildTest):
     def test_a_hangup_stops_the_build_and_the_record_reads_cancelled(self):
         self.w.hang, self.w.interrupt = True, signal.SIGHUP
-        err = self.refused(status=129)
-        self.assertIn("interrupted -- stopping the build in 'ws'", err)
+        self.assertIn("interrupted -- stopping the build in 'ws'", self.refused(status=129))
         self.assertEqual(self.w.recs().list()[0].field("exit"), "cancelled")
         self.assertIn(("kill", 4242, int(signal.SIGTERM)), self.w.effects)
 
@@ -203,8 +202,7 @@ class TestRefusals(BuildTest):
         w = World(self.tmp, kind="vm")
         w.place_os = "macos"
         with unittest.mock.patch.object(JobDriver, "info", lambda self, ws: "stopped"):
-            err = self.refused(w, "mac-release")
-        self.assertIn("'ws' is not running (wk start ws)", err)
+            self.assertIn("'ws' is not running (wk start ws)", self.refused(w, "mac-release"))
         self.assertEqual(w.state(), [])
         self.assertFalse(os.path.exists(w.log))
 

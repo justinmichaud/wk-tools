@@ -341,8 +341,7 @@ class WorkspaceTest(fakes.FlowTest):
 class TestNewFrontRefusals(WorkspaceTest):
     def test_an_invalid_name_is_refused_before_anything_else(self):
         for bad in ("-x", "", "a b", "a/b"):
-            err = self.refused(lambda: self.front(name=bad))
-            self.assertIn("invalid name '%s': use [a-zA-Z0-9._-], not starting with '-'" % bad, err)
+            self.assertIn("invalid name '%s': use [a-zA-Z0-9._-], not starting with '-'" % bad, self.refused(lambda: self.front(name=bad)))
         self.assertEqual(self.w.effects, [])
 
     def test_pr_needs_a_spec_and_a_valid_one(self):
@@ -361,22 +360,19 @@ class TestNewFrontRefusals(WorkspaceTest):
 
     def test_a_non_native_arch_is_container_only(self):
         w = self.make_world(kinds={"fakebox": "vm"})
-        err = self.refused(lambda: self.front(w, arch="armhf"))
-        self.assertIn("--arch armhf is a container-only capability (this is place 'fakebox')", err)
+        self.assertIn("--arch armhf is a container-only capability (this is place 'fakebox')", self.refused(lambda: self.front(w, arch="armhf")))
         w = self.make_world()
         rc, _ = self.stderr(lambda: self.front(w, arch="armhf", no_wait=True))
         self.assertEqual(rc, 0)
 
     def test_a_local_target_refuses_on_the_terminal_naming_the_host_command(self):
         w = self.make_world(kinds={"fakebox": "local"})
-        err = self.refused(lambda: self.front(w))
-        self.assertIn("a workspace cannot create a workspace -- run 'wk new ws' on the host", err)
+        self.assertIn("a workspace cannot create a workspace -- run 'wk new ws' on the host", self.refused(lambda: self.front(w)))
         self.assertEqual([e for e in w.effects if e[0] != "run"], [])
 
     def test_a_present_or_broken_workspace_is_refused_at_once(self):
         self.w.make()
-        err = self.refused(lambda: self.front())
-        self.assertIn("workspace 'ws' already exists (place 'fakebox').\n    'wk rm ws' first, or pick another name.", err)
+        self.assertIn("workspace 'ws' already exists (place 'fakebox').\n    'wk rm ws' first, or pick another name.", self.refused(lambda: self.front()))
         self.w.containers.clear()
         err = self.refused(lambda: self.front())
         self.assertIn("'ws' is a record without an environment: creation finished, and the\n    fakebox side of it is gone", err)
@@ -390,6 +386,15 @@ class TestNewFrontRefusals(WorkspaceTest):
             w.dirs.discard(w.driver.store.mirror_dir())
             self.assertIn("no WebKit mirror at %s:\n    wk sync    makes it" % w.driver.store.mirror_dir(), self.refused(lambda: self.front(w)))
             self.assertEqual(([], []), (self.runs(w), [e for e in w.effects if e[0] == "spawn"]), kind)
+
+    def test_a_name_alive_on_another_machine_is_refused_naming_it(self):
+        """`unit status.duplicate_name`: refused before any lock, record or detach; a machine that does not answer warns."""
+        w = self.make_world(kinds={"fakebox": "container", "box2": "remote"})
+        w.far.add("%s/ws/ws" % FAR_ROOT)
+        self.assertIn("'ws' already exists (place 'box2').\n    'wk rm ws' first, or pick another name. A name lives on one machine", self.refused(lambda: self.front(w)))
+        self.assertEqual([], [e for e in w.effects if e[0] in ("spawn", "write", "symlink")])
+        w.unreachable = "down"
+        self.assertIn("could not ask box2 over ssh: down", self.stderr(lambda: self.front(w, no_wait=True))[1])
 
     def test_a_creation_already_running_is_refused_with_its_pid_and_stage(self):
         self.w.make(marker=False, base=False)
@@ -632,8 +637,7 @@ class TestNewDriver(WorkspaceTest):
         def failing(argv, f):
             return Result(1, "claude=failed\n") if "claude.ai/install.sh" in argv[-1] else World._exec(f, argv, f)
         self.w._exec = failing
-        err = self.refused(lambda: self.detached())
-        self.assertIn("could not install the coding agents in 'ws' (claude=failed pi=?)", err)
+        self.assertIn("could not install the coding agents in 'ws' (claude=failed pi=?)", self.refused(lambda: self.detached()))
         (t,) = self.w.records.list()
         self.assertNotEqual("0", t.field("exit"))
         self.assertEqual("creating", workspace.creation_state(self.w.driver, self.w.records, "ws"))
@@ -765,8 +769,7 @@ class TestNewDriver(WorkspaceTest):
 
     def test_a_create_that_fails_ends_the_record_with_its_status(self):
         self.w.wkdev_create = lambda a, f: Result(125, "", "podman: boom\n")
-        err = self.refused(lambda: self.detached(), 125)
-        self.assertIn("wkdev-create failed for 'ws' (exit 125)", err)
+        self.assertIn("wkdev-create failed for 'ws' (exit 125)", self.refused(lambda: self.detached(), 125))
         self.assertEqual(self.w.records.list()[0].field("exit"), "125")
 
 

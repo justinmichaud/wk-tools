@@ -9,6 +9,7 @@ import sys
 
 from wk import act, git, job, project, record, repos, resources, sshalias
 from wk.act import Refused, die, info, log, warn
+from wk.lock import Lock
 from wk.machine import in_podman_machine
 from wk.store import Snapshots, no_such_workspace
 from wk.places import show
@@ -80,7 +81,6 @@ def new_front(reg, records, name, opts, prflow):
         return new_kill(driver, reg.machine, recs, reg.env, name, opts)
     new_refuse_existing(driver, recs, name, arch)
     if act.dry_run():
-        from wk.lock import Lock
         return new_detached_run(driver, recs, Lock(driver.store, reg.machine, recs.clock), recs.clock, name,
                                 opts.get("base") or "", arch, repo)
     pid, since = new_detach(driver, reg, name, arch, repo, opts.get("base") or ""), recs.clock.stamp()
@@ -125,10 +125,20 @@ def new_place(reg, name, opts):
             "    box makes its checkout only from a %s mirror." % (repo.name, tname, project.get("CHECKOUT")))
     if driver.kind == "local":
         die("a workspace cannot create a workspace -- run 'wk new %s' on the host" % name)
+    if driver.kind == "remote" and driver.peer and driver.is_local:
+        die("'%s' is this machine, and its workspaces are made at its own default\n"
+            "    place:  wk new %s" % (driver.name, name))
     mirror = driver.store.mirror_dir()
     if driver.reads_host_mirror and repo.snapshot and not reg.machine.isdir(mirror):
         die("no %s mirror at %s:\n    wk sync    makes it, then publishes a snapshot to build from." % (project.get("CHECKOUT"), mirror))
+    refuse_elsewhere(reg, name, driver.name, opts)
     return driver, repo
+
+
+def refuse_elsewhere(reg, name, place, opts):
+    require_name(name)
+    if not opts.get("kill") and (elsewhere := [p for p in reg.locate(name) if p != place]):
+        die(REFUSALS["present"].format(n=name, t=" ".join(elsewhere)) + " A name lives on one machine of the fleet.")
 
 
 def new_refuse_existing(driver, recs, name, arch):
@@ -182,9 +192,6 @@ def zed_after(here, root, name, opts):
 
 def new_handed_over(driver, here, root, name, arch, opts):
     """A machine that runs wk for itself makes its own workspaces and keeps their records: its `wk new`, at its own default place."""
-    if driver.is_local:
-        die("'%s' is this machine, and its workspaces are made at its own default\n"
-            "    place:  wk new %s" % (driver.name, name))
     if opts.get("base"):
         die("--base names a snapshot in this machine's store, and %s makes '%s' from its own:\n"
             "    drop --base" % (driver.name, name))
@@ -492,7 +499,6 @@ def refuse_unsaved_before_forward(reg, names):
 
 def rm_names(reg, records, names):
     """The named removals: each planned, one question for all, each destroyed independently; the worst status."""
-    from wk.lock import Lock
     worst = 0
     found = []
     for n in names:
@@ -542,10 +548,7 @@ def rm_all(reg, records):
         info("no workspaces -- nothing to destroy")
         return 0
     confirm_destroy(len(rows), "\n".join("    %s@%s" % (n, t) for t, n in rows))
-    worst = 0
-    for t, n in rows:
-        worst = max(worst, reg.machine.act_run(rm_argv(reg.root, t, n), input="", stream=True).rc)
-    return worst
+    return max(reg.machine.act_run(rm_argv(reg.root, t, n), input="", stream=True).rc for t, n in rows)
 
 
 SELFTEST_PREFIX = "wk-test-"

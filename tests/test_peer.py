@@ -165,7 +165,7 @@ class TestPeerDelegation(PeerFixture):
     def test_zed_opens_the_peers_new_workspace_from_here(self):
         cp = self._wk("new", "newws", "--on", "peerbox", "--zed", "--dry-run")
         self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertEqual(self.peer_calls(), [], "a dry run hands nothing over")
+        self.assertEqual([c for c in self.peer_calls() if not c.startswith("ls ")], [], "a dry run hands nothing over")
         self.assertRegex(cp.stdout, r"would run: .* new newws'")
         self.assertRegex(cp.stdout, r"would run: \S*/wk zed newws")
 

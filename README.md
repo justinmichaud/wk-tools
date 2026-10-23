@@ -230,6 +230,9 @@ only), `fork` and `forkwpe` (yours; the only ones a push reaches). Every
 fetch is a local read of the machine's mirror. `git-webkit setup` has already
 run. `wk sync <ws>` reads the wiring back as it fetches; `--fix` re-asserts it.
 
+A name lives on one machine of the fleet: `wk new` refuses a name alive on any
+other, naming where it is; a machine that does not answer is warned about, not counted.
+
 **Files in and out**
 
 ```sh

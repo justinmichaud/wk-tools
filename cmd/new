@@ -49,9 +49,9 @@ def detached(reg, records, name, opts):
 
 
 def main(args, inv):
-    opts, name = parse(args), store.ws_name()
-    reg = places.Registry(ROOT)
+    opts, name, reg = parse(args), store.ws_name(), places.Registry(ROOT)
     if inv.vm_side():
+        workspace.refuse_elsewhere(reg, name, "container", opts)   # the podman VM's own wk sees only its container
         rc = inv.forward([w for w in inv.argv if w != "--zed"])
         if rc and opts["zed"]:
             die("'wk new %s' failed, so nothing was opened.\n"
