@@ -18,7 +18,7 @@ from tests.support import REPO, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.test_bench_report import in_process  # noqa: E402
-from tests.test_bench_task import refusal  # noqa: E402
+from tests.test_bench_task import kv, refusal  # noqa: E402
 from tests import fakes
 from tests.test_bench_pipeline import PLAN_JSON, RESULT, SHA, CleanTest, SystemConformance, registry as pipeline_registry, invoke  # noqa: E402
 from wk import images, job, pgo, project, record, samply  # noqa: E402
@@ -30,16 +30,11 @@ from wk.boot.driver import Driver, Onboard, part  # noqa: E402
 from tests.fake_boot import FakeBoard, Side  # noqa: E402
 from wk.boot.pi import Rpi5Usb  # noqa: E402
 from tests.fakes import FakeClock  # noqa: E402
-from wk.kv import kv  # noqa: E402
 from wk.lock import Lock  # noqa: E402
 from wk.machine import Local, Result  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 from wk.store import Store  # noqa: E402
 
-
-def kv(fields, bools=()):
-    """Fields as wk writes them into a record: key=value strings, and the bools as flags."""
-    return dict([f.split("=", 1) for f in fields] + [(b.split("=", 1)[0], bool(b.split("=", 1)[1])) for b in bools])
 
 WS = "buildroot-webkit-2.52-buildroot-rpi5-64"
 FILES = {"usr/lib/libWPEWebKit-2.0.so.1.0.0": b"webkit-bytes-here"}

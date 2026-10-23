@@ -183,6 +183,17 @@ class TestTheRecord(MacTest):
         self.assertIn("wall_time_s", env)
         self.assertEqual(brecord.run_state(env, True), "ok")
 
+    def test_the_slide_is_a_reading_so_two_runs_pair_in_one_configuration(self):
+        """`unit bench.variance_pairing`: grouped by the knobs, a Mac's runs pair as a Linux run's do (TestReportWalkerAndStats)."""
+        self.w.answer(["pgrep", "-n", project.get("BROWSER")], out="77\n")
+        for slide in ("0x4000", "0x8000"):
+            self.w.answer(["vmmap", "-slide"], out="Load Address Slide: %s\n" % slide)
+            self.w.clock.sleep(60)
+            self.staged()
+        runs = [str(Path(self.w.home, "results", r)) for r in self.w.results()]
+        self.assertEqual(sorted(json.loads(Path(r, "env.json").read_text())["aslr_slide"] for r in runs), ["0x4000", "0x8000"])
+        self.assertIn("  aslr=os-randomised, env_pad_bytes=0, path_len=0, shared_cache=None: A sd", in_process(report.two_runs, runs[:1], runs[1:]).stdout)
+
     def test_the_staged_builds_pgo_reading_goes_with_the_run_and_none_is_carried_where_there_is_none(self):
         self.staged()
         self.assertFalse(Path(self.w.home, "results", self.w.results()[0], "profile-check.json").exists())

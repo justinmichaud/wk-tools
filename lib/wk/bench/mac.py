@@ -537,11 +537,11 @@ class Volume(System):
         log("  it is on the bench volume, read from the host install:  wk bench ab --devices %s --collect" % self.machine_name)
 
     def after(self, leg):
-        """ASLR cannot be turned off on Apple Silicon, so what is recorded is the load address slide that happened."""
+        """ASLR cannot be turned off on Apple Silicon: the slide that happened is a reading, outside the configuration a report pairs by."""
         pid = first_line(self.here.run(["pgrep", "-n", project.get("BROWSER")]))
         slide = next((l.split(":", 1)[1].strip() for l in self.here.run(["vmmap", "-slide", pid]).out.splitlines()
                       if l.startswith("Load Address Slide:")), "") if pid else ""
-        return dict({"configuration.aslr": slide or "os-randomised"}, **({"profiler": self.profiler} if leg.o.get("warmup") else {}))
+        return dict({"configuration.aslr": "os-randomised", "aslr_slide": slide}, **({"profiler": self.profiler} if leg.o.get("warmup") else {}))
 
     def reading(self, leg):
         build = os.path.join(self.dir, project.get("BUILD_DIR"))

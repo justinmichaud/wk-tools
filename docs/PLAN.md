@@ -1337,7 +1337,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The Mac in bench mode caps its battery charge, turns the display off between legs and on for one, and `wk quiesce status` reports both | 5 | `live bench.mac_charge_cap`, `live bench.mac_screen` |
 | SIP is read on both Mac installs (`csrutil status`), on for the host and off for the bench volume, and `wk doctor mbp` reports each (`unit doctor.sip_rows` landed 2026-10-22: each install is read while it runs, the other one reported unread) | 5 | `live doctor.bench_readiness[mbp]` |
 | `wk boot mbp` refuses to arm while the bench volume's SIP is on. The arm runs on the host install and `csrutil status` reads only the running one, so how the host reads the bench volume's SIP is owed to a measurement on the Mac | 5 | `live boot.sip_refusal[mbp]` |
-| An A/B's rounds cross the variance factors (layout, env size, path length, shared cache) and the report pairs rounds across them, on the Mac and on Linux alike; a side whose spread grows in one configuration is named; one measured run per arm runs under samply with a JIT dump; an unattended run stops at its wall-clock budget; run wall time is compared beside score | 5 | `unit bench.variance_pairing`, `live bench.linux_variance` |
+| A run records the variance knobs it ran under (env size, path length, shared cache; the Mac's ASLR slide as a reading beside them) and the report pairs A's runs with B's by configuration, on the Mac and on Linux alike | 5 | `unit bench.variance_pairing` |
+| An A/B's rounds cross the variance factors (layout, env size, path length, shared cache); a side whose spread grows in one configuration is named; one measured run per arm runs under samply with a JIT dump; an unattended run stops at its wall-clock budget; run wall time is compared beside score | 5 | `unit bench.variance_crossing`, `live bench.linux_variance` |
 | Both arms of an A/B carry an identifier the tooling reads back from the running binary, so a linking slip or an interrupted deploy cannot pass as a measurement | 5 | `live bench.binary_identifier` |
 | The clangd flags in `container/helix/languages.toml` are measured (indexing time, peak memory) against a real checkout | 3 | `live clangd.measure` |
 | pi runs on a macOS guest and a build box, its TUI runs in a container, and one `~/.pi/agent/models.json` per machine replaces the one `wk new` writes per workspace | 3 | `live pi.session`, `unit agents.models_per_machine` |
@@ -1359,7 +1360,16 @@ Decisions are asked as questions, and their answers are recorded under "Decision
   workspace-naming command takes from the dispatcher, and does bare `wk status` mark the duplicate and exit nonzero?
 - The store's `cache/agents`, `cache/ccache` and `skills` are mounted read-write into every container, so one
   workspace can change the Claude CLI, the ccache objects and the skills every other workspace on the machine uses.
+- Crossing the variance factors (`unit bench.variance_crossing`): the knobs are one setting per A/B today (`WK_BENCH_*`,
+  both arms). Which levels does each factor take, what is "layout" (no knob exists, and ASLR cannot be turned off on
+  the Mac), and does round i run configuration i mod n?
+- What a side's spread growing means: the report pools every subtest's values into one sd per arm and names only B
+  (measured: identical noise, one of two subtests 30% faster, B's sd 42.8 against A's 26.7 is flagged). Is it each
+  subtest's relative sd, or the suite row's run-to-run sd, and is a noisier A named too?
+- The wall-clock budget (8 hours?): its flag, and whether a run past it stops between rounds or ends the leg; and is
+  the JIT-dumped samply run the warmup round, labelled no measurement, or a measured leg (`JSC_useJITDump=1` has been
+  seen to crash the WebKitGTK UI process, lib/wk/profile.py)?
 - Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
   wk never blesses; the way back is the person's power-button pick. The default is not yet set (`wk boot mbp
   --status`, 2026-10-22 08:10 MST: `firmware_default=the host install`); the Mac rows run once it is. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`,
-  `unit bench.variance_pairing`).
+  `unit bench.variance_crossing`).

@@ -13,7 +13,7 @@ from unittest import mock
 from tests.fakes import FakeDriver
 from tests.support import REPO, WkTest, run
 from tests.test_bench_report import in_process
-from tests.test_bench_task import TASK, add_run, make_task, refusal, registry
+from tests.test_bench_task import TASK, add_run, kv, make_task, refusal, registry
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places  # noqa: E402
@@ -23,10 +23,6 @@ from wk.act import Refused  # noqa: E402
 from wk.machine import Local, Planted, Ssh  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
-
-def kv(fields, bools=()):
-    """Fields as wk writes them into a record: key=value strings, and the bools as flags."""
-    return dict([f.split("=", 1) for f in fields] + [(b.split("=", 1)[0], bool(b.split("=", 1)[1])) for b in bools])
 
 HEAD, BASE = "afa2ed9e70103469f02732323fa7b874378d6a5d", "04abe09851b03b7ce6c8b9c208659c23a5ab7138"
 READING = {"benchmarks": {}, "combined": {}, "compressed": {}, "missing": [], "libraries": [], "plans": []}

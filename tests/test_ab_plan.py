@@ -17,6 +17,7 @@ from tests import fakes
 from tests.fakes import FakeRegistry, FlowTest
 from tests.support import REPO
 from tests.test_bench_pipeline import BenchTest
+from tests.test_bench_task import kv
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, images, job, pgo, record as progress, sched  # noqa: E402
@@ -24,10 +25,6 @@ from wk.act import Refused  # noqa: E402
 from wk.bench import ab, change, record, report  # noqa: E402
 from wk.machine import Result, Ssh  # noqa: E402
 
-
-def kv(fields, bools=()):
-    """Fields as wk writes them into a record: key=value strings, and the bools as flags."""
-    return dict([f.split("=", 1) for f in fields] + [(b.split("=", 1)[0], bool(b.split("=", 1)[1])) for b in bools])
 
 HEAD, BASE, TIP = "a" * 40, "b" * 40, "c" * 40
 WK = str(REPO / "wk")
