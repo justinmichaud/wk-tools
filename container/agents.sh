@@ -1,4 +1,4 @@
-# lib/wk/agents.py's, with WK_AGENTS_CACHE and WK_CLAUDE_VERSION set: `find <agent>` prints the one that runs, `node` asks whether pi's node runs; otherwise it installs what is missing, exiting 1 on a failure.
+# lib/wk/agents.py's, with WK_AGENTS_CACHE and WK_CLAUDE_VERSION set: `find <agent>` prints the one that runs, `node` asks whether pi's node runs; otherwise it installs what is missing and links pi's models.json to the machine's one in the cache, exiting 1 on a failure.
 [ ! -r "$HOME/.wk-egress" ] || . "$HOME/.wk-egress"
 PATH="$HOME/.local/bin:$PATH"
 node_ok() {
@@ -55,4 +55,4 @@ else
     echo pi=failed
     exit 1
 fi
-[ -f "$HOME/.pi/agent/models.json" ] && echo models=yes || echo models=no
+mkdir -p "$HOME/.pi/agent" && ln -sfn "$WK_AGENTS_CACHE/pi/models.json" "$HOME/.pi/agent/models.json"

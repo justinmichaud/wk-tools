@@ -586,6 +586,9 @@ push and a write refused.
 `wk new` installs both agents into the workspace (a macOS guest gets them at
 its first `wk start`), and `wk ai` starts the session, nothing more; a
 workspace made without an agent is refused, naming `wk rm` and `wk new`. pi needs node 22.19 or newer where it is made.
+pi's `~/.pi/agent/models.json` links the one its machine keeps in the agents cache (the store's
+`cache/agents`, a container's `/cache/agents`; `~/.cache/wk/agents` on a build box or in a guest), which
+each `wk new` there rewrites with the models the stored LiteLLM key may call, and removes without that key.
 
 A Claude session on a terminal starts with Remote Control on, named after the
 workspace, so claude.ai/code and the mobile app can join it. It needs the

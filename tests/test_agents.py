@@ -66,8 +66,8 @@ class TestTheScript(FlowTest):
         return p.read_text().splitlines() if p.exists() else []
 
     def test_a_fresh_workspace_gets_both_and_a_rerun_finds_them(self):
-        self.assertEqual((0, {"claude": "installed", "pi": "installed", "models": "no"}), self.run_script())
-        self.assertEqual((0, {"claude": "present", "pi": "present", "models": "no"}), self.run_script())
+        self.assertEqual((0, {"claude": "installed", "pi": "installed"}), self.run_script())
+        self.assertEqual((0, {"claude": "present", "pi": "present"}), self.run_script())
         self.assertEqual(2, len(self.log()), self.log())
 
     def test_pi_goes_into_the_users_own_prefix_without_install_scripts(self):
@@ -85,8 +85,7 @@ class TestTheScript(FlowTest):
         self.assertEqual("installed", self.run_script()[1]["claude"])
         self.assertTrue((self.artifact() / ".local/share/claude/versions/9.9.9").is_file())
         self.assertFalse((self.tmp / "cache" / "claude" / ".stage").exists())
-        other = self.tmp / "home2"
-        other.mkdir()
+        (other := self.tmp / "home2").mkdir()
         self.assertEqual("installed", self.run_script(HOME=str(other))[1]["claude"])
         self.assertEqual(1, len(self.curls()), self.log())
         self.assertTrue(os.access(other / ".local/bin/claude", os.X_OK))
@@ -99,10 +98,8 @@ class TestTheScript(FlowTest):
         self.assertEqual([], self.curls())
 
     def test_two_creations_at_once_fetch_once_and_the_second_waits_for_the_artifact(self):
-        other = self.tmp / "home2"
-        other.mkdir()
-        env = dict(self.env, CURL_SLEEP="1")
-        procs = [subprocess.Popen([shutil.which("bash"), str(REPO / agents.SCRIPT)], env=dict(env, HOME=h), stdout=subprocess.PIPE,
+        (other := self.tmp / "home2").mkdir()
+        procs = [subprocess.Popen([shutil.which("bash"), str(REPO / agents.SCRIPT)], env=dict(self.env, CURL_SLEEP="1", HOME=h), stdout=subprocess.PIPE,
                                   stderr=subprocess.PIPE, text=True) for h in (str(self.home), str(other))]
         said = [p.communicate(timeout=60)[0] for p in procs]
         self.assertEqual([0, 0], [p.returncode for p in procs])
@@ -111,8 +108,7 @@ class TestTheScript(FlowTest):
 
     def test_a_failed_fetch_leaves_no_artifact_for_the_next_try_to_trust(self):
         self.script(CURL_INSTALLS="0")
-        self.assertFalse(self.artifact().exists())
-        self.assertFalse((self.tmp / "cache" / "claude" / ".stage").exists())
+        self.assertEqual([], [p for p in (self.artifact(), self.tmp / "cache" / "claude" / ".stage") if p.exists()])
         self.assertEqual("installed", self.run_script()[1]["claude"])
 
     def test_pi_goes_through_npms_own_cache_in_the_artifact_directory(self):
@@ -126,13 +122,11 @@ class TestTheScript(FlowTest):
 
     def test_an_installer_that_leaves_nothing_that_runs_fails(self):
         rc, said = self.run_script(CURL_INSTALLS="0")
-        self.assertEqual((1, "failed"), (rc, said["claude"]))
-        self.assertNotIn("pi", said)
+        self.assertEqual((1, "failed", False), (rc, said["claude"], "pi" in said))
 
     def test_a_refused_download_shows_its_reason_and_runs_nothing(self):
         cp = self.script(CURL_REFUSES="echo ran > $LOG.ran; the injector says why")
-        self.assertEqual(1, cp.returncode)
-        self.assertIn("claude=failed", cp.stdout)
+        self.assertEqual((1, "claude=failed\n"), (cp.returncode, cp.stdout))
         self.assertIn("the injector says why", cp.stderr)
         self.assertFalse((self.tmp / "log.ran").exists())
 
@@ -161,10 +155,16 @@ class TestTheScript(FlowTest):
         rc, said = self.run_script(NPM_OK="0")
         self.assertEqual((1, "failed"), (rc, said["pi"]))
 
-    def test_a_models_file_already_there_is_said(self):
-        (self.home / ".pi" / "agent").mkdir(parents=True)
-        (self.home / ".pi" / "agent" / "models.json").write_text("{}")
-        self.assertEqual("yes", self.run_script()[1]["models"])
+    def test_every_workspace_reads_the_machines_one_models_file(self):
+        """`unit agents.models_per_machine`: two workspaces on one agents cache read the one file, and a rewrite reaches both."""
+        other, pi = self.tmp / "other", self.tmp / "cache" / "pi"
+        for d in (self.home / ".pi" / "agent", other, pi):
+            d.mkdir(parents=True)
+        (self.home / ".pi" / "agent" / "models.json").write_text("its own")
+        self.assertEqual([0, 0], [self.run_script(HOME=str(h))[0] for h in (self.home, other)])
+        for text in ("first", "second"):
+            (pi / "models.json").write_text(text)
+            self.assertEqual([text, text], [(h / ".pi" / "agent" / "models.json").read_text() for h in (self.home, other)])
 
     def test_find_names_the_one_that_runs_and_fails_without_one(self):
         self.assertEqual(1, self.script("find", "claude").returncode)
@@ -190,7 +190,7 @@ class Workspace:
 
 class TestInstall(unittest.TestCase):
     def setUp(self):
-        self.ws = Workspace({"claude.ai/install.sh": Result(0, "claude=present\npi=installed\nmodels=no\n")})
+        self.ws = Workspace({"claude.ai/install.sh": Result(0, "claude=present\npi=installed\n")})
         self.stored = False
         for p in (mock.patch.object(agents.Secrets, "cred_stored", side_effect=lambda name: self.stored),
                   mock.patch.object(agents.Secrets, "cred_read", return_value="sk-placeholder\n")):
@@ -238,7 +238,7 @@ class TestInstall(unittest.TestCase):
         self.assertIn("not readable as JSON", err)
 
     def test_no_node_is_said_and_is_not_a_refusal(self):
-        self.ws.answers["claude.ai/install.sh"] = Result(0, "claude=present\npi=no-node v20.11.1\nmodels=no\n")
+        self.ws.answers["claude.ai/install.sh"] = Result(0, "claude=present\npi=no-node v20.11.1\n")
         status, err = self.install()
         self.assertEqual(0, status, err)
         self.assertIn("no pi in 'demo': it needs node >= 22.19 and npm, and found node v20.11.1", err)
@@ -248,10 +248,10 @@ class TestInstall(unittest.TestCase):
         with mock.patch.object(credcheck, "litellm_models", side_effect=served), \
                 mock.patch.object(credcheck, "litellm_callable", side_effect=lambda key, ids: (ids[1:] or [None])[0]):
             status, err = self.install()
-        return status, err, [a[-1] for a in self.ws.argvs if "> ~/.pi/agent/models.json" in a[-1]]
+        return status, err, [a[-1] for a in self.ws.argvs if "printf" in a[-1]], [a for a in self.ws.argvs if a[-1] == 'rm -f "/cache/agents/pi/models.json"']
 
     def test_pi_is_pointed_at_the_models_the_key_may_call(self):
-        status, err, writes = self.models_written(lambda key: ["glm-5p3-flash", "gpt-oss-120b"])
+        status, err, writes, _ = self.models_written(lambda key: ["glm-5p3-flash", "gpt-oss-120b"])
         self.assertEqual(0, status, err)
         words = shlex.split(writes[0])
         provider = json.loads(words[words.index("printf") + 2])["providers"]["litellm"]
@@ -259,29 +259,29 @@ class TestInstall(unittest.TestCase):
                          (provider["baseUrl"], provider["api"], provider["apiKey"]))
         self.assertEqual([{"id": "gpt-oss-120b"}, {"id": "glm-5p3-flash"}], provider["models"])
         self.assertIn("umask 077", writes[0])
+        self.assertTrue(writes[0].endswith('> "/cache/agents/pi/models.json".$$ && mv -f "/cache/agents/pi/models.json".$$ "/cache/agents/pi/models.json"'))
 
     def test_an_endpoint_where_no_model_answers_writes_nothing_and_names_the_check(self):
-        status, err, writes = self.models_written(lambda key: ["m-404"])
-        self.assertEqual((0, []), (status, writes), err)
+        status, err, writes, removed = self.models_written(lambda key: ["m-404"])
+        self.assertEqual((0, [], 1), (status, writes, len(removed)), err)
         self.assertIn("'wk key check'", err)
 
     def test_an_endpoint_that_does_not_answer_writes_nothing(self):
         def down(key):
             raise credcheck.Unreachable("URLError: refused")
-        status, err, writes = self.models_written(down)
-        self.assertEqual((0, []), (status, writes), err)
+        status, err, writes, removed = self.models_written(down)
+        self.assertEqual((0, [], []), (status, writes, removed), err)
         self.assertIn("URLError: refused", err)
+        self.assertIn("left as it was", err)
 
     def test_with_no_key_it_says_which_command_stores_one(self):
         status, err = self.install()
-        self.assertEqual(0, status, err)
+        self.assertEqual((0, 1), (status, len([a for a in self.ws.argvs if a[-1] == 'rm -f "/cache/agents/pi/models.json"'])), err)
         self.assertIn("wk key set litellm", err)
-        self.assertFalse([a for a in self.ws.argvs if "> ~/.pi/agent/models.json" in a[-1]])
 
-    def test_a_models_file_already_there_is_left_alone(self):
-        self.ws.answers["claude.ai/install.sh"] = Result(0, "claude=present\npi=present\nmodels=yes\n")
-        _, _, writes = self.models_written(lambda key: ["m"])
-        self.assertEqual([], writes)
+    def test_a_present_pi_still_recomputes_the_machines_file(self):
+        self.ws.answers["claude.ai/install.sh"] = Result(0, "claude=present\npi=present\n")
+        self.assertEqual(1, len(self.models_written(lambda key: ["m", "n"])[2]))
 
 
 class TestADryRun(unittest.TestCase):

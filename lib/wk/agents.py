@@ -1,4 +1,4 @@
-"""Claude Code and pi, installed when a workspace is made; a macOS guest, not booted then, at its first start."""
+"""Claude Code and pi, installed as a workspace is made (a macOS guest at its first start); pi links its machine's models.json."""
 
 import json
 import os
@@ -55,29 +55,28 @@ def install(root, env, machine, run, ws, tools, src, cache):
     if not config.ok:
         die("could not record Claude's start-up answers in '%s', and every session there\n    would stop at a dialog instead "
             "of starting:\n    %s" % (ws, (config.out + config.err).replace("\r", "").strip().replace("\n", "\n    ")))
-    if said.get("models") == "no" and said.get("pi") in ("present", "installed"):
-        write_pi_models(root, env, machine, run, ws)
+    if said.get("pi") in ("present", "installed"):
+        write_pi_models(root, env, machine, run, ws, cache)
 
 
-def write_pi_models(root, env, machine, run, ws):
-    sec = Secrets(root, env, machine)
+def write_pi_models(root, env, machine, run, ws, cache):
+    models, sec = '"%s/pi/models.json"' % cache, Secrets(root, env, machine)
     if not sec.cred_stored("litellm"):
         log("  no LiteLLM key on this machine ('wk key set litellm'), so pi in '%s' asks you to /login" % ws)
-        return
+        return run(["bash", "-c", "rm -f " + models])
     import credcheck
     endpoint, key = credcheck.LITELLM_ENDPOINT, first_line(sec.cred_read("litellm"))
     try:
         ids = credcheck.litellm_models(key)
         first = credcheck.litellm_callable(key, ids)
     except credcheck.Unreachable as e:
-        warn("could not ask %s which models the LiteLLM key may call (%s),\n    so pi in '%s' asks you to /login" % (endpoint, e, ws))
-        return
+        return warn("could not ask %s which models the LiteLLM key may call (%s),\n    so pi's models.json is left as it was" % (endpoint, e))
     if not first:
-        warn("%s answers a completion from none of the %d chat model(s) it lists for the\n    stored LiteLLM key, so pi in '%s' "
-             "has nothing to call: 'wk key check' says what\n    the endpoint makes of the key" % (endpoint, len(ids), ws))
-        return
-    ids = [first] + [i for i in ids if i != first]
-    write = "mkdir -p ~/.pi/agent && umask 077 && printf '%%s\\n' %s > ~/.pi/agent/models.json" % shlex.quote(pi_models(endpoint, ids))
+        warn("%s answers a completion from none of the %d chat model(s) it lists for the stored LiteLLM key,\n    so pi "
+             "has nothing to call: 'wk key check' says what the endpoint makes of the key" % (endpoint, len(ids)))
+        return run(["bash", "-c", "rm -f " + models])
+    write = "mkdir -p \"%s/pi\" && umask 077 && printf '%%s\\n' %s > %s.$$ && mv -f %s.$$ %s" % (
+        cache, shlex.quote(pi_models(endpoint, [first] + [i for i in ids if i != first])), models, models, models)
     if not run(["bash", "-c", write]).ok:
-        die("could not write ~/.pi/agent/models.json in '%s'" % ws)
-    info("wrote ~/.pi/agent/models.json in '%s' ($LITELLM_API_KEY, %s; %d model(s), %s first)" % (ws, endpoint, len(ids), ids[0]))
+        die("could not write pi's models.json for this machine from '%s'" % ws)
+    info("wrote pi's models.json for this machine from '%s' ($LITELLM_API_KEY, %s; %d model(s), %s first)" % (ws, endpoint, len(ids), first))

@@ -273,7 +273,7 @@ def _litellm_key(value, repos, path, evidence):
         return WIDE, "%s, and it reaches the key-management routes (alias %s)" % (served, (_json(raw).get("info") or {}).get("key_alias") or "none")
     if status != 403:
         return UNVERIFIED, "%s; /key/info answered HTTP %d rather than 200 or 403" % (served, status)
-    return OK, "%s, restricted to the LLM API routes; `wk new` writes it into ~/.pi/agent/models.json for %s" % (served, LITELLM_ENDPOINT)
+    return OK, "%s, restricted to the LLM API routes; each `wk new` recomputes the machine's pi models.json for %s" % (served, LITELLM_ENDPOINT)
 
 
 def chat_model_ids(doc):
