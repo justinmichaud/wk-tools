@@ -299,7 +299,7 @@ class Autorun:
                    **({"WK_FORCE": "1"} if j.get("rehearsal") else {}))
         vol = Volume(TREE, places.Registry(TREE, env, self.m), j.get("workspace") or "", self.clock, j.get("machine") or "")
         arms = [Arm(a.get("label") or "AB"[i], vol, a.get("id") or "", a.get("browser_args") or "") for i, a in enumerate((j.get("arms") or [])[:2])]
-        o = {k: str(j[k]) for k in ("rounds", "max_rounds", "detect", "count", "timeout", "task") if j.get(k) not in (None, "")}
+        o = {k: str(j[k]) for k in ("rounds", "max_rounds", "detect", "budget", "count", "timeout", "task") if j.get(k) not in (None, "")}
         ab = AB(TREE, vol.reg, self.clock, vol.ws, list(j.get("plans") or ()), o, "slot", arms, lambda taskdir: None, PLANTED)
         try:
             ab.go()

@@ -785,6 +785,17 @@ class TestASlotAB(ABTest):
         self.assertEqual(self.order(w)[4:], [("0", "a", "a", "evidence"), ("0", "b", "b", "evidence"), ("2", "b", "b", ""), ("2", "a", "a", "")])
         self.assertEqual(brecord.task_state(str(runs.parent), False)["usable"], 2)
 
+    def test_past_its_budget_an_ab_finishes_the_round_it_is_in_and_starts_no_next(self):
+        """`unit bench.wall_budget`: a leg takes 60s, so a 0.06h (216s) budget passes in round 2, which finishes."""
+        w = self.ab_world()
+        self.assertEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "5", "--budget", "0.06"), 0, w.err)
+        self.assertEqual([o[:2] for o in self.order(w)[2:]], [("1", "a"), ("1", "b"), ("2", "b"), ("2", "a")])
+        self.assertIn("stopped on budget (0.06h) after 2 of 5 rounds; round 3 is not started", w.err)
+        doc = json.loads((w.bench_dir() / w.tasks()[-1] / "task.json").read_text())
+        self.assertEqual((doc["budget"], doc["restart"].split(" --task")[0].endswith(" --budget 0.06")), ("0.06", True))
+        said = in_process(report.task_report, str(w.bench_dir() / w.tasks()[-1]), False).stdout
+        self.assertIn("rounds: 2 usable of 2 attempted (5 planned); stopped on budget (0.06h) after 2 of 5 rounds\n", said)
+
     def restartable(self):
         w = self.ab_world()
         self.assertEqual(w.invoke("jetstream3", "--ab", "a,b", "--rounds", "1"), 0, w.err)
@@ -808,8 +819,8 @@ class TestASlotAB(ABTest):
         w = self.ab_world()
         w.invoke("jetstream3", "--ab", "a,b", "--rounds", "2", "--count", "2")
         doc = json.loads((w.bench_dir() / w.tasks()[-1] / "task.json").read_text())
-        self.assertEqual((doc["subject"], doc["devices"], doc["slots"], doc["rounds"], doc["count"]),
-                         ({"kind": "slots", "spec": "a,b"}, [{"device": BOARD, "profile": "buildroot-rpi5-64"}], ["a", "b"], 2, "2"))
+        self.assertEqual((doc["subject"], doc["devices"], doc["slots"], doc["rounds"], doc["count"], doc["budget"]),
+                         ({"kind": "slots", "spec": "a,b"}, [{"device": BOARD, "profile": "buildroot-rpi5-64"}], ["a", "b"], 2, "2", "8"))
         self.assertEqual(doc["commands"], ["wk bench run ws jetstream3 --system testboard --ab a,b --rounds 2 --count 2"])
         self.assertTrue(w.tasks()[-1].endswith("-testboard-a-vs-b"))
 
@@ -854,7 +865,7 @@ class TestASlotAB(ABTest):
 
     def test_the_shape_of_an_ab_is_refused_before_anything_runs(self):
         for argv, why in ((("--ab", "a,a"), "two different arms"), (("--ab", "a"), "two names separated by a comma"),
-                          (("--ab", "a,b", "--ab-systems", "x,y"), "pick one"), (("--ab", "a,b", "--rounds", "0"), "at least 1"),
+                          (("--ab", "a,b", "--ab-systems", "x,y"), "pick one"), (("--ab", "a,b", "--rounds", "0"), "at least 1"), (("--ab", "a,b", "--budget", "0"), "hours above 0"),
                           (("--ab", "a,b", "--slot", "a"), "names its two slots in --ab"), (("--rounds", "2",), "belongs to an A/B"),
                           (("--no-warmup-profile",), "belongs to an A/B"), (("--ab", "a,b", "--cores", "x"), "not a valid Linux cpu list"),
                           (("--ab", "a,b", "--collect"), "neither arm of a comparison")):
@@ -1001,7 +1012,3 @@ class TestTheKeptSubtests(unittest.TestCase):
 
     def test_excluding_everything_refuses(self):
         self.assertIn("every subtest", self.kept(64, ",".join(self.PLAN["subtests"][""])))
-
-
-if __name__ == "__main__":
-    unittest.main()

@@ -20,7 +20,7 @@ RELEASE_OF = re.compile(r"^(wpe-|webkitglib/)([0-9]+\.[0-9]+)$")
 PLAN = "speedometer3"
 SLOTS = 'for s in %s/*/slot.json; do [ -f "$s" ] && basename "$(dirname "$s")"; done 2>/dev/null; true' % board.SLOTS_DIR
 USAGE = ("usage: wk bench ab <pr-spec|branch|sha> --devices <a,b> [--release X.Y] [--builder B] [--bits N] [--base <sha>]\n"
-         "           [--build-on <a[,b]>] [--plan P]... [--rounds N] [--count N] [--timeout S] [--detach]\n"
+         "           [--build-on <a[,b]>] [--plan P]... [--rounds N] [--budget H] [--count N] [--timeout S] [--detach]\n"
          "       wk bench ab --systems A,B --devices <board> --workspace <ws> [--slot S] [--plan P]... [--rounds N]\n"
          "       wk bench ab --devices <mac> --systems A,B | --patch <ref|diff> [--base <ref>] --workspace <ws> ...\n"
          "       wk bench ab <task> --kill; see wk bench -h")
@@ -65,7 +65,7 @@ class Change(Task):
         if not o.get("devices"):
             die(USAGE + "\n    --devices names the boards (wk boot --list)")
         refuse(o, MAC_ONLY, "%s is a Mac A/B's: --devices names a board here, and a board's arms are slots")
-        self.rounds, self.max_rounds, self.detect, self.plans = check_plan(o, [PLAN])
+        self.rounds, self.max_rounds, self.detect, self.plans, self.budget = check_plan(o, [PLAN])
         if o.get("detach") and act.dry_run():
             die("--detach and --dry-run: a dry run has nothing to detach")
         if o.get("bits") not in (None, "", "32", "64"):
@@ -353,7 +353,7 @@ class Change(Task):
         return sched.validate(out)
 
     def bench_options(self, d):
-        o = {"rounds": str(self.rounds), "count": self.o.get("count") or "",
+        o = {"rounds": str(self.rounds), "budget": "%g" % self.budget, "count": self.o.get("count") or "",
              "timeout": self.o.get("timeout") or "", "max_rounds": str(self.max_rounds) if self.detect else "",
              "detect": "%g" % self.detect if self.detect else ""}
         a, b = self.arms
@@ -438,7 +438,7 @@ class Change(Task):
 
     def argv(self):
         words = ([self.spec] if self.spec else []) + flags(self.o, ("devices", "release", "builder", "bits", "base", "build_on", "systems",
-                                                                   "workspace", "slot", "count", "timeout", "max_rounds", "detect"))
+                                                                   "workspace", "slot", "budget", "count", "timeout", "max_rounds", "detect"))
         for p in self.plans:
             words += ["--plan", p]
         return [self.wk, "bench", "ab"] + words + ["--rounds", str(self.rounds)]

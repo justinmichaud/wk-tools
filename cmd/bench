@@ -57,7 +57,8 @@ TASK = Opt("--task", "record into an existing task (run: restart a one-run task,
 SLOT = Opt("--slot", "the slot (default a)", value="<s>")
 ROUNDS = (Opt("--rounds", "measured rounds (default 5)", value="<n>"),
           Opt("--max-rounds", "go on past --rounds until they resolve --detect, up to this (default 40)", value="<n>"),
-          Opt("--detect", "the per cent the rounds must resolve (default 0: --rounds exactly)", value="<pct>"))
+          Opt("--detect", "the per cent the rounds must resolve (default 0: --rounds exactly)", value="<pct>"),
+          Opt("--budget", "hours after which no new round starts; the one running finishes (default 8)", value="<h>"))
 ARGS = (Opt("--a-args", "arm A's jsc or browser arguments", value='"X"'), Opt("--b-args", "arm B's", value='"Y"'))
 COLLECT = Opt("--collect", "run: one iteration of an instrumented slot, writing its PGO profile; ab: read a Mac A/B's "
               "result onto the task and report it")
@@ -70,8 +71,7 @@ COMMAND = Command(name="required", ready=True, preset="--preset", values="plans"
     "plans": dict(where="store", name="none", readonly=True),
     "run": dict(where=cli.where, takes=("<plan>",), opts=(
         PRESET, COUNT, Opt("--browser", "the browser to drive", value="<name>"),
-        Opt("--subtests", "the subtests to run", value='"A B"'), Opt("--software", "render in software (not comparable "
-                                                                     "with a GPU run)"),
+        Opt("--subtests", "the subtests to run", value='"A B"'), Opt("--software", "render in software (not comparable with a GPU run)"),
         Opt("--browser-args", "the browser's arguments", value='"..."'),
         Opt("--cores", "pin to this Linux cpu list (taskset -c); refused on macOS", value="<list>"), KILL,
         Opt("--system", "a board's or a Mac's bench system instead of the workspace", value="<machine>"), SLOT,

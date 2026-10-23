@@ -35,11 +35,7 @@ def axis_check_lines(a, b):
     lines = axes(AXES[:5]) + both(BOTH[:1])
     # Only evidence for a gpu-class run: "no renderer" about a jsc-shell JetStream run is noise in front of real warnings.
     if a.get("class") != "cpu" and b.get("class") != "cpu":
-        if a.get("gpu_renderer") != b.get("gpu_renderer"):
-            lines.append("warning: different renderers (%s vs %s)" % (a.get("gpu_renderer"), b.get("gpu_renderer")))
-        if a.get("session_mode") != b.get("session_mode"):
-            lines.append("warning: different session modes (%s vs %s) -- only 'gpu' is a measurable display path"
-                         % (a.get("session_mode"), b.get("session_mode")))
+        lines += axes((("gpu_renderer", "renderers", None, ""), ("session_mode", "session modes", None, " -- only 'gpu' is a measurable display path")))
     if bool(a.get("software")) != bool(b.get("software")):
         lines.append("warning: one run is software-rendered and the other is not -- these are not comparable")
     ex_a, ex_b = a.get("subtests_excluded") or "", b.get("subtests_excluded") or ""
@@ -84,18 +80,14 @@ def _side_runs(dirs, side):
             sys.exit("report: side %s: %s -- %s" % (side, d, record.not_a_measurement(env)))
         runs.append((d, doc, env))
     if not runs:
-        sys.exit("report: no results on side %s:\n%s"
-                 % (side, "\n".join("  " + l for l in missing)
-                    or "  no run directories given"))
+        sys.exit("report: no results on side %s:\n%s" % (side, "\n".join("  " + l for l in missing) or "  no run directories given"))
     for line in missing:
         print("warning: side %s: %s" % (side, line), file=sys.stderr)
     return runs
 
 
 def _config_key(env):
-    cfg = dict(record.DEFAULT_CONFIGURATION)
-    cfg.update((env or {}).get("configuration") or {})
-    return tuple(sorted(cfg.items()))
+    return tuple(sorted(dict(record.DEFAULT_CONFIGURATION, **((env or {}).get("configuration") or {})).items()))
 
 
 def _config_label(key):
@@ -481,11 +473,12 @@ def task_report(taskdir, running, html=False, text=False, out=None, shown=None):
         return
     for (device, plan), byround in sorted(record.task_rounds(doc, st["runs"]).items()):
         a_dirs, b_dirs, dropped = record.paired(byround, arm_names)
+        stopped = [r["env"]["ab"]["stopped"] for arms in byround.values() for r in arms.values() if r["env"].get("ab", {}).get("stopped")]
         header = ["%s on %s" % (plan, device),
                   "A = %s %s, B = %s %s" % (arm_kind, arm_names[0], arm_kind, arm_names[1]),
                   "rounds: %d usable of %d attempted (%d planned)%s" % (
                       len(a_dirs), len(byround), doc.get("rounds", 1),
-                      ("; dropped " + ", ".join(dropped)) if dropped else "")]
+                      ("; dropped " + ", ".join(dropped)) if dropped else "") + ("; stopped " + stopped[0] if stopped else "")]
         out.write("\n" + "=" * 72 + "\n" + "\n".join(header) + "\n")
         if not a_dirs:
             out.write("no round has both arms yet; nothing to compare\n")

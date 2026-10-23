@@ -26,7 +26,7 @@ AB_PLANS = ("jetstream3", "speedometer3", "motionmark")
 AB_PRESET = "mac-release-pgo"
 READS = tuple(o[2:] for o in ("--preflight", "--progress", "--status", "--collect"))
 USAGE = ("usage: wk bench ab --devices <mac> --systems <staged-a>,<staged-b> --workspace <ws> [--plan P]... [--rounds N]\n"
-         "           [--max-rounds N] [--detect PCT] [--count N] [--timeout S] [--settle S] [--a-args ...] [--b-args ...] [--plant] [--rehearse]\n"
+         "           [--max-rounds N] [--detect PCT] [--budget H] [--count N] [--timeout S] [--settle S] [--a-args ...] [--b-args ...] [--plant] [--rehearse]\n"
          "       wk bench ab --devices <mac> --patch <ref|diff> --workspace <ws> [--base <ref>] [--preset P] ...")
 BOARD_ONLY = ("release", "builder", "bits", "build_on", "slot", "detach", "task")
 SITE = "Library/Python/3.9/lib/python/site-packages"
@@ -79,8 +79,8 @@ class Plant(Task):
         if self.spec:
             die("a Mac's arms are staged builds, not a change resolved in the mirror: drop '%s'.\n%s" % (self.spec, USAGE))
         refuse(o, BOARD_ONLY, "%s is a board A/B's; a Mac A/B is planted on its bench install and runs by itself")
-        self.rounds, top, detect, self.plans = check_plan(o, AB_PLANS, PLANTED)
-        o.update(max_rounds=str(top), detect="%g" % detect, **{k: o.get(k) or PLANTED[k] for k in ("count", "timeout", "settle")})
+        self.rounds, top, detect, self.plans, self.budget = check_plan(o, AB_PLANS, PLANTED)
+        o.update(max_rounds=str(top), detect="%g" % detect, budget="%g" % self.budget, **{k: o.get(k) or PLANTED[k] for k in ("count", "timeout", "settle")})
         self.preset_name = o.get("preset") or AB_PRESET
         if o.get("systems"):
             if o.get("patch") or o.get("base"):
@@ -312,14 +312,14 @@ class Plant(Task):
 
     def command(self):
         words = ["wk", "bench", "ab", "--devices", self.name, "--systems", "%s,%s" % (self.a, self.b), "--workspace", self.ws, "--rounds", str(self.rounds)]
-        words += flags(self.o, ("max_rounds", "detect", "count", "timeout", "settle"))
+        words += flags(self.o, ("max_rounds", "detect", "budget", "count", "timeout", "settle"))
         return " ".join(words + [w for p in self.plans for w in ("--plan", p)])
 
     def job(self, declared):
         o = self.o
         return dict({"task": self.task, "workspace": self.ws, "machine": self.name, "plans": list(self.plans), "rounds": str(self.rounds),
                      "max_rounds": o["max_rounds"], "detect": o["detect"], "timeout": o["timeout"], "count": o["count"], "display": declared,
-                     "settle": o["settle"], "rehearsal": "1" if o.get("rehearse") else "",
+                     "budget": o["budget"], "settle": o["settle"], "rehearsal": "1" if o.get("rehearse") else "",
                      "arms": [{"label": "A", "id": self.a, "browser_args": o.get("a_args") or ""},
                               {"label": "B", "id": self.b, "browser_args": o.get("b_args") or ""}],
                      "created_at": self.clock.iso(), "created_by": wkrecord.host_name(self.here)}, **variance(self.env))

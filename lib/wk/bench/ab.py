@@ -14,11 +14,11 @@ from wk.boot import cli as bootcli
 from wk.lock import Lock
 
 # A planted A/B has nobody in the room to extend a run: it goes on until it resolves a third of a per cent.
-DEFAULTS = {"rounds": "5", "max_rounds": "40", "detect": "0", "lost": 3}
+DEFAULTS = {"rounds": "5", "max_rounds": "40", "detect": "0", "budget": "8", "lost": 3}
 PLANTED = dict(DEFAULTS, detect="0.3", count="2", timeout="1800", settle="90")
 NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 EXCLUSIONS = os.path.join("bench", "subtest-exclusions.conf")
-MEASURED = ("count", "timeout", "subtests", "cores", "browser", "browser_args")
+MEASURED = ("budget", "count", "timeout", "subtests", "cores", "browser", "browser_args")
 INTERRUPTED = set(job.EXIT_OF.values())
 
 
@@ -43,7 +43,7 @@ def refuse(o, keys, why):
 
 
 def check_plan(o, default_plans, defaults=DEFAULTS):
-    """(rounds, max_rounds, detect, plans); --detect 0 runs --rounds exactly."""
+    """(rounds, max_rounds, detect, plans, budget hours); --detect 0 runs --rounds exactly."""
     rounds = o.get("rounds") or defaults["rounds"]
     if not rounds.isdigit() or int(rounds) < 1:
         die("--rounds takes a number of at least 1 (got '%s')" % rounds)
@@ -57,6 +57,9 @@ def check_plan(o, default_plans, defaults=DEFAULTS):
         goal = -1
     if goal < 0:
         die("--detect '%s' is not a percentage (0.3 is a third of one per cent; 0 runs --rounds exactly)" % pct)
+    hours = o.get("budget") or defaults["budget"]
+    if not re.fullmatch(r"[0-9]+(\.[0-9]+)?", hours) or not float(hours):
+        die("--budget takes hours above 0, e.g. 8 or 1.5 (got '%s')" % hours)
     top = o.get("max_rounds") or (defaults["max_rounds"] if goal else rounds)
     if not top.isdigit():
         die("--max-rounds takes a number (got '%s')" % top)
@@ -66,7 +69,7 @@ def check_plan(o, default_plans, defaults=DEFAULTS):
     for p in names:
         if not NAME.match(p):
             die("--plan '%s' is not a plan name (letters, digits, '.', '_' and '-')" % p)
-    return int(rounds), int(top), goal, names
+    return int(rounds), int(top), goal, names, float(hours)
 
 
 def duration(seconds):
@@ -100,10 +103,11 @@ def cost_line(reg, homes, device, plan, count, legs):
 
 class Rounds:
     """Counterbalanced rounds (a fixed order puts the machine's drift on one arm) to `rounds`, or with `detect` until
-    `resolved(i)`, up to `top`; a round not every arm finished is lost, and `lost` of them stop it."""
+    `resolved(i)`, up to `top`; a round not every arm finished is lost, and `lost` of them stop it, as does `budget`
+    seconds of `clock` since the first round began: no round starts past it."""
 
-    def __init__(self, rounds, top, detect, lost=DEFAULTS["lost"]):
-        self.rounds, self.top, self.detect, self.lost = rounds, top, detect, lost
+    def __init__(self, rounds, top, detect, budget, clock, lost=DEFAULTS["lost"]):
+        self.rounds, self.top, self.detect, self.budget, self.clock, self.lost = rounds, top, detect, budget, clock, lost
 
     @staticmethod
     def order(i, n=2):
@@ -116,10 +120,15 @@ class Rounds:
         """(outcome, kept, lost); `leg(i, arm, first, plan)` is one leg's success, each plan's arms in turn; `have` the
         rounds recorded already."""
         kept = lost = 0
-        for i in range(1, (self.top if self.detect else self.rounds) + 1):
+        start, last = self.clock.now(), self.top if self.detect else self.rounds
+        for i in range(1, last + 1):
             if i in have:
                 log("round %d/%s -- recorded already" % (i, self.of()))
                 done = True
+            elif self.clock.now() - start >= self.budget:
+                self.stopped = "on budget (%gh) after %d of %d rounds" % (self.budget / 3600, i - 1, last)
+                warn("stopped %s; round %d is not started" % (self.stopped, i))
+                return "budget-at-round-%d" % i, kept, lost
             else:
                 arms = self.order(i, n)
                 done = all([leg(i, a, a == arms[0], p) for p in plans for a in arms])
@@ -149,7 +158,8 @@ class Task:
         self.task = self.o.get("task") or ""
 
     def shape(self, devices, names, slots):
-        return {"devices": devices, "plans": ",".join(names), "rounds": "%d" % self.rounds, "slots": ",".join(dict.fromkeys(slots))}
+        return {"devices": devices, "plans": ",".join(names), "rounds": "%d" % self.rounds, "slots": ",".join(dict.fromkeys(slots)),
+                "budget": "%g" % self.budget}
 
     def new_task(self, home, task, fields, command):
         self.task = task
@@ -218,8 +228,8 @@ class AB(Task):
     def __init__(self, root, reg, clock, ws, names, o, kind, arms, reporter, defaults=DEFAULTS):
         super().__init__(root, reg, clock, o)
         self.ws, self.kind, self.arms, self.reporter = ws, kind, arms, reporter
-        self.rounds, top, detect, self.plans = check_plan(o, names, defaults)
-        self.engine, self.outcome = Rounds(self.rounds, top, detect), ""
+        self.rounds, top, detect, self.plans, self.budget = check_plan(o, names, defaults)
+        self.engine, self.outcome = Rounds(self.rounds, top, detect, self.budget * 3600, clock), ""
         self.system = arms[0].system
         self.labels = tuple(a.label for a in arms)
         m, bench = self.system.tasks()
@@ -315,6 +325,8 @@ class AB(Task):
         have = set.intersection(*[{rnd for rnd, arms in self.byround(p).items() if all(arms.get(x, {}).get("state") == "ok" for x in "ab")}
                                   for p in self.plans])
         self.outcome, kept, lost = self.engine.play(self.round_leg, self.resolved, have, plans=self.plans)
+        for r in (r for p in self.plans if self.outcome.startswith("budget") for r in self.byround(p).get(max(self.byround(p)), {}).values()):
+            record.write_env(os.path.join(r["dir"], "env.json"), {"ab.stopped": self.engine.stopped}, update=True)
         return kept, lost
 
     def round_leg(self, i, a, first, plan):

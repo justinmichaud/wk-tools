@@ -418,7 +418,7 @@ class TestTheEngine(WkTest):
             asked.append(i)
             return resolves_at is not None and i >= resolves_at
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            outcome, kept, lost_n = ab.Rounds(rounds, top, detect).play(leg, resolved, have, plans=plans)
+            outcome, kept, lost_n = ab.Rounds(rounds, top, detect, 8 * 3600, types.SimpleNamespace(now=lambda: 0)).play(leg, resolved, have, plans=plans)
         return outcome, kept, lost_n, legs, asked, err.getvalue()
 
     def test_the_floor_the_resolving_round_the_ceiling_a_restart_and_lost_rounds_each_end_it(self):
@@ -460,7 +460,7 @@ class TestResolvedIsThePrecisionRule(WkTest):
                     (d / "result.json").write_text(json.dumps(speedometer_doc([[v]])))
                     (d / "env.json").write_text(json.dumps({"machine": "rpi5", "plan": "speedometer3", "ab": {"round": str(i), "arm": arm}}))
             a = ab.AB.__new__(ab.AB)
-            a.taskdir, a.ws, a.labels, a.plans, a.engine = str(taskdir), "", ("a", "b"), ["speedometer3"], ab.Rounds(2, 40, 0.3)
+            a.taskdir, a.ws, a.labels, a.plans, a.engine = str(taskdir), "", ("a", "b"), ["speedometer3"], ab.Rounds(2, 40, 0.3, 8 * 3600, None)
             a.system = type("S", (), {"machine_name": "rpi5"})()
             self.assertTrue(a.resolved(6))
             a.plans = ["speedometer3", "jetstream3"]

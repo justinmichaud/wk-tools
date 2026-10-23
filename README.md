@@ -483,7 +483,9 @@ payload pin (the runner commit and the benchmark copy).
 
 Rounds are counterbalanced (AB, BA, ...). `--detect PCT` goes on past
 `--rounds` until the rounds resolve PCT per cent, up to `--max-rounds`: the
-same precision `wk bench precision` reports, asked between rounds. Every leg after a boot discards a
+same precision `wk bench precision` reports, asked between rounds. Once `--budget H` hours (8 by default)
+have passed since the first round, no new round starts: the one running finishes, and the report says it
+stopped on budget after N of M rounds. Every leg after a boot discards a
 settle run. The clock is pinned, not governed. A warmup round measures the
 live process: which GPU driver it mapped, whether the GPU did work, which
 JIT tiers it reached, and a profile; any of those wrong refuses the A/B.
@@ -519,7 +521,7 @@ wk bench precision <run-a> <run-b>      # what the rounds so far resolve
 
 Driven from another machine. The bench install is its own tailnet node, so
 results read back the moment a leg ends. The run stops when every plan
-resolves `--detect` (0.3% by default), or at `--max-rounds`. The Mac is a
+resolves `--detect` (0.3% by default), at `--max-rounds`, or on `--budget`. The Mac is a
 bench machine by default: `WK Bench` is its startup disk, so a plain restart
 enters bench mode, and a finished job holds the install up for
 `WK_MAC_BENCH_HOLD` seconds, then powers it off. Getting the desktop is the

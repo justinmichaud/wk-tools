@@ -97,11 +97,7 @@ class Bench:
             hit = None if os.path.isdir(one) else self.find(task)
             if hit:
                 m, d = hit[0], os.path.join(hit[1], rest)
-            if "/runs/" in d:
-                taskdir = d.rpartition("/runs/")[0]
-                anchor = os.path.dirname(os.path.dirname(taskdir))
-            else:
-                anchor = os.path.dirname(d)
+            anchor = os.path.dirname(os.path.dirname(d.rpartition("/runs/")[0])) if "/runs/" in d else os.path.dirname(d)
             copy = os.path.join(stack.enter_context(tempfile.TemporaryDirectory(prefix="wk-run-")), os.path.basename(d))
             os.makedirs(copy)
             try:
@@ -120,11 +116,9 @@ class Bench:
 
     def report(self, positional, html, text):
         """`html` is True for a bare --html, else the file it names."""
-        if not positional:
-            act.die(REPORT_USAGE)
         if len(positional) == 1:
             return self.task_report(positional[0], html, text)
-        if len(positional) < 2 or not positional[1]:
+        if not positional or not positional[1]:
             act.die(REPORT_USAGE)
         if html is True:
             act.die("the two-run form writes where it is told: --html out.html")
@@ -185,7 +179,6 @@ class Bench:
         return None, self.home(task), False
 
     def find(self, task):
-        """(machine, directory) of the task, or None."""
         d = record.homes_at(self.machine, self.reg.store.records_dir()).get(task)
         if d:
             return self.machine, d

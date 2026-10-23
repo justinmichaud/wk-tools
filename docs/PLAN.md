@@ -1251,7 +1251,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The fleet view is one: the exit code is the worst state found anywhere (a disagreement included), two workstations reaching one box see one state and a disagreement names both views | 2 | `unit status.fleet_is_one` |
 | `wk new <name>` refuses a name alive on any machine of the fleet, naming where it lives, so no name is alive on two | 2 | `unit status.duplicate_name` |
 | `cache/agents`, `cache/ccache` and `skills` are read-only in every container and written only from the host side; each workspace builds into a ccache of its own | 3 | `unit places.shared_mounts_readonly`, `live places.shared_mounts_readonly` |
-| An unattended A/B past its wall-clock budget (`--budget`, 8 hours by default) starts no new round, finishes the one running, and its report says it stopped on budget | 5 | `unit bench.wall_budget` |
+| An unattended A/B past its wall-clock budget (`--budget`, 8 hours by default) starts no new round, finishes the one running, and its report says it stopped on budget | 5 | `unit bench.wall_budget` (landed 2026-10-22) |
 | `wk status <ws> --log -f` follows a live build on any place | 2 | `live logs.follow[<place>]` |
 | Bare `wk stop` then `wk start` returns every workspace to running; `--keep-vm` leaves the podman machine up | 2 | `live start.roundtrip` (one workspace's stop and start is `tests.test_lifecycle.TestContainerLifecycle`) |
 | `wk doctor` on a freshly set-up machine reports ok, and each printed fix clears its line when run | 2 | `live doctor.fix_clears_line` |
@@ -1380,5 +1380,4 @@ Decisions are asked as questions, and their answers are recorded under "Decision
   seen to crash the WebKitGTK UI process, lib/wk/profile.py)?
 - Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
   wk never blesses; the way back is the person's power-button pick. The default is not yet set (`wk boot mbp
-  --status`, 2026-10-22 08:10 MST: `firmware_default=the host install`); the Mac rows run once it is. Detection under 0.1% and the 8-hour budget stay rows (`live ab.resolution[mbp]`,
-  `unit bench.wall_budget`).
+  --status`, 2026-10-22 08:10 MST: `firmware_default=the host install`); the Mac rows run once it is. Detection under 0.1% stays a row (`live ab.resolution[mbp]`).

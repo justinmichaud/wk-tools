@@ -389,7 +389,3 @@ class TestCoresAxisWarning(WkTest):
                 self.assertEqual("different core pins" in cp.stdout, bool(warns), cp.stdout)
                 for word in warns or ():
                     self.assertIn(word, cp.stdout)
-
-
-if __name__ == "__main__":
-    unittest.main()

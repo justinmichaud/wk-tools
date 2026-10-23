@@ -622,7 +622,3 @@ class TestAnUnmeasuredPreflightIsUnknownNotFailure(unittest.TestCase):
             with self.subTest(word), contextlib.redirect_stderr(io.StringIO()) as e:
                 pipeline.check(ok, "x", "d")
             self.assertTrue(e.getvalue().lstrip().startswith(word))
-
-
-if __name__ == "__main__":
-    unittest.main()

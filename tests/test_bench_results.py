@@ -316,11 +316,6 @@ class PlantedTest(ExportTest):
         os.symlink(str(driver or self.key), str(at))
         return at
 
-    def assertNothingHolds(self, *where):
-        for p in where:
-            if p.exists():
-                self.assertNotIn(SECRET, p.read_bytes(), p)
-
 
 class TestAPlantedLinkIsRefused(PlantedTest):
     def test_export_refuses_a_link_among_the_runs_naming_it(self):
