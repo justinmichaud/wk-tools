@@ -1338,6 +1338,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The podman machine's push service pushes with the deploy keys `./setup` and `wk key deploy` copied into it, and its proxy sends what is not a person's shell to the injector's reading socket | 3 | `live repo_workspace_live.ToolsWorkspaceLive.test_the_push_service_serves_the_tools_repository_to_a_person_to_wks_own_run_and_to_an_agent` (the keys), `live repo_workspace_live.ToolsWorkspaceLive.test_the_proxy_gives_a_person_the_write_socket_and_wks_own_run_the_reading_one` |
 | A macOS guest's `git push` reaches the Mac's push service through the guest's forward and its own listener, and the Mac proxy sends a guest with an agent to the injector's reading socket by its address | 5 | `live push.guest_forward` |
 | Speedometer 3 under MiniBrowser runs without its `wakeLock` error: an upstream WebKit patch, landed last, after every other owed row | end | `live bench.speedometer3_wakelock[mbp]` |
+| The podman machine boots an image the tree pins, on a kernel past the timer-migration soft lockup measured 2026-10-22 (Fedora CoreOS 41.20250215.3.0, kernel 6.12.13: `soft lockup - CPU#8 stuck` in `tmigr_handle_remote_cpu` on an idle vCPU from 17:54, 106 times, no OOM, sshd silent until a hard stop) | 2 | `live setup.vm_image_pinned` |
+| `wk stop` and `wk start` act on a podman machine that is stopped or not answering: `./setup`'s machine stage ran before vmtools started the machine (exit 125), and `wk stop` waited on that stage's ssh into the hung VM (measured 2026-10-22) | 2 | `unit setup.machine_stage_order`, `unit stop.hung_vm` |
 | A `gtk-release` build in a container on the Mac's 20 GB podman VM finishes under the default sizing: WebCore's unified and derived sources at -O3 -g hold 14.3 GB anonymous at four jobs (measured 2026-10-21 from the cgroup's `memory.stat`; three runs killed at 3072 MB per job), so a CMake web port is sized at 4608 MB per job; the watchdog reads `anon`+`shmem`, since `memory.current` carried 2.2 GB of page cache and slab at that peak; and the OOM advice it prints changes the next run's job count from a macOS host | 3 | `live build.preset[gtk-release]` |
 | `wk run --profile --browser --process ui\|web\|network\|gpu` attaches samply to a live MiniBrowser in a workspace with a display, heaptrack and massif reach `--browser` on the CMake ports, and the fixed-wait attach holds on a slow page | 3 | `live run.browser_profile` |
 | `wk run --lldb` in a fresh workspace symbolicates glibc, Mesa and GTK frames, and `gtk-debug` runs under lldb | 3 | `live run.debug_symbols` |
@@ -1371,6 +1373,9 @@ Decisions are asked as questions, and their answers are recorded under "Decision
 - What a side's spread growing means: the report pools every subtest's values into one sd per arm and names only B
   (measured: identical noise, one of two subtests 30% faster, B's sd 42.8 against A's 26.7 is flagged). Is it each
   subtest's relative sd, or the suite row's run-to-run sd, and is a noisier A named too?
+- The podman machine's image is not pinned in the tree; the fix for the measured kernel lockup is a pinned, newer
+  image and a machine re-created from it, which removes every container and image inside the VM (workspaces are
+  re-made from their store dirs). When, and which Fedora CoreOS stream?
 - Is the JIT-dumped samply run the warmup round, labelled no measurement, or a measured leg (`JSC_useJITDump=1` has been
   seen to crash the WebKitGTK UI process, lib/wk/profile.py)?
 - Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
