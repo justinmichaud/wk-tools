@@ -203,8 +203,7 @@ class TestCcacheIsBlindToTheJobCount(unittest.TestCase):
                 self.assertFalse({k for k in low if low[k] != high[k]} - self.MOVES)
 
     def test_a_jsc_config_asks_for_ccache_and_the_other_ports_do_not(self):
-        for name in JSC_PRESETS:
-            self.assertEqual(env_of(preset(name)).get("WK_USE_CCACHE"), "YES")
+        self.assertEqual({env_of(preset(n)).get("WK_USE_CCACHE") for n in JSC_PRESETS}, {"YES"})
         self.assertNotIn("WK_USE_CCACHE", env_of(preset("gtk-release")))
 
 
@@ -212,7 +211,8 @@ class TestMbPerJob(unittest.TestCase):
     def test_jsconly_is_charged_less_unless_WK_MB_PER_JOB_names_a_figure(self):
         self.assertEqual([presets.mb_per_job(c, {}) for c in (preset("mac-release", "macos", "vm"), preset("gtk-debug"), preset("jsc-release"))],
                          [3072, 4608, 1536])
-        self.assertEqual(presets.mb_per_job(preset("mac-release", "macos", "vm"), {"WK_MB_PER_JOB": "999"}), 999)
+        self.assertEqual((presets.mb_per_job(preset("mac-release", "macos", "vm"), {"WK_MB_PER_JOB": "999"}),
+                          env_of(preset("gtk-debug"))["WEBKIT_NINJA_LINK_MAX"]), (999, "1"))
 
 
 class TestCompilerAndMemoryOverrides(unittest.TestCase):

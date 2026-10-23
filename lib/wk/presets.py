@@ -235,7 +235,6 @@ def mb_per_job(preset, env):
 
 
 def build_env(preset, src, jobs, nice, arch, ccache_dir, env, extra_cmake="", extra_env=(), machine_build_args=""):
-    """What build/build-in-workspace.sh runs under, narrowest last: `env` applies left to right."""
     cmake = [preset.cmake, arch_cmake(arch, preset.port), machine_cmake(env), machine_cmake(env, preset), extra_cmake]
     preset_args = build_args(env, preset)
     args = "%s %s%s%s" % (preset.port, preset.args, " " + machine_build_args if machine_build_args else "", " " + preset_args if preset_args else "")
@@ -244,7 +243,8 @@ def build_env(preset, src, jobs, nice, arch, ccache_dir, env, extra_cmake="", ex
            "WK_JOBS=%s" % jobs, "WK_NICE=%s" % nice, "WK_SRC=" + src, "WK_BUILDSYS=" + preset.buildsys,
            "WK_BUILD_SCRIPT=" + preset.script, "WK_BUILD_ARGS=" + args,
            "WK_BUILD_CMAKE=" + merge_cxx_flags(" ".join(c for c in cmake if c)),
-           "WK_BUILD_DIR=" + preset.build_dir(src), "WK_MB_PER_JOB=%d" % mb_per_job(preset, env)]
+           "WK_BUILD_DIR=" + preset.build_dir(src), "WK_MB_PER_JOB=%d" % mb_per_job(preset, env),
+           "WEBKIT_NINJA_LINK_MAX=1"]   # a job is budgeted as a compile; two gtk-debug links measured 5.5 + 4.2 GB at -j3
     if preset.cc:
         out += ["CC=" + preset.cc, "CXX=" + preset.cxx]
     if preset.port == "--jsc-only":
