@@ -17,10 +17,10 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes import Fake, FakeClock, FakeDriver, FakeRegistry
-from tests.support import BLIND_FLEET, REPO, WkTest, as_dispatched, fake_workspace, load_cmd, requires_container_place, run
+from tests.support import BLIND_FLEET, REPO, WkTest, as_dispatched, clean_env, fake_workspace, load_cmd, requires_container_place, run
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import dispatch, fleet, git, places, status, statusview  # noqa: E402
+from wk import dispatch, fleet, git, places, record, status, statusview  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Local  # noqa: E402
 from wk.record import Records  # noqa: E402
@@ -44,10 +44,7 @@ def ws_rec(machine, name, state="running", ws="present", **extra):
 
 class TestBump(unittest.TestCase):
     def test_the_worst_wins_and_garbage_reads_4(self):
-        w = 0
-        for c in ("2", 1, "0"):
-            w = status.bump(w, c)
-        self.assertEqual(w, 2)
+        self.assertEqual(status.bump(status.bump(status.bump(0, "2"), 1), "0"), 2)
         for c in ("", "abc", "7", "-1", "255"):
             self.assertEqual(status.bump(0, c), 4, c)
 
@@ -194,13 +191,6 @@ class TestRenderer(unittest.TestCase):
         for want in ("[x] sync", "[>] compile", "holds: ws:ws", "kill: wk build ws --kill", "log:  /l"):
             self.assertIn(want, out)
 
-    def test_json_is_the_merged_document_and_two_views_that_disagree_are_one_row_and_4(self):
-        recs = [machine_rec("box"), ws_rec("box", "ws"), ws_rec("box", "ws", state="absent", ws="absent"), {"kind": "exit", "code": 2}]
-        doc = statusview.merge(recs)
-        self.assertEqual((doc["exit"], len(doc["machines"][0]["methods"][0]["workspaces"])), (4, 1))
-        self.assertIn("disagree (running vs absent)", render(recs))
-        self.assertEqual(statusview.merge(recs[:2] + recs[3:])["exit"], 2)
-
     def test_a_machine_is_drawn_when_its_last_job_flushes_and_an_unreadable_line_is_skipped(self):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
@@ -345,9 +335,7 @@ class _Tap:
     """The renderer's output, each line stamped with how many records it had consumed when the line appeared."""
 
     def __init__(self, records):
-        self.records = records
-        self.consumed = 0
-        self.lines = []
+        self.records, self.consumed, self.lines = records, 0, []
 
     def feed(self):
         for r in self.records:
@@ -408,13 +396,10 @@ class TestABlockWaitsForEveryPlannedJob(unittest.TestCase):
 
     def test_the_first_job_flushing_empty_does_not_draw_the_machine(self):
         tap, err = _render([
-            _plan(("container", "host"), ("vm", "host")),
-            dict(kind="machine", name="host", self=True),
-            dict(kind="flush", job="container"),
+            _plan(("container", "host"), ("vm", "host")), dict(kind="machine", name="host", self=True), dict(kind="flush", job="container"),
             dict(kind="machine", name="host", self=True),
             dict(kind="workspace", machine="host", method="macOS guest", name="ws-v", state="stopped", ws="present"),
-            dict(kind="flush", job="vm"),
-            dict(kind="exit", code=0)])
+            dict(kind="flush", job="vm"), dict(kind="exit", code=0)])
         out = "\n".join(l for _, l in tap.lines)
         self.assertEqual(err, "")
         self.assertEqual(len([l for l in out.splitlines() if l.startswith("host ")]), 1, out)
@@ -424,12 +409,9 @@ class TestABlockWaitsForEveryPlannedJob(unittest.TestCase):
 
     def test_a_flush_for_a_job_outside_the_plan_is_reported_and_draws_nothing(self):
         tap, err = _render([
-            _plan(("container", "host")),
-            dict(kind="machine", name="host", self=True),
-            dict(kind="flush", job="vm"),
+            _plan(("container", "host")), dict(kind="machine", name="host", self=True), dict(kind="flush", job="vm"),
             dict(kind="workspace", machine="host", method="container", name="ws-c", state="present", ws="present"),
-            dict(kind="flush", job="container"),
-            dict(kind="exit", code=0)])
+            dict(kind="flush", job="container"), dict(kind="exit", code=0)])
         out = "\n".join(l for _, l in tap.lines)
         self.assertIn("'vm' ended without being in the plan", err)
         self.assertIn("ws-c", out)
@@ -487,27 +469,47 @@ class TestColourDecision(unittest.TestCase):
         self.assertNotIn(ESC, _render_coloured(False))
 
 
-class TestStatusTextHasNoEscBytesThroughAPipe(unittest.TestCase):
-    def test_wk_status_asks_its_own_stdout(self):
-        class Walk:
-            worst = 0
-
-            def __init__(self, *a, **kw):
-                pass
-
-            def records(self, markers=True):
-                return iter([{"kind": "machine", "name": "m"}, {"kind": "workspace", "machine": "m", "method": "container",
-                                                                "name": "demo", "state": "running"}])
-        out = io.StringIO()
-        with mock.patch.object(CMD, "Walk", Walk), mock.patch.dict(os.environ, {"WK_NAME": "demo"}), contextlib.redirect_stdout(out):
-            self.assertEqual(0, CMD.main(as_dispatched("status", []), None))
-        self.assertIn("demo", out.getvalue())
-        self.assertNotIn(ESC, out.getvalue())
-
-
 def fleet_registry(drivers):
     by_name = {d.name: d for d in drivers}
     return FakeRegistry({}, Fake(), lambda name, env: by_name[name], names=list(by_name))
+
+
+def answering(name, rc, *rows):
+    d = FakeDriver(name, rc=rc, out="".join(json.dumps(r) + "\n" for r in [machine_rec(name), *rows, {"kind": "exit", "code": rc}]))
+    d.host = name + ".tailnet"
+    return d
+
+
+def wk_status(drivers, *argv, host="here"):
+    """`wk status <argv>` through the dispatcher into a pipe, typed on workstation `host` of a fleet of `drivers`: (exit, output)."""
+    by, out = {d.name: d for d in drivers}, io.StringIO()
+    with mock.patch.dict(os.environ, clean_env({"WK_IN_VM": "1"}), clear=True), \
+            mock.patch.object(dispatch, "_registry", None), mock.patch.object(record, "host_name", return_value=host), \
+            mock.patch.object(places, "Registry", lambda *a, **kw: FakeRegistry(dict(os.environ), Fake(), lambda n, e: by[n], names=list(by))), \
+            contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+        try:
+            dispatch.main(["status", *argv])
+        except Refused as e:
+            return e.status, out.getvalue()
+
+
+class TestTheFleetViewIsOne(unittest.TestCase):
+    """`unit status.fleet_is_one`, less the clause a decision is owed for.
+    TODO: a name alive on two machines is a conflict `--on` disambiguates."""
+
+    def test_the_exit_is_the_worst_state_found_anywhere_in_every_mode(self):
+        fleet = [answering("alpha", 1, ws_rec("alpha", "x", state="failed")), answering("beta", 3, ws_rec("beta", "y"))]
+        torn = fleet + [answering("gamma", 0, ws_rec("gamma", "z"), ws_rec("gamma", "z", state="absent", ws="absent"))]
+        for argv in ([], ["--json"], ["--records"], ["--wait"]):
+            self.assertEqual((wk_status(fleet, *argv)[0], wk_status(torn, *argv)[0]), (3, 4), argv)
+
+    def test_two_workstations_reaching_one_box_see_one_state_and_a_disagreement_names_both_views(self):
+        box = answering("box", 2, ws_rec("box", "ws"))
+        left, right = (json.loads(wk_status([box], "--json", host=h)[1]) for h in ("left", "right"))
+        self.assertEqual((left, {(a, e["WK_ROW_LABEL"]) for a, e, _ in box.asked}), (right, {(("status", "--records"), "box")}))
+        rc, out = wk_status([answering("box", 2, ws_rec("box", "ws"), ws_rec("box", "ws", state="absent", ws="absent"))])
+        self.assertEqual((rc, re.findall(r"disagree \(\w+ vs \w+\)", out)), (4, ["disagree (running vs absent)"]))
+        self.assertNotIn(ESC, out, "a pipe is no terminal, so the text has no colour")
 
 
 class TestEach(unittest.TestCase):

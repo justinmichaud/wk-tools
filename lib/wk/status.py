@@ -155,16 +155,16 @@ class Walk:
                 except LookupError:
                     plan.append({"job": t, "machine": self.this_machine})
             yield {"kind": "plan", "jobs": plan}
-        worst = 0
+        worst, seen = 0, []
         with ThreadPoolExecutor(max_workers=max(1, len(jobs))) as pool:
             job_of = {pool.submit(fn): job for job, fn in jobs}
             for f in as_completed(job_of) if markers else job_of:
                 recs, w = f.result()
-                worst = bump(worst, w)
+                worst, seen = bump(worst, w), seen + recs
                 yield from recs
                 if markers:
                     yield {"kind": "flush", "job": job_of[f]}
-        self.worst = worst
+        self.worst = worst = bump(worst, statusview.merge(seen)["exit"])
         yield {"kind": "exit", "code": worst}
 
     def worst_only(self):
