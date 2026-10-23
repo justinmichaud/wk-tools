@@ -98,7 +98,7 @@ _report_losses() {
     fi
     podman machine ssh "$WK_MACHINE" -- '
         printf "workspaces  %s\n" "$(podman ps -a --filter name=^wk- --format "{{.Names}}" 2>/dev/null | sed "s/^wk-//" | tr "\n" " ")"
-        for d in base ws cache skills bench; do
+        for d in base ws cache bench; do
             printf "%-11s %s\n" "$d" "$(du -sh /var/lib/wk/$d 2>/dev/null | cut -f1)"
         done
         printf "bench runs  %s\n" "$(ls -1 /var/lib/wk/bench 2>/dev/null | wc -l | tr -d " ")"

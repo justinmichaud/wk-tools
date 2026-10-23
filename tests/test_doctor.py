@@ -308,13 +308,13 @@ class TestProbeStoreMirror(unittest.TestCase):
         self.assertIn("base=no", cp.stdout.splitlines())
 
 
-FULL_STORE_BLOB = ("mirror=ok\nbase=ok\nskills=ok\nproxy=ok\npihosts=ok\nbroker=ok\n"
+FULL_STORE_BLOB = ("mirror=ok\nbase=ok\nproxy=ok\npihosts=ok\nbroker=ok\n"
                    "git.name=%s\ngit.email=%s\ngit.fsmonitor=true\ngit.manyfiles=true\n" % (WANT["name"], WANT["email"]))
 
 
 class TestReportStore(unittest.TestCase):
     def rows(self, blob, gitremedy):
-        return doctor.report_store(blob, gitremedy, True, False, WANT)
+        return doctor.report_store(blob, gitremedy, True, WANT)
 
     def test_a_remedy_reports_the_container_machine(self):
         text = text_of(self.rows(FULL_STORE_BLOB, "podman machine ssh wk -- git config ..."))

@@ -650,15 +650,14 @@ class TestContainerWrite(DriversTest):
         for pair in (("--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.t.store.snapshot_tree(self.base), ws_dir, ws_dir)),
                      ("--volume", "%s:/opt/wk-tools:ro" % self.t.tools_src()), ("--memory", "19749m"), ("--cpus", "7"),
                      ("--volume", "%s:/secrets:ro" % self.t.store.keyring_view_dir("container")), ("--env", "WK_WORKSPACE=new"),
-                     ("--env", "NO_PROXY=localhost,127.0.0.1,::1"), ("--device", "/dev/dri"),
-                     ("--volume", "%s/cache/agents:/cache/agents" % self.t.store.store_dir())):
+                     ("--env", "NO_PROXY=localhost,127.0.0.1,::1"), ("--device", "/dev/dri")):
             self.assertIn(pair, pairs)
         head = argv[argv.index("--network"):argv.index("--additional-flags")]
         self.assertEqual(head, ("--network", "none", "--isolated", "--name", "wk-new", "--shell", "/bin/bash", "--user", u, "--group", u,
                                 "--home", os.path.join(ws_dir, "home")))
         self.assertEqual(argv[0], "env")
         self.assertIn("WKDEV_SDK=%s" % self.t.sdk(), argv)
-        for d in ("changes", "overlay-work", "home", "build"):
+        for d in ("changes", "overlay-work", "home", "build", "ccache"):
             self.assertIn(os.path.join(ws_dir, d), self.fake.dirs)
         self.assertEqual(self.fake.files[os.path.join(ws_dir, "arch")], "native\n")
         install = next(e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "install")
@@ -666,6 +665,17 @@ class TestContainerWrite(DriversTest):
         self.assertEqual(self.fake.effects[-1], ("write", os.path.join(ws_dir, "base-id")))
         self.assertEqual(self.fake.files[os.path.join(ws_dir, "base-id")], "main-1\n")
         self.assertEqual(self.fake.streamed, [argv], "`unit machine.streams_long_effects`: wkdev-create streams to the task log")
+
+    def test_a_container_writes_nothing_another_workspace_reads(self):
+        """`unit places.shared_mounts_readonly`: the agents cache is mounted read-only and filled from the store's side, no
+        shared ccache or skills is mounted, and the ccache is in the workspace's own directory."""
+        self.stderr_of(lambda: self.t.create("new", self.base))
+        store, pairs = self.t.store.store_dir(), self.flag_pairs(self.wkdev_create())
+        dests = [v.split(":")[1:] for k, v in pairs if k == "--volume"]
+        self.assertEqual(([["/cache/agents", "ro"]], []), ([d for d in dests if "agents" in d[0]], [d for d in dests if d[0] in ("/ccache", "/skills")]))
+        for pair in (("--env", "CCACHE_DIR=/var/lib/wk/ws/new/ccache"), ("--volume", "%s:/var/lib/wk/ws/new" % self.t.store.ws_dir("new"))):
+            self.assertIn(pair, pairs)
+        self.assertEqual((self.t.here.act_run, os.path.join(store, "cache", "agents")), self.t.agents_fill("new"))
 
     def test_an_armhf_workspace_names_the_arm_image_and_gets_no_gpu(self):
         self.stderr_of(lambda: self.t.create("new", self.base, "armhf"))
@@ -795,16 +805,10 @@ class TestContainerWrite(DriversTest):
         with mock.patch.object(secrets.Secrets, "store_publish") as sp:
             self.t.store_init()
             sp.assert_called_once_with()
-        for d in ("git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/buildroot/ccache", "cache/bench", "cache/agents", "skills"):
+        for d in ("git", "base", "ws", "cache/yocto/downloads", "cache/buildroot/ccache", "cache/bench", "cache/agents"):
             self.assertIn(os.path.join(root, d), self.fake.dirs)
-        conf = os.path.join(root, "cache", "ccache", "ccache.conf")
-        self.assertEqual(self.fake.files[conf], "max_size = 40G\n")
         chmods = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "chmod"]
         self.assertEqual(chmods, [("chmod", "0700", self.t.store.keyring_dir())])
-        self.fake.effects = []
-        with mock.patch.object(secrets.Secrets, "store_publish"):
-            self.t.store_init()
-        self.assertNotIn(("write", conf), self.fake.effects)
         with mock.patch.object(secrets.Secrets, "store_publish", side_effect=Refused(1)):
             with self.assertRaises(Refused):
                 self.t.store_init()
@@ -1166,7 +1170,7 @@ class TestBridges(DriversTest):
 class TestBuildSide(RemoteTest):
     def test_the_ccache_and_the_size_are_the_machines_own(self):
         self.assertEqual(self.t.ccache_dir("a"), "/home/u/wk/cache/ccache")
-        self.assertEqual(self.reg.load("container").ccache_dir("a"), "/ccache")
+        self.assertEqual(self.reg.load("container").ccache_dir("a"), "/var/lib/wk/ws/a/ccache")
         self.assertEqual(self.t.build_size("a"), (8, 20000, 0))
 
     def test_the_build_is_serialised_niced_and_teed_on_the_far_side(self):

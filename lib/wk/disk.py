@@ -72,7 +72,7 @@ def probe_store(store):
     rows.append((kb(store.snapshots_dir()), "snapshots", "%d of them; unreferenced ones go with wk gc" % bases))
     for ws in store.workspaces():
         rows.append((kb(store.ws_dir(ws)), "workspace %s" % ws, "wk rm %s" % ws))
-    for d in ("cache/ccache", "cache/bench", "cache/images", "cache/yocto", "cache/buildroot", "cache/agents", "skills", "tools"):
+    for d in ("cache/bench", "cache/images", "cache/yocto", "cache/buildroot", "cache/agents", "tools"):
         p = os.path.join(store.store_dir(), d)
         if os.path.isdir(p):
             rows.append((kb(p), d, ""))
@@ -95,9 +95,9 @@ def workspace_report(reg):
     for d in (os.path.join(HOME, "Library/Developer/Xcode/DerivedData"), os.path.join(HOME, "Library/Caches/clang")):
         if os.path.isdir(d):
             rep.row(kb(d), os.path.basename(d), "compilation cache")
-    for d in ("/ccache", os.path.join(HOME, ".cache", "ccache")):
+    for d in ("/var/lib/wk/ws/%s/ccache" % marker.get("name", ""), os.path.join(HOME, ".cache", "ccache")):
         if os.path.isdir(d):
-            rep.note(kb(d), "ccache", "shared, and the host's -- 'wk gc' trims it")
+            rep.row(kb(d), "ccache")
     rep.section("total")
     sys.stderr.write("  %7s  %s\n" % (human_bytes(rep.total * 1024), "this workspace"))
     if rep.noted:

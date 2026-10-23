@@ -19,7 +19,6 @@
         - "{{ wk_root }}"
         - "{{ wk_root }}/base"
         - "{{ wk_root }}/ws"
-        - "{{ wk_root }}/cache/ccache"
         - "{{ wk_root }}/cache/yocto/downloads"
         - "{{ wk_root }}/cache/yocto/sstate"
         - "{{ wk_root }}/cache/buildroot/dl"
@@ -74,9 +73,8 @@
       register: writable_mounts
 
     - name: Hold every other host mount read-only
-      # TODO: upstream -- podman 5.4 + applehv drops the :ro of `--volume src:tgt:ro`
-      # from the unit it generates, so the guest mounts it rw. `ro` is prefixed to
-      # Options, not substituted: those carry the SELinux context virtiofs needs.
+      # TODO: upstream -- podman 5.4 + applehv drops the :ro of `--volume src:tgt:ro`, so the guest mounts it rw.
+      # `ro` is prefixed to Options, not substituted: those carry the SELinux context virtiofs needs.
       ansible.builtin.lineinfile:
         path: "{{ item.path }}"
         regexp: '^Options=(?!ro,)(.+)$'

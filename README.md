@@ -591,9 +591,12 @@ push and a write refused.
 
 `wk new` installs both agents into the workspace (a macOS guest gets them at
 its first `wk start`), and `wk ai` starts the session, nothing more; a
-workspace made without an agent is refused, naming `wk rm` and `wk new`. pi needs node 22.19 or newer where it is made.
-pi's `~/.pi/agent/models.json` links the one its machine keeps in the agents cache (the store's
-`cache/agents`, a container's `/cache/agents`; `~/.cache/wk/agents` on a build box or in a guest), which
+workspace made without an agent is refused, naming `wk rm` and `wk new`. pi needs node 22.19 or newer where it is made,
+and is installed from registry.npmjs.org through the workspace's own npm cache.
+Claude Code is copied from the agents cache (the store's `cache/agents`, which a
+container mounts read-only at `/cache/agents`; `~/.cache/wk/agents` on a build box or in a guest),
+which only the machine holding it writes: it downloads each Claude Code version once.
+pi's `~/.pi/agent/models.json` links the one that machine keeps there, which
 each `wk new` there rewrites with the models the stored LiteLLM key may call, and removes without that key.
 
 A Claude session on a terminal starts with Remote Control on, named after the
@@ -823,7 +826,7 @@ or mount its root read-only and read `/var/log` and `tailscaled.log`.
 Every `WK_*` variable is read with a default; each moves one decision.
 
 **What to build** — `WK_CC`, `WK_CXX`, `WK_EXTRA_CMAKE`, `WK_BUILD_CMAKE`,
-`WK_EXTRA_ENV`, `WK_CCACHE_DIR`, `WK_CCACHE_MAXSIZE`, `WK_DRIVER`,
+`WK_EXTRA_ENV`, `WK_CCACHE_MAXSIZE`, `WK_DRIVER`,
 `WK_REMOTE_MAX_JOBS`, `WK_MB_PER_JOB`, `WK_PGO_COLLECT_TIMEOUT`.
 
 **How much of the machine** — `WK_MAX_JOBS`, `WK_LOAD`, `WK_AVAIL_MB`,
@@ -837,7 +840,11 @@ Every `WK_*` variable is read with a default; each moves one decision.
 What lives there has six parts, each with one name in code, help and prose
 (`lib/wk/store.py`):
 
-- the **store**, a place's data: `ws/`, `base/`, `cache/` under `$WK_STORE`;
+- the **store**, a place's data: `ws/`, `base/`, `cache/` under `$WK_STORE`.
+  A container writes only its own `ws/<name>`, which holds its ccache
+  (`WK_CCACHE_MAXSIZE`, 40G by default, each) and goes with `wk rm`; it reads
+  `cache/agents` read-only and its skills from the read-only wk-tools tree, so
+  nothing one workspace writes reaches another's agent, compiler cache or skills;
 - the **records**, what outlives a command: `task/`, `log/` and the locks
   (`~/.local/state/wk/locks`, or `WK_LOCK_DIR`);
 - the **mirror**, `git/WebKit.git`;

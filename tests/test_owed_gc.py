@@ -242,10 +242,10 @@ def _dangling_volumes(w):
     return lambda: not w.volumes
 
 
-def _ccache(w):
-    w.mkdirs(os.path.join(w.store_dir, "cache", "ccache"))
-    w.answer(["ccache", "--version"], out="ccache 4\n")
-    return lambda: any(a[-1] == "--max-size=40G" for a in w.acts()) and any(a[-1] == "--cleanup" for a in w.acts())
+def _retired(w):
+    trees = [os.path.join(w.store_dir, d) for d in ("cache/ccache", "skills")]
+    w.dirs.update(trees)
+    return lambda: not [d for d in trees if w.exists(d)]
 
 
 def _tart_cache(w):
@@ -327,7 +327,7 @@ KINDS = {
     "dangling-images": (_dangling_images, ""),
     "container-image": (_container_image, "--purge-images"),
     "dangling-volumes": (_dangling_volumes, ""),
-    "ccache": (_ccache, ""),
+    "retired": (_retired, ""),
     "tart-cache": (_tart_cache, ""),
     "guest-base": (_guest_base, "wk sysimage build macos-guest-base --rm"),
     "staged-unfinished": (lambda w: _staged(w, "20260103"), ""),
@@ -407,6 +407,10 @@ class TestAMeasurementIsNeverRubble(GcTest):
 
 
 class TestWhatAPlainRunKeeps(GcTest):
+    def test_the_shared_ccache_and_skills_are_kept_while_a_container_mounts_them(self):
+        gone, _ = _retired(self.w), self.w.containers.add("old")
+        self.assertEqual((True, False), ("kept -- wk-old" in self.run_gc()[1], gone()))
+
     def test_a_workspace_a_live_selftest_made_is_kept(self):
         _selftest(self.w)
         Lock(self.w.store, self.w, self.w.clock).hold("selftest")

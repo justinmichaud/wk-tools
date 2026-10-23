@@ -66,8 +66,8 @@ class Ai:
         return self.driver.exec(self.name, argv)
 
     def agent_bin(self):
-        lines = self.exec(agents.find_argv(self.root, self.agent)).out.replace("\r", "").splitlines()
-        if not lines and self.agent == "pi" and self.driver.kind == "remote" and not self.exec(agents.node_argv(self.root)).ok:
+        lines = self.exec(agents.verb_argv(self.root, "find", self.agent)).out.replace("\r", "").splitlines()
+        if not lines and self.agent == "pi" and self.driver.kind == "remote" and not self.exec(agents.verb_argv(self.root, "node")).ok:
             die("there is no pi in '%s': it needs node >= 22.19 and npm, and %s has none.\n    Install one:  wk machine setup %s"
                 % (self.name, self.driver.name, self.driver.name))
         if not lines:

@@ -87,11 +87,9 @@ fi
 
 install -d "$HOME/.claude"
 
-for f in settings.json hooks CLAUDE.md; do    # read-only, from the synced tree
+for f in settings.json hooks CLAUDE.md skills; do    # read-only, from the synced tree
     ln -sfn "$WK_TOOLS/claude/$f" "$HOME/.claude/$f"
 done
-
-ln -sfn /skills "$HOME/.claude/skills"  # one mutable dir, shared by every ws
 
 _install_profilers() {                  # wrapped: not load-bearing
     if sudo apt-get update -qq >/dev/null 2>&1 \

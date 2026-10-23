@@ -79,7 +79,7 @@ class Gc:
         rows = store_rubble(self.store, self.here, self.host_half)
         rows += rubble_of_locks(self.store, self.here)
         if self.store_half:
-            rows += self.image_rows() + self.ccache_rows()
+            rows += self.image_rows() + self.retired_rows()
         rows += seed.rubble(self.here, lock, os.path.join(self.store.cache_dir(), "bench"))
         rows += self.runner_rows() + self.build_output_rows()
         rows += workspace.rubble(listed, stored, self.here, self.root, pid is not None and self.here.alive(pid), self.clock)
@@ -146,15 +146,17 @@ class Gc:
                                take=lambda: self.here.act_run(["podman", "volume", "prune", "-f"]).ok))
         return rows
 
-    def ccache_rows(self):
-        d = os.path.join(self.store.store_dir(), "cache", "ccache")
-        if not self.here.isdir(d) or not self.here.run(["ccache", "--version"]).ok:
-            return []
-        size = self.container().ccache_maxsize()
-        argv = ["env", "CCACHE_DIR=" + d, "ccache"]
-        return [rb.row("ccache", "ccache, down to %s" % size, rb.du_kb(self.here, d),
-                       take=lambda: all([self.here.act_run(argv + ["--max-size=" + size]).ok,
-                                         self.here.act_run(argv + ["--cleanup"]).ok]))]
+    def retired_rows(self):
+        """The shared ccache and skills, which only a container made before each had a ccache of its own mounts (at `dest`)."""
+        rows = []
+        for sub, dest in (("cache/ccache", "/ccache"), ("skills", "/skills")):
+            p = os.path.join(self.store.store_dir(), sub)
+            if self.here.isdir(p):
+                r = self.here.run(["podman", "ps", "-a", "--filter", "volume=" + dest, "--format", "{{.Names}}"])
+                on = " ".join(r.out.split()) if r.ok else "containers 'podman ps' did not name"
+                rows.append(rb.row("retired", "%s, which no workspace made now mounts" % p, rb.du_kb(self.here, p), take=rb.remover(self.here, p),
+                                   why="kept -- %s mount it: 'wk rm' and 'wk new' remake each without it" % on if on else ""))
+        return rows
 
     def runner_rows(self):
         """Benchmark runner trees exported per commit: the newest stays, the rest are re-exported on demand."""

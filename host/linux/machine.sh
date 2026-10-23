@@ -101,17 +101,6 @@ fi
 
 unset _uid _gid _user _deleg _want_groups g _missing_keys _remote _repo _alias
 
-if [ -n "$(ls -A "$WK_STORE/skills" 2>/dev/null)" ]; then
-    unchanged "shared skills present (not overwritten)"
-    diff -rq "$WK_ROOT/claude/skills" "$WK_STORE/skills" >/dev/null 2>&1 \
-        || log "note: shared skills differ from the repo: diff -r $WK_ROOT/claude/skills $WK_STORE/skills"
-elif [ -n "${WK_DRY_RUN:-}" ]; then
-    changed "would seed $WK_STORE/skills from $WK_ROOT/claude/skills"
-else
-    cp -a "$WK_ROOT/claude/skills/." "$WK_STORE/skills/"
-    changed "seeded $WK_STORE/skills"
-fi
-
 # One deploy key per repository: GitHub refuses the same key on a second one.
 _missing_keys=""
 _keys=$(wk_py wk.secrets push-keys)

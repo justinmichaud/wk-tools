@@ -425,9 +425,13 @@ class Driver:
 
     agents_cache = agents.HOME_CACHE
 
+    def agents_fill(self, ws):
+        """What writes the agents cache, and its path there: here, the workspace itself."""
+        return lambda argv: self.act_exec(ws, argv), self.agents_cache
+
     def install_agents(self, ws):
         agents.install(self.root, self.env, self.here, lambda argv: self.act_exec(ws, argv), ws, self.tools(ws), self.src(ws),
-                       self.agents_cache)
+                       self.agents_cache, self.agents_fill(ws))
 
     def agent_secret_remedy(self, ws, secret):
         return secrets.Secrets(self.root, self.env, self.machine).agent_secret_remedy(secret)
@@ -686,7 +690,7 @@ class Driver:
         return self.here.run_tty(cmd, cwd=cwd, timeout=timeout)
 
     def ccache_dir(self, ws):
-        return "/ccache"
+        return "/var/lib/wk/ws/%s/ccache" % ws
 
     def build_argv(self, ws, argv):
         return self.exec_argv(ws, argv)
@@ -924,15 +928,15 @@ class Container(Driver):
     def exists(self, ws):
         return self.machine.run(self.podman() + ["container", "exists", self.ctr(ws)]).ok
 
-    store_dirs = ("git", "base", "ws", "cache/ccache", "cache/yocto/downloads", "cache/yocto/sstate", "cache/buildroot/dl",
-                  "cache/buildroot/ccache", "cache/bench", "cache/agents", "skills")
+    store_dirs = ("git", "base", "ws", "cache/yocto/downloads", "cache/yocto/sstate", "cache/buildroot/dl",
+                  "cache/buildroot/ccache", "cache/bench", "cache/agents")
     agents_cache = "/cache/agents"
+
+    def agents_fill(self, ws):
+        return self.here.act_run, os.path.join(self.store.store_dir(), "cache", "agents")
 
     def store_init(self):
         super().store_init()
-        conf = os.path.join(self.store.store_dir(), "cache", "ccache", "ccache.conf")
-        if not self.machine.exists(conf):
-            self.machine.write(conf, self.ccache_conf())
         self.machine.ensure_dir_mode(self.store.keyring_dir(), "0700")
         secrets.Secrets(self.root, self.env, self.machine).store_publish()
 
@@ -979,12 +983,12 @@ class Container(Driver):
         ws_dir, store = self.store.ws_dir(ws), self.store.store_dir()
         res = Resources(self.machine, self.env, self.os())
         flags = ["--volume", "%s:%s:ro" % (self.tools_src(), TOOLS), "--volume", "%s:/var/lib/wk/ws/%s" % (ws_dir, ws)] + self.checkout_flags(ws, base, repo)
-        for sub, dest in (("cache/ccache", "/ccache"), ("cache/yocto", "/cache/yocto"), ("cache/buildroot", "/cache/buildroot"),
-                          ("cache/bench", "/cache/bench"), ("cache/agents", "/cache/agents"), ("skills", "/skills")):
+        for sub, dest in (("cache/yocto", "/cache/yocto"), ("cache/buildroot", "/cache/buildroot"), ("cache/bench", "/cache/bench"),
+                          ("cache/agents", "/cache/agents:ro")):
             flags += ["--volume", "%s/%s:%s" % (store, sub, dest)]
         flags += ["--volume", "%s:/secrets:ro" % self.store.keyring_view_dir("container"),
                   "--memory", "%dm" % res.envelope_mem_mb(), "--cpus", str(res.envelope_cores())]
-        for pair in ("CCACHE_DIR=/ccache", "CCACHE_MAXSIZE=%s" % self.ccache_maxsize(), "CCACHE_BASEDIR=" + project.get("SRC"),
+        for pair in ("CCACHE_DIR=" + self.ccache_dir(ws), "CCACHE_MAXSIZE=%s" % self.ccache_maxsize(), "CCACHE_BASEDIR=" + project.get("SRC"),
                    "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime", "CCACHE_PCH_EXTSUM=true",
                    "CCACHE_DEPEND=true", "CCACHE_NOHASHDIR=true", "DL_DIR=/cache/yocto/downloads", "SSTATE_DIR=/cache/yocto/sstate",
                    "BR2_DL_DIR=/cache/buildroot/dl", "BR2_CCACHE_DIR=/cache/buildroot/ccache", "WK_WORKSPACE=%s" % ws,
@@ -1026,7 +1030,7 @@ class Container(Driver):
             act.die("workspace '%s' already exists" % ws)
         if not (self.sdk_image() or arch_image(arch)):
             self.check_sdk_tag()
-        for d in (ws_dir, "home") + (("changes", "overlay-work", "build") if repo.snapshot else (repo.checkout,)):
+        for d in (ws_dir, "home", "ccache") + (("changes", "overlay-work", "build") if repo.snapshot else (repo.checkout,)):
             self.machine.mkdir(d if d == ws_dir else os.path.join(ws_dir, d))
         if repo.snapshot:
             self._ensure_home_mountpoint(ws_dir, self.store.mirror_parent())
@@ -2149,7 +2153,7 @@ def store_state(store):
                 note(os.path.join(d, f))
             if not deep:
                 dirs[:] = [x for x in dirs if os.path.join(d, x).count(os.sep) - top.count(os.sep) < 3
-                           and x not in ("ws", "base", "git", "skills", "task", "log")]
+                           and x not in ("ws", "base", "git", "task", "log")]
     return out
 
 

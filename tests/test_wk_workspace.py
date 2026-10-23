@@ -64,6 +64,7 @@ class World(fakes.World):
         self.react(["podman", "unshare", "rm", "-rf"], self._rm_rf)
         self.react(["env"], self._sdk)
         self.answer(["bash", os.path.join(str(REPO), "container", "sdk-refresh.sh")])
+        self.answer(["bash", "-lc"])   # the agents cache, filled from the store's side
         self.answer(["install", "-m"])
         self.answer(["nproc"], out="8\n")
         self.files["/proc/meminfo"] = "MemTotal:       33554432 kB\n"

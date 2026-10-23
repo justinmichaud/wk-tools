@@ -105,17 +105,6 @@ _verify_mounts() {
 }
 _verify_mounts
 
-# Workspaces share this read-write, so re-syncing every run destroys their edits.
-if _rsh 'test -d /var/lib/wk/skills && test -n "$(ls -A /var/lib/wk/skills 2>/dev/null)"'; then
-    unchanged "shared skills present (not overwritten)"
-    _rsh 'diff -rq /opt/wk-tools/claude/skills /var/lib/wk/skills >/dev/null 2>&1' \
-        || log "note: shared skills differ from the repo: diff -r /opt/wk-tools/claude/skills /var/lib/wk/skills inside the VM"
-else
-    info "seeding the shared skills directory"
-    _rsh 'mkdir -p /var/lib/wk/skills && cp -a /opt/wk-tools/claude/skills/. /var/lib/wk/skills/'
-    changed "seeded /var/lib/wk/skills"
-fi
-
 wk_py wk.key.cli ensure 2>&1 | sed 's/^/  /' \
     || die "wk key ensure failed (above), so workspaces on '$WK_MACHINE' have no key to push with"
 if [ -f "$keyring_dir/build_key_fork.pub" ]; then

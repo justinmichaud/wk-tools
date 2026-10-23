@@ -1,6 +1,6 @@
 """destroy workspaces and everything they created
 
-The container, the overlay, the home directory and the ssh alias all go; shared caches (ccache, yocto, buildroot)
+The container, the overlay, the home directory, its ccache and the ssh alias all go; shared caches (yocto, buildroot)
 survive. A workspace holding a bench task that no export holds as it is now (the zip the task records, or
 ~/Downloads/<task>.zip) is refused, naming `wk bench export <task>`; --force destroys it anyway.
 

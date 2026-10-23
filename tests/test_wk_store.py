@@ -56,7 +56,7 @@ class TestStoreInitSaysWhatItChanged(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="wk-test-store-init-")
         self.addCleanup(lambda: os.system("rm -rf '%s'" % tmp))
         first = self.run_init(tmp)
-        self.assertIn(tmp + "/store/cache/ccache/ccache.conf", first)
+        self.assertIn(tmp + "/store/cache/agents", first)
         self.assertEqual([], self.run_init(tmp))
 
 

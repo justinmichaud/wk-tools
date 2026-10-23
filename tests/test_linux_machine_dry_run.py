@@ -87,16 +87,15 @@ class TestTheLinuxMachineStageHonoursDryRun(WkTest):
         out = cp.stdout + cp.stderr
         for phrase in ("would create", "would remove the headless marker",
                        "would add subordinate id ranges", "usermod -aG",
-                       "would enable systemd lingering", "would seed",
+                       "would enable systemd lingering",
                        "would run this board's tuning tree"):
             self.assertIn(phrase, out, out)
-        self.assertRegex(out, r"would write: \S+/cache/ccache/ccache\.conf\n")
+        self.assertRegex(out, r"would create: \S+/cache/agents\n")
         self.assertFalse(f["sudo_log"].exists(), out)
         self.assertFalse(f["rpi5_ran"].exists(), out)
         self.assertFalse((f["store"] / "pi-hosts").exists(), out)
-        self.assertFalse((f["store"] / "cache" / "ccache" / "ccache.conf").exists(), out)
+        self.assertFalse((f["store"] / "cache" / "agents").exists(), out)
         self.assertTrue(f["marker"].exists(), "the headless marker was removed")
-        self.assertFalse(any((f["store"] / "skills").glob("*")), out)
         self.assertFalse((f["store"] / "log" / "rpi5-setup.log").exists(), out)
 
     def test_without_it_the_same_stage_does_each_of_those(self):
@@ -104,9 +103,8 @@ class TestTheLinuxMachineStageHonoursDryRun(WkTest):
         out = cp.stdout + cp.stderr
         self.assertTrue((f["store"] / "pi-hosts").exists(), out)
         self.assertFalse(f["marker"].exists(), out)
-        self.assertTrue(any((f["store"] / "skills").glob("*")), out)
         self.assertTrue(f["rpi5_ran"].exists(), out)
-        self.assertTrue((f["store"] / "cache" / "ccache" / "ccache.conf").exists(), out)
+        self.assertTrue((f["store"] / "cache" / "agents").is_dir(), out)
         sudo = f["sudo_log"].read_text()
         self.assertIn("sudo usermod --add-subuids", sudo, sudo)
         self.assertIn("sudo loginctl enable-linger", sudo, sudo)

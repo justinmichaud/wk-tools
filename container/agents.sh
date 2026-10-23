@@ -1,4 +1,4 @@
-# lib/wk/agents.py's, with WK_AGENTS_CACHE and WK_CLAUDE_VERSION set: `find <agent>` prints the one that runs, `node` asks whether pi's node runs; otherwise it installs what is missing and links pi's models.json to the machine's one in the cache, exiting 1 on a failure.
+# lib/wk/agents.py's, with WK_AGENTS_CACHE and WK_CLAUDE_VERSION set: `find <agent>` prints the one that runs, `node` asks whether pi's node runs, `fetch` puts Claude Code into the cache (where the cache is written); otherwise it installs what is missing, only reading the cache, and links pi's models.json to the machine's one there, exiting 1 on a failure.
 [ ! -r "$HOME/.wk-egress" ] || . "$HOME/.wk-egress"
 PATH="$HOME/.local/bin:$PATH"
 node_ok() {
@@ -22,8 +22,6 @@ claude_fetch() {    # the one download, under the lock; a refusal's body says wh
 export -f claude_fetch claude_dir
 claude_install() {
     d=$(claude_dir)
-    [ -d "$d" ] || { mkdir -p "$WK_AGENTS_CACHE/claude" && python3 -c 'import fcntl, subprocess, sys; lock = open(sys.argv[1], "w"); fcntl.flock(lock, fcntl.LOCK_EX); sys.exit(subprocess.call(sys.argv[2:]))' \
-        "$WK_AGENTS_CACHE/claude.lock" bash -c claude_fetch; } || return 1
     mkdir -p "$HOME/.local/share" "$HOME/.local/bin" && cp -a "$d/.local/share/claude" "$HOME/.local/share/" || return 1
     ln -sf "$HOME/.local/share/claude/versions/$WK_CLAUDE_VERSION" "$HOME/.local/bin/claude"
 }
@@ -36,6 +34,8 @@ found() {
 case "${1:-}" in
     find) found "$2"; exit ;;
     node) node_ok; exit ;;
+    fetch) [ -d "$(claude_dir)" ] || { mkdir -p "$WK_AGENTS_CACHE/claude" && python3 -c 'import fcntl, subprocess, sys; lock = open(sys.argv[1], "w"); fcntl.flock(lock, fcntl.LOCK_EX); sys.exit(subprocess.call(sys.argv[2:]))' \
+        "$WK_AGENTS_CACHE/claude.lock" bash -c claude_fetch; } || { echo claude=failed; exit 1; }; exit ;;
 esac
 if found claude >/dev/null; then
     echo claude=present
@@ -49,7 +49,7 @@ if found pi >/dev/null; then
     echo pi=present
 elif ! node_ok; then
     echo "pi=no-node $(node -v 2>/dev/null || echo absent)"
-elif npm_config_cache="$WK_AGENTS_CACHE/npm" npm install -g --ignore-scripts --prefer-offline --prefix "$HOME/.local" @earendil-works/pi-coding-agent >/dev/null && found pi >/dev/null; then
+elif npm install -g --ignore-scripts --prefer-offline --prefix "$HOME/.local" @earendil-works/pi-coding-agent >/dev/null && found pi >/dev/null; then
     echo pi=installed
 else
     echo pi=failed

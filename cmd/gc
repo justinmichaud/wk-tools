@@ -1,9 +1,9 @@
 """reclaim disk
 
 Lists what wk left on this machine, in the podman VM's store and on the machines it reaches, asks once, and removes
-what a plain run may: what loses no work -- unreferenced snapshots, abandoned payload seeds, ccache and tart's image
-cache down to their budgets, dangling images, a killed selftest's workspaces. The rest is named with the flag or
-command that takes it. 'wk doctor' shows the same rows.
+what a plain run may: what loses no work -- unreferenced snapshots, abandoned payload seeds, the shared ccache and
+skills no container mounts, tart's image cache down to its budget, dangling images, a killed selftest's workspaces.
+The rest is named with the flag or command that takes it. 'wk doctor' shows the same rows.
 """
 from wk import gc, images, places
 from wk.act import die
