@@ -335,6 +335,43 @@ class TestBuiltWorkspace(unittest.TestCase):
 
 
 @requires_container_place()
+class TestDebugSymbols(unittest.TestCase):
+    """`live run.debug_symbols`: `wk run --lldb` on a gtk-debug build stops at main with glibc's frames named; the
+    Mesa and GTK frames are MiniBrowser's under `wk gui --lldb`, which a container on a macOS host cannot draw, so
+    that half is owed to a Linux host by name."""
+    ws = "wk-test-%s" % rand_suffix()
+
+    @classmethod
+    def setUpClass(cls):
+        new_workspace(cls.ws)
+        cls.build = run("build", cls.ws, "gtk-debug", timeout=6 * 3600)
+
+    @classmethod
+    def tearDownClass(cls):
+        remove_workspace(cls.ws)
+
+    def test_lldb_names_glibc_frames_at_main(self):
+        self.assertEqual(self.build.returncode, 0, tail(self.build.stdout))
+        lldb = Pty("run", self.ws, "--lldb", "--preset", "gtk-debug", "--", "-e", "print(1)")
+        try:
+            self.assertTrue(lldb.expect(r"Process [0-9]+ launched: .*/jsc", 600), tail(lldb.out))
+            self.assertTrue(lldb.expect(r"(?m)^\(lldb\) $", 300), tail(lldb.out))
+            lldb.send("breakpoint set -n main\n")
+            lldb.send("continue\n")
+            self.assertTrue(lldb.expect(r"stop reason = breakpoint", 300), tail(lldb.out))
+            lldb.send("bt\n")
+            self.assertTrue(lldb.expect(r"frame #0: .* jsc`main", 120), tail(lldb.out))
+            self.assertTrue(lldb.expect(r"libc\.so\.6`__libc_start", 120), tail(lldb.out))
+            lldb.send("process kill\n")
+            lldb.send("quit\n")
+            lldb.wait(120)
+        finally:
+            lldb.close()
+        if sys.platform == "darwin":
+            self.skipTest("MiniBrowser's Mesa and GTK frames need a display a container on a macOS host has no seat for")
+
+
+@requires_container_place()
 class TestAgentCommitWall(unittest.TestCase):
     """The session is a person's own `wk ai claude`, with this machine's credentials (test_dev_integration's `wk`)."""
 
