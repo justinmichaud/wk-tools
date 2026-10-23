@@ -95,7 +95,7 @@ class TestAMacAfterABoot(SetupTest):
 
 
 class TestTheDispatcherRunsIt(SetupTest):
-    def converge(self, why=("behind", "behind"), readonly=False, inside=False):
+    def converge(self, why=("behind", "behind"), readonly=False, inside=False, setup=True):
         self.m.answer([str(dispatch.ROOT / "setup")], out="setup ran\n")
         reg = mock.Mock(store=Store(self.env), in_remote_host=lambda: False)
         err = io.StringIO()
@@ -104,7 +104,7 @@ class TestTheDispatcherRunsIt(SetupTest):
                 mock.patch.object(dispatch, "in_workspace", return_value=inside), \
                 mock.patch.object(dispatch, "in_vm", return_value=False), \
                 mock.patch.dict(os.environ, self.env), contextlib.redirect_stderr(err):
-            dispatch.converge_setup("new", Command(readonly=readonly), self.m)
+            dispatch.converge_setup("new", Command(readonly=readonly, setup=setup), self.m)
         return [e[1] for e in self.m.effects if e[0] == "run"], err.getvalue()
 
     def test_behind_it_runs_setup_first_and_says_why(self):
@@ -116,8 +116,8 @@ class TestTheDispatcherRunsIt(SetupTest):
     def test_one_another_command_converged_while_this_waited_does_not_run_it_again(self):
         self.assertEqual([], self.converge(why=("behind", ""))[0])
 
-    def test_a_readonly_command_or_one_inside_a_workspace_never_runs_it(self):
-        for kw in ({"readonly": True}, {"inside": True}):
+    def test_a_readonly_command_one_declaring_setup_false_or_one_inside_a_workspace_never_runs_it(self):
+        for kw in ({"readonly": True}, {"setup": False}, {"inside": True}):
             with self.subTest(**kw):
                 self.assertEqual(([], ""), self.converge(**kw))
 

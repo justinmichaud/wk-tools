@@ -9,7 +9,7 @@ from unittest import mock
 from tests.support import REPO, WkTest, load_cmd, run, stub_path
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import places  # noqa: E402
+from wk import places, stop  # noqa: E402
 from tests.fakes import Fake  # noqa: E402
 
 
@@ -91,9 +91,23 @@ class TestStartAndStopHaveADryRun(unittest.TestCase):
         one.assert_called_once_with(self.m, "start", True)
 
     def test_stop_everything(self):
-        from wk import stop
         with mock.patch.object(stop.Store, "macos_host", False):
             self.assertIn("would run: podman stop --time 30 wk-a wk-b", self.dry(stop.stop_everything, self.reg, False))
+
+    def test_stop_everything_when_the_podman_machine_does_not_answer(self):
+        """`unit stop.hung_vm`: no ./setup first; a listing past WK_SSH_TIMEOUT still stops the machine, or with --keep-vm exits 3."""
+        self.assertFalse(load_cmd("stop").COMMAND.setup)
+        self.m.answer(["podman", "ps"], rc=124)
+        self.reg.load.side_effect = lambda p: mock.Mock(list=list) if p == "vm" else self.ctr
+        self.ctr.machine_state = lambda: "running"
+        with mock.patch.object(stop.Store, "macos_host", True), mock.patch.dict(os.environ, {"WK_SSH_TIMEOUT": "7"}), \
+                mock.patch.object(self.m, "run", wraps=self.m.run) as run:
+            err = self.dry(stop.stop_everything, self.reg, False)
+            self.assertEqual(7, run.call_args.kwargs["timeout"])
+            with self.assertRaises(stop.Refused) as kept, contextlib.redirect_stderr(io.StringIO()):
+                stop.stop_everything(self.reg, True)
+        self.assertEqual(3, kept.exception.status)
+        self.assertRegex(err, r"'%s' does not answer over ssh \(7s\)[\s\S]*would run: podman machine stop %s" % ((stop.MACHINE,) * 2))
 
     def test_one_workspace(self):
         for verb in ("start", "stop"):

@@ -187,11 +187,10 @@ def usage():
                            asks first; -y for short. Nothing else is asked
   An option a command does not name in its -h, or an argument past what it
   takes, is refused with its usage line.
-  wk <command> --all       every one of what the command acts on -- every
-                           machine ('wk key sudo'), every workspace on
-                           every place ('wk sync', 'wk rm'), every line of
-                           the log ('wk status <ws> --log --all'); a command's own -h says what
-                           its --all covers
+  wk <command> --all       every one of what the command acts on -- every machine
+                           ('wk key sudo'), every workspace on every place ('wk sync',
+                           'wk rm'), every line of the log ('wk status <ws> --log --all');
+                           a command's own -h says what its --all covers
   WK_DEBUG=1               verbose output
 
   wk help                  README.md: architecture, setup, every workflow by example
@@ -326,7 +325,7 @@ def check_needs(cmd, t, machine=None):
 
 def converge_setup(cmd, t, machine=None):
     """./setup where it is behind; a timeout gives it a session with no terminal, which sudo asks a password on."""
-    if t.readonly or in_workspace() or in_vm() or registry().in_remote_host():
+    if t.readonly or not t.setup or in_workspace() or in_vm() or registry().in_remote_host():
         return
     machine = machine or Local()
     why = setupstate.behind(str(ROOT), os.environ, machine)

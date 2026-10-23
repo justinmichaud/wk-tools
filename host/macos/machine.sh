@@ -286,20 +286,28 @@ _grow_guest_fs() {
     fi
 }
 
+# Every stage after this one reaches into the machine, so it is left running; a dry run does not start it.
+_start_machine() {
+    [ "$(wk_py wk.places podman-vm State)" != running ] || return 0
+    [ -z "${WK_DRY_RUN:-}" ] || { log "    (not started: a dry run does not start '$WK_MACHINE')"; return 1; }
+    info "starting machine '$WK_MACHINE'"
+    podman machine start "$WK_MACHINE" >/dev/null
+}
+
 if [ "$_cur_cpus" = "$_cores" ] && [ "$_cur_mem" = "$_mem" ] && [ -z "$_grow_disk" ]; then
     unchanged "machine resources (${_cores} cpus, ${_mem} MiB, ${_cur_disk} GiB)"
-    _grow_guest_fs
+    if _start_machine; then
+        _grow_guest_fs
+    fi
 elif [ -n "${WK_DRY_RUN:-}" ]; then
     warn "dry run: machine resources would become ${_cores} cpus, ${_mem} MiB${_grow_disk:+, ${_disk} GiB}"
 else
-    _was_running=""
     _state=$(wk_py wk.places podman-vm State) || die "could not read podman machine '$WK_MACHINE' state"
-    [ "$_state" = running ] && _was_running=1
-    [ -n "$_was_running" ] && podman machine stop "$WK_MACHINE" >/dev/null
+    [ "$_state" != running ] || podman machine stop "$WK_MACHINE" >/dev/null
     podman machine set "$WK_MACHINE" --cpus "$_cores" --memory "$_mem" \
         ${_grow_disk:+--disk-size "$_disk"}
     changed "machine resources -> ${_cores} cpus, ${_mem} MiB${_grow_disk:+, ${_disk} GiB} (host keeps ${WK_RESERVE_CORES} cores / ${WK_RESERVE_MB} MiB)"
-    [ -n "$_was_running" ] && podman machine start "$WK_MACHINE" >/dev/null
+    _start_machine
     _grow_guest_fs
 fi
 
@@ -363,6 +371,6 @@ unset _ts_node _ts_tag _ts_key _ts_backend _ts_ip _ts_rc
 unset -f _ts _ts_state
 
 unset _cores _mem _disk _mounts _verdict _absent _cfg _secrets_mount _tools_mount \
-      _agent_rw_mount _mirror_mount _cur_cpus _cur_mem _cur_disk _grow_disk _was_running _state
-unset -f _grow_guest_fs
+      _agent_rw_mount _mirror_mount _cur_cpus _cur_mem _cur_disk _grow_disk _state
+unset -f _grow_guest_fs _start_machine
 unset -f _mount_state _absent_targets _read_mounts _mount_rows _check_mounts _report_losses

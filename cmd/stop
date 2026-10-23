@@ -2,6 +2,9 @@
 
 A named workspace: stops only its container or macOS guest; nothing on disk is touched. Runs on the host holding the
 environment, never forwarded into the podman VM.
+It never runs ./setup first, which would start the machine it stops and reach into it.
+A podman machine that does not answer over ssh within WK_SSH_TIMEOUT seconds (10) is stopped without asking its
+containers; with --keep-vm that is exit 3.
 
   wk stop                  macOS VMs, containers, then the machine
   wk stop --keep-vm        macOS VMs and containers, leave the machine running
@@ -17,7 +20,7 @@ environment, never forwarded into the podman VM.
 from wk import stop, store
 from wk.decl import Command, Opt
 
-COMMAND = Command(name="optional", forward=False, needs=("podman",), group="hosts", opts=(
+COMMAND = Command(name="optional", forward=False, setup=False, needs=("podman",), group="hosts", opts=(
     Opt("--keep-vm", "stop the macOS VMs and containers, and leave the podman machine running", sets=dict(name="none")),
     Opt("--tasks", "stop every task still running here through its own kill command",
         sets=dict(name="none", destructive=True)),

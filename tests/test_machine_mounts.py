@@ -246,9 +246,10 @@ class TestAMountTheMachineAsksForAndHasNotGot(_Stage):
         self.assertIn("internal error", self.missing(None, env={"WK_YES": "1"}))
         self.assertRan("machine rm", "machine init")
 
-    def test_a_stopped_machine_is_not_started_to_ask(self):
+    def test_a_stopped_machine_is_not_started_to_ask_and_is_started_before_the_stage_reaches_into_it(self):
+        """`unit setup.machine_stage_order`: started to ask, the absent mount would refuse; started first, vmtools has it running."""
         self.assertIn("read-write (verified)", self.missing(state="stopped"))
-        self.assertRan("machine start", ran=False)
+        self.assertEqual(["start", "ssh"], self.verbs("start", "ssh")[:2], self.podman)
 
     def test_a_dry_run_reads_it_and_still_touches_nothing(self):
         self.assertIn("would be destroyed and recreated", self.missing(env={"WK_DRY_RUN": "1", "WK_YES": "1"}))
@@ -439,13 +440,13 @@ class TestTheResourceEnvelopeIsReapplied(_Stage):
         self.assertRegex(out, rf"machine resources \({cores} cpus, {mem} MiB, .*GiB\)")
         self.assertRan("machine set", ran=False)
 
-    def test_a_stopped_machine_that_differs_is_re_sized_unstarted_and_says_what_it_kept_back(self):
+    def test_a_stopped_machine_that_differs_is_re_sized_then_started_and_says_what_it_kept_back(self):
         cores, mem = self.envelope()
         out = self.stage(mounts=self.want())
         self.assertIn(f"machine set wk --cpus {cores} --memory {mem}", self.podman)
         self.assertIn(f"machine resources -> {cores} cpus, {mem} MiB", out)
         self.assertIn("host keeps", out)
-        self.assertNotIn("machine start", self.podman, "a stopped machine is started to re-size it")
+        self.assertEqual(["set", "start"], self.verbs("stop", "set", "start"), self.podman)
 
     def test_a_running_one_is_stopped_first_and_started_again(self):
         self.stage(None, mounts=self.want(), state="running")
@@ -464,8 +465,7 @@ class TestReportLossesStripsTheContainerPrefix(unittest.TestCase):
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertIn("workspaces  demo other", cp.stdout)
-        self.assertNotIn("wk-demo", cp.stdout)
-        self.assertNotIn("wk-other", cp.stdout)
+        self.assertNotIn("wk-", cp.stdout)
 
 
 DISK_PODMAN = """#!/bin/sh
@@ -535,16 +535,16 @@ class TestTheDiskIsGrownToTheDeclaredSize(WkTest):
         cp, sent = self._run(cur_disk="800")
         self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
         self.assertNotIn("--disk-size", sent, "it tried to shrink a disk")
-        out = cp.stdout + cp.stderr
-        self.assertIn("800", out)
-        self.assertIn("only grows", out, "the refusal does not say why")
+        self.assertIn("800 GiB disk", cp.stdout + cp.stderr)
+        self.assertIn("only grows", cp.stdout + cp.stderr, "the refusal does not say why")
 
-    def test_a_dry_run_changes_nothing(self):
-        cp, sent = self._run(cur_disk="200", dry=True)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        for word in ("machine set", "machine stop", "growpart"):
-            self.assertNotIn(word, sent, f"a dry run ran '{word}'")
-        self.assertIn("dry run", cp.stdout + cp.stderr)
+    def test_a_dry_run_changes_nothing_and_starts_no_stopped_machine(self):
+        for disk in ("200", "500"):
+            cp, sent = self._run(cur_disk=disk, dry=True)
+            self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+            for word in ("machine set", "machine stop", "machine start", "growpart"):
+                self.assertNotIn(word, sent, f"a dry run ran '{word}'")
+            self.assertIn("dry run", cp.stdout + cp.stderr)
 
 
 TAILNET_PODMAN = """#!/bin/sh

@@ -167,10 +167,8 @@ class TestContainerWorkspaceLifecycle(WkTest):
         print(f"[timing] wk new: {created_s:.1f}s, total lifecycle: {total_s:.1f}s")
 
 
-@requires_container_place()
-class TestCancellingARealBuild(WkTest):
-    """A ^C byte into a pty (the only interrupt that crosses `ssh -t` into the podman VM), a refused second
-    build, and --kill, on a real JSC build."""
+class FreshWorkspace(WkTest):
+    """A container workspace made for the test and removed after it."""
 
     def setUp(self):
         super().setUp()
@@ -181,11 +179,20 @@ class TestCancellingARealBuild(WkTest):
         run("status", self.name, "--wait", "--timeout", "900", timeout=960)
 
     def tearDown(self):
-        run("build", self.name, "--kill", timeout=600)
         if getattr(self, "_created", False):
             cp = run("rm", self.name, env={"WK_YES": "1"}, timeout=900)
             if cp.returncode != 0:
                 print(f"[teardown] 'wk rm {self.name}' exited {cp.returncode}: {cp.stdout}")
+        super().tearDown()
+
+
+@requires_container_place()
+class TestCancellingARealBuild(FreshWorkspace):
+    """A ^C byte into a pty (the only interrupt that crosses `ssh -t` into the podman VM), a refused second
+    build, and --kill, on a real JSC build."""
+
+    def tearDown(self):
+        run("build", self.name, "--kill", timeout=600)
         super().tearDown()
 
     def _build_task(self):
@@ -294,24 +301,9 @@ class TestNewKillStopsTheCreation(unittest.TestCase):
 
 
 @requires_container_place()
-class TestSudoReachesTheNetwork(WkTest):
+class TestSudoReachesTheNetwork(FreshWorkspace):
     """`live sudo.network_in_workspace`: in a fresh workspace `sudo` is the wall's entry (container/bin/ws/sudo), root
     under it has a bridge of its own, and `sudo apt-get update` reads the archive through the egress proxy."""
-
-    def setUp(self):
-        super().setUp()
-        self.name = f"wk-test-{rand_suffix()}"
-        cp = run("new", self.name, "--on", "container", timeout=1200)
-        self._created = cp.returncode == 0
-        self.assertEqual(cp.returncode, 0, f"wk new failed: {cp.stdout}")
-        run("status", self.name, "--wait", "--timeout", "900", timeout=960)
-
-    def tearDown(self):
-        if getattr(self, "_created", False):
-            cp = run("rm", self.name, env={"WK_YES": "1"}, timeout=900)
-            if cp.returncode != 0:
-                print(f"[teardown] 'wk rm {self.name}' exited {cp.returncode}: {cp.stdout}")
-        super().tearDown()
 
     def test_a_plain_sudo_gives_root_a_bridge_and_apt_reads_the_archive(self):
         cp = run("enter", self.name, "--", "bash", "-c", "command -v sudo", timeout=300)

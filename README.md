@@ -201,7 +201,8 @@ provisioning hash.
 After the first whole `./setup`, a person never runs it again. It records the
 tree it converged on and the boot it ran in, and any `wk` command that changes
 something runs it first when the tree has changed since, or when launchd has
-not loaded a wk LaunchAgent this boot. It runs without a terminal, so a stage
+not loaded a wk LaunchAgent this boot -- except `wk stop`, whose machine a
+setup would start. It runs without a terminal, so a stage
 that needs a password asks nothing: it says so in that command's output, and
 `./setup --stage <name>` at a terminal is the remedy.
 

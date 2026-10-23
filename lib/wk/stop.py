@@ -2,9 +2,9 @@
 import os
 import sys
 
-from wk import act, fleet, images, places, record, store
+from wk import act, fleet, images, places, reach, record, store
 from wk.act import Refused, confirm, die, info, log, warn
-from wk.machine import Local
+from wk.machine import TIMED_OUT, Local
 from wk.store import Store
 
 ROOT = images.root()
@@ -13,11 +13,8 @@ MACHINE = Store().podman_machine()
 
 def running_tasks(records):
     """(task, 'kind name', kill) for each task still going -- kill is each kind's own stop command."""
-    rows = []
-    for t in records.list():
-        if t.verdict("capped") in record.RUNNING:
-            rows.append((t, "%s %s" % (t.field("kind"), t.field("name")), t.field("kill")))
-    return rows
+    return [(t, "%s %s" % (t.field("kind"), t.field("name")), t.field("kill"))
+            for t in records.list() if t.verdict("capped") in record.RUNNING]
 
 
 def stop_tasks_here(records):
@@ -40,8 +37,7 @@ def stop_tasks_here(records):
     left = running_tasks(records)
     if left:
         warn("still running on %s:" % machine)
-        for _, what, _ in left:
-            sys.stderr.write("    %s\n" % what)
+        sys.stderr.write("".join("    %s\n" % what for _, what, _ in left))
         return 1
     info("no task is running on %s" % machine)
     return 0
@@ -75,12 +71,16 @@ def stop_everything(reg, keep_vm):
         if state != "running":
             info("machine '%s' is already %s -- nothing to do" % (MACHINE, state))
             return 0
-    ctr = reg.load("container")
-    names = ctr.machine.run(ctr.podman() + ["ps", "--filter", "name=^wk-", "--format", "{{.Names}}"], input="").out.split()
-    if names:
-        for n in names:
-            sys.stderr.write("  stopping %s\n" % n)
-        ctr.machine.act_run(ctr.podman() + ["stop", "--time", "30"] + names, input="")
+    ctr, bound = reg.load("container"), reach.ssh_timeout(os.environ) if Store().macos_host else None
+    r = ctr.machine.run(ctr.podman() + ["ps", "--filter", "name=^wk-", "--format", "{{.Names}}"], input="", timeout=bound)
+    names = r.out.split()
+    if r.rc == TIMED_OUT:
+        warn("the podman machine '%s' does not answer over ssh (%ss), so its containers are not asked to stop" % (MACHINE, bound))
+        if keep_vm:
+            die("it is left running (--keep-vm); 'wk stop' stops it through podman machine stop", 3)
+    elif names:
+        sys.stderr.write("".join("  stopping %s\n" % n for n in names))
+        ctr.machine.act_run(ctr.podman() + ["stop", "--time", "30"] + names, input="", timeout=bound and 30 + bound)
         info("stopped %d container(s)" % len(names))
     else:
         info("no running containers")
@@ -88,7 +88,7 @@ def stop_everything(reg, keep_vm):
         log("leaving the machine running (--keep-vm)")
     elif Store().macos_host:
         info("stopping the machine")
-        Local().act_run(["podman", "machine", "stop", MACHINE], stream=True)
+        ctr.machine.act_run(["podman", "machine", "stop", MACHINE], stream=True)
         info("machine stopped -- CPU and memory returned to the host")
     return 0
 

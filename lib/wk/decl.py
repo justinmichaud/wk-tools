@@ -36,6 +36,7 @@ class Command:
     tail: str = ""
     group: str = "other"
     readonly: bool = False
+    setup: bool = True
     destructive: bool = False
     dryrun: bool = True
     ready: bool = False

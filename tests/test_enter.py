@@ -46,34 +46,25 @@ class TestRunsCommand(WkTest):
 
 
 class TestNoTerminalAsksForNone(unittest.TestCase):
+    def setUp(self):
+        self.enter = load_cmd("enter")
+        self.driver = mock.Mock(**{"info.return_value": "present", "exec_argv.return_value": (["true"], None)})
+        self.reg = mock.Mock(**{"present.return_value": self.driver})
+        for p in (mock.patch.object(self.enter.places, "Registry", return_value=self.reg),
+                  mock.patch.dict(os.environ, {"WK_NAME": "ws"}), mock.patch("sys.stdin", io.StringIO(""))):
+            p.start()
+            self.addCleanup(p.stop)
+
     def test_the_command_is_exec_argv_without_a_tty_and_replaces_this_process(self):
-        enter = load_cmd("enter")
-        driver = mock.Mock()
-        driver.info.return_value = "present"
-        driver.exec_argv.return_value = (["true"], None)
-        reg = mock.Mock()
-        reg.present.return_value = driver
-        with mock.patch.object(enter.places, "Registry", return_value=reg), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
-                mock.patch("sys.stdin", io.StringIO("")):
-            enter.main(as_dispatched("enter", ["git", "status"]), None)
-        driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=True)
-        reg.machine.exec.assert_called_once_with(["true"], None)
+        self.enter.main(as_dispatched("enter", ["git", "status"]), None)
+        self.driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=True)
+        self.reg.machine.exec.assert_called_once_with(["true"], None)
 
     def test_own_runs_the_command_as_wks_own_not_a_persons_and_takes_no_shell(self):
-        enter = load_cmd("enter")
-        driver = mock.Mock()
-        driver.info.return_value = "present"
-        driver.exec_argv.return_value = (["true"], None)
-        reg = mock.Mock()
-        reg.present.return_value = driver
-        with mock.patch.object(enter.places, "Registry", return_value=reg), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
-                mock.patch("sys.stdin", io.StringIO("")):
-            enter.main(as_dispatched("enter", ["--own", "--", "git", "status"]), None)
-            driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=False)
-            with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-                enter.main(as_dispatched("enter", ["--own"]), None)
+        self.enter.main(as_dispatched("enter", ["--own", "--", "git", "status"]), None)
+        self.driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=False)
+        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.enter.main(as_dispatched("enter", ["--own"]), None)
         self.assertIn("--own takes a command", err.getvalue())
 
 
