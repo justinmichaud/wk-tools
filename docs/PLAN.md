@@ -1250,6 +1250,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The live tier runs against the container place on Linux and macOS alike; no test is gated on the podman VM | 1 | `live` runner rule |
 | The fleet view is one: the exit code is the worst state found anywhere (a disagreement included), two workstations reaching one box see one state and a disagreement names both views | 2 | `unit status.fleet_is_one` |
 | `wk new <name>` refuses a name alive on any machine of the fleet, naming where it lives, so no name is alive on two | 2 | `unit status.duplicate_name` (landed 2026-10-22) |
+| On a macOS host `wk new <name>` for a container refuses a name alive elsewhere in the fleet before it forwards into the podman VM, whose own wk sees only its containers (the forward branch of cmd/new has no test) | 2 | `unit new.mac_forward_refuses_elsewhere` |
 | `cache/agents`, `cache/ccache` and `skills` are read-only in every container and written only from the host side; each workspace builds into a ccache of its own | 3 | `unit places.shared_mounts_readonly`, `live places.shared_mounts_readonly` |
 | An unattended A/B past its wall-clock budget (`--budget`, 8 hours by default) starts no new round, finishes the one running, and its report says it stopped on budget | 5 | `unit bench.wall_budget` (landed 2026-10-22) |
 | `wk status <ws> --log -f` follows a live build on any place | 2 | `live logs.follow[<place>]` |
