@@ -292,7 +292,7 @@ _start_machine() {
     [ "$(wk_py wk.places podman-vm State)" != running ] || return 0
     [ -z "${WK_DRY_RUN:-}" ] || { log "    (not started: a dry run does not start '$WK_MACHINE')"; return 1; }
     info "starting machine '$WK_MACHINE'"
-    podman machine start "$WK_MACHINE" >/dev/null
+    wk_py wk.places podman-start >/dev/null
 }
 
 if [ "$_cur_cpus" = "$_cores" ] && [ "$_cur_mem" = "$_mem" ] && [ -z "$_grow_disk" ]; then

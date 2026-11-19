@@ -1310,10 +1310,11 @@ class TestThePodmanMachineRecord(DriversTest):
         (self.tmp / "bin").mkdir()
         (self.tmp / "bin" / "tart").write_text("")
         (self.tmp / "bin" / "tart").chmod(0o755)
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            self.assertEqual(places.main(["tart"], env=env), 0)
-        self.assertEqual(out.getvalue(), os.path.realpath(self.tmp / "bin" / "tart") + "\n")
+        self.assertEqual(places.main(["tart"], env=env), 0)
+        with mock.patch.object(places.guest, "podman_admit", side_effect=Refused(1)), self.assertRaises(Refused):
+            places.main(["podman-start"], env=self.env)
+        with mock.patch.object(places.guest, "podman_admit"), mock.patch.object(places.Local, "act_run", return_value=Result(0)) as start:
+            self.assertEqual((places.main(["podman-start"], env=self.env), start.call_args[0][0]), (0, ["podman", "machine", "start", "wk"]))
 
     def test_the_named_form_prints_shell_assignments_wk_eval_can_read(self):
         rec = {"Resources": {"CPUs": 9, "Memory": 20480}, "SSHConfig": {"Port": 50123}}

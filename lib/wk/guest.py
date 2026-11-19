@@ -557,7 +557,7 @@ def podman_admit(vm):
     name = Store(vm.env).podman_machine()
     pod = int(((podman_vm(vm.machine, name) or {}).get("Resources") or {}).get("Memory") or 0)
     guests = vm.committed_mem_mb(None)
-    budget = Resources(vm.machine, vm.env, "macos").envelope_mem_mb()
+    budget = guests and Resources(vm.machine, vm.env, "macos").envelope_mem_mb()
     if not guests or pod + guests <= budget:
         return
     if vm_share(vm.env):

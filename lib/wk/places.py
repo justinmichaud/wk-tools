@@ -676,7 +676,6 @@ class Driver:
         return None
 
     def ssh_proxy(self, ws):
-        """What to run here to reach an addressless workspace, or None."""
         return None
 
     def exec_argv(self, ws, argv, tty=False, person=False):
@@ -2162,17 +2161,18 @@ def main(argv, env=None):
     ap = argparse.ArgumentParser(prog="python3 -m wk.places")
     sub = ap.add_subparsers(dest="verb", required=True)
     sub.add_parser("store-init", help="make the container store; print each path it changed")
-    sub.add_parser("tart", help="print the tart binary's path (tart_path); exit 1 where there is none")
+    sub.add_parser("tart", help="exit 1 where there is no tart binary (tart_path)")
+    sub.add_parser("podman-start", help="start the podman machine, refused beside guests it does not fit with")
     vm = sub.add_parser("podman-vm", help="print each field of the podman machine's record, or (name=Field.Sub) a shlex-quoted "
                                            "shell assignment for wk_eval; exit 1 where there is none")
     vm.add_argument("fields", nargs="+", metavar="Field.Sub|name=Field.Sub")
     args = ap.parse_args(argv)
     t = Registry(images.root(env), env).load("container")
     if args.verb == "tart":
-        if not tart_path(env):
-            return 1
-        print(tart_path(env))
-        return 0
+        return 0 if tart_path(env) else 1
+    if args.verb == "podman-start":
+        guest.podman_admit(Registry(images.root(env), env).load("vm"))
+        return t.machine.act_run(["podman", "machine", "start", t.podman_machine()]).rc
     if args.verb == "podman-vm":
         rec = podman_vm(t.machine, t.podman_machine())
         if rec is None:

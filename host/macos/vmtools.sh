@@ -8,8 +8,8 @@ _state=$(wk_py wk.places podman-vm State) || {
 }
 
 if [ "$_state" != running ]; then
-    info "starting machine '$WK_MACHINE'"
-    podman machine start "$WK_MACHINE" >/dev/null
+    warn "machine '$WK_MACHINE' is stopped (the machine stage starts it), so its tooling is not converged"
+    return 0 2>/dev/null || true
 fi
 
 wk_eval wk.places podman-vm _ssh_port=SSHConfig.Port _ssh_key=SSHConfig.IdentityPath _ssh_user=SSHConfig.RemoteUsername
