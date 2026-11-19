@@ -219,12 +219,12 @@ class TestRefusals(unittest.TestCase):
         self.assertEqual((how, status), ("exit", 1), out)
         self.assertIn("no machines/<name>.conf\n    names it", out)
 
-    def test_a_name_no_workspace_answers_to_is_refused_with_the_usage_line(self):
+    def test_a_name_no_workspace_answers_to_is_refused_with_the_usage_line_and_a_stopped_one_naming_wk_start(self):
         with mock.patch.object(places.Registry, "exists_on", lambda *a: False):
             how, status, out = dispatched(["status", "nosuchws", "--log"], ask=True)
-        self.assertEqual((how, status), ("exit", 2), out)
-        self.assertIn("no such workspace: nosuchws", out)
-        self.assertIn("usage: wk status", out)
+        self.assertRegex("%s %s %s" % (how, status, out), r"^exit 2 [\s\S]*no such workspace: nosuchws[\s\S]*usage: wk status")
+        with mock.patch.object(places.Driver, "wait_ready"), mock.patch.object(places.Container, "info", lambda *a: "exited"):
+            self.assertEqual(("exit", 1, "error: 'parked' is not running (wk start parked)\n"), dispatched(["run", "parked"], ask=True))
 
     def test_dry_run_is_refused_only_where_the_table_says_exempt(self):
         self.assertEqual([n for n, t in TABLES if not t.dryrun], ["selftest"])

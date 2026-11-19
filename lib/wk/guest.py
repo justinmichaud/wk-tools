@@ -637,7 +637,7 @@ def start(vm, ws, clock=None):
 
 
 def stop(vm, ws, clock=None):
-    """The forwards first: one left holding a socket in a guest that is gone is a process nothing would reap."""
+    """The forwards first: one left in a guest that is gone is a process nothing reaps. Then a sync: tart stop cuts the power, and what the guest had not flushed is lost."""
     host = Host(vm, clock)
     with host.lock().held("guest-" + ws):
         for what in FORWARDS:
@@ -645,6 +645,7 @@ def stop(vm, ws, clock=None):
         if vm.vm_state(ws) != "running":
             info("%s is not running" % ws)
             return True
+        vm.guest_of(vm.vm(ws)).act_run(["sync"], timeout=60)
         r = host.machine.act_run([vm.tart_or_die(), "stop", vm.vm(ws)])
         if not r.ok:
             warn("tart stop %s failed (exit %d): %s" % (vm.vm(ws), r.rc, (r.err or r.out).strip()))

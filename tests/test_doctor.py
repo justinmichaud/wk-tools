@@ -96,7 +96,6 @@ class TestHostTools(unittest.TestCase):
                 self.assertEqual(state, self._row(True, fake, "zed")[0])
 
     def test_git_lfs_on_path_or_off_path_is_ok_and_absent_names_the_stage(self):
-        """`unit doctor.TestHostToolsGitLfs`"""
         for macos, on_path, off_path, want in ((True, 1, 1, MISS), (False, 1, 1, MISS), (True, 1, 0, OK), (False, 0, 1, OK)):
             with self.subTest(macos=macos, on_path=on_path, off_path=off_path):
                 fake = Fake()
@@ -561,7 +560,6 @@ class ACachedCredentialIsNotAGrant(WkTest):
 
 
 class TestTheMachineOverlay(unittest.TestCase):
-    """~/.config/wk/machines/ and bench tasks are machine-local."""
 
     def rows(self, fake):
         return list(fake_doctor(False, machine=fake).machine_local())
@@ -612,7 +610,6 @@ class TestRpi5TuningIsBackedUp(unittest.TestCase):
 
 
 class TestWhatWkStatusNoLongerJudges(unittest.TestCase):
-    """The daemons, the SDK image and the quiesce state are doctor rows."""
 
     def test_a_stopped_service_and_one_running_older_code_are_missing(self):
         fake = Fake()

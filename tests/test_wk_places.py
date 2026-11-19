@@ -838,8 +838,8 @@ class TestVmWrite(VmTest):
         self.fake.answer([self.tart, "clone"], out="")
         self.fake.answer([self.tart, "set"], out="")
         self.fake.dirs.add(self.t.store.mirror_dir())
-        for name, value in (("ensure", None), ("stale", "")):
-            p = mock.patch.object(guestbase.Base, name, return_value=value)
+        for name, value, of in (("ensure", None, guestbase.Base), ("stale", "", guestbase.Base), ("start", True, places.Vm)):
+            p = mock.patch.object(of, name, return_value=value)
             setattr(self, "base_" + name, p.start())
             self.addCleanup(p.stop)
 
@@ -853,7 +853,7 @@ class TestVmWrite(VmTest):
                                              (self.tart, "set", "wk-new", "--cpu", "9", "--memory", "20480", "--random-mac", "--display", "1280x800", "--display-refit")])
         self.assertEqual(self.fake.effects[-2:], [("mkdir", ws_dir), ("write", os.path.join(ws_dir, places.READY_MARKER))])
         self.assertEqual([a[:2] for a in self.fake.streamed], [(self.tart, "clone"), (self.tart, "set")])
-        self.assertEqual(1, self.base_ensure.call_count)
+        self.assertEqual((1, [mock.call("new")]), (self.base_ensure.call_count, self.base_start.call_args_list))
         self.assertTrue(self.t.created("new"))
 
     def test_create_takes_the_sizing_and_display_overrides(self):

@@ -210,10 +210,8 @@ def new_hints(driver, name, arch):
         log("  %s: native 32-bit, no GPU. 'wk bench' will run CPU-class plans" % arch)
         log("  in here and refuse GPU-class ones.")
     if driver.kind == "vm":
-        log("  wk start %s       boot it (its ssh alias is written then)" % name)
-        log("  wk zed %s            the checkout, in Zed (once it is up)" % name)
-        log("  wk build %s %s" % (name, project.get("MAC_PRESET")))
-    elif driver.kind == "remote":
+        return
+    if driver.kind == "remote":
         log("  wk build %s <preset> build (polite: sized from that machine's load)" % name)
         log("  wk enter %s          shell, in the checkout" % name)
         if driver.host:

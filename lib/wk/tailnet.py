@@ -131,7 +131,6 @@ class Fleet:
         return (self.sec.cred_read("tailnet") or "").split("\n")[0].strip()
 
     def key_present(self):
-        """A usable auth key on file, or the API credential that mints one."""
         key = self.stored()
         return bool(key and usable("tailnet", key)[0]) or self.api_present()
 

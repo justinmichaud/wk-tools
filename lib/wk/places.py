@@ -37,7 +37,6 @@ def guest_mirror():
 
 
 def image_base(root, ws):
-    """CFG_RELEASE of an image workspace's image preset, or None."""
     prefix = next((p for p in ("yocto-", "buildroot-") if ws.startswith(p)), None)
     conf = prefix and os.path.join(root, "image", "presets", ws[len(prefix):] + ".conf")
     return (kv.conf_file(conf).get("CFG_RELEASE") or None) if conf and os.path.isfile(conf) else None
@@ -1477,6 +1476,7 @@ class Vm(Driver):
                 act.die("%s failed for '%s' (exit %d); what it said is above" % (" ".join(argv[1:2]), ws, r.rc), r.rc)
         self.machine.mkdir(ws_dir)
         self.machine.write(os.path.join(ws_dir, READY_MARKER), "")
+        self.start(ws)
 
     def runners(self, v):
         r = self.machine.run(["pgrep", "-f", "tart run .*[[:space:]]%s$" % v])

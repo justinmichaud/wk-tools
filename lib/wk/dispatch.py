@@ -379,6 +379,8 @@ def ask_place(inv, resolved, name, exists, ready):
             inv.usage_die(no_such_workspace(name))
         if ready:
             driver.wait_ready(name, clock.Clock())
+            if driver.info(name) in ("stopped", "exited"):
+                die("'%s' is not running (wk start %s)" % (name, name))
     except LookupError as e:
         die(str(e))
 

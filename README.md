@@ -268,12 +268,12 @@ on another is refused.
 
 ```sh
 ./setup --stage softnet                 # once: the guest's egress filter
-wk new mac-rel --on vm                  # builds the golden base the first time (hours, once)
-wk start mac-rel                        # boots it and writes its ssh alias, wk-mac-rel
+wk new mac-rel --on vm                  # clones the base and boots it; the first one builds the base (hours, once)
 wk build mac-rel mac-release
 wk build mac-rel mac-release-pgo        # instrument, collect, rebuild: the perf build
-wk stop mac-rel
 wk doctor mac-rel                       # its base, its desktop, what is resident in it
+wk stop mac-rel                         # flushes its disk, then powers it off
+wk start mac-rel                        # boots it again and writes its ssh alias, wk-mac-rel
 wk sysimage build macos-guest-base --rebuild   # hours; yours to run
 wk sysimage build macos-guest-base --rm        # erase it; asks again about the pulled image
 ```
@@ -282,7 +282,10 @@ A guest is an APFS clone of one base carrying Xcode and a settled desktop.
 Everything else (the checkout, credentials, the shell) converges on every
 start. `wk start` prints what it found on the desktop and refuses a guest
 with anything in front of it; `wk doctor <name>` asks again. The base is
-stale once an input that made it changes, and `wk doctor` says so.
+stale once an input that made it changes, and `wk doctor` says so. A command
+that needs a stopped guest running is refused naming `wk start`. A guest
+holds its whole memory while it is up, so a start is refused when it does not
+fit beside the podman machine's containers or another guest.
 
 Everything wk runs in a guest, and every copy in or out, goes through `tart
 exec`, the guest agent's own channel, never the network (macOS refuses a

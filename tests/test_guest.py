@@ -132,7 +132,6 @@ class GuestTest(SecretsTest):
         return self.w.env["WK_VM_STORE"] + "/vm"
 
     def run_start(self):
-        """(ip or None, stderr): a refusal is None."""
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             try:
@@ -472,7 +471,8 @@ class TestTheForward(GuestTest):
         pid = int(self.w.files[self.pidfile])
         quiet(guest.stop, self.vm, "demo", self.clock)
         kill = self.w.effects.index(("kill", pid, 15))
-        self.assertLess(kill, self.w.effects.index(("act", (TART, "stop", "wk-demo"))))
+        flush = self.w.effects.index(("act", (TART, "exec", "-i", "wk-demo", "/bin/zsh", "-lc", "sync")))
+        self.assertTrue(kill < flush < self.w.effects.index(("act", (TART, "stop", "wk-demo"))))
         self.assertNotIn(self.pidfile, self.w.files)
 
     def test_a_start_forwards_the_host_broker_to_the_socket_the_guests_client_dials(self):

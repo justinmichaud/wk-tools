@@ -44,7 +44,7 @@ class GuestHost(ws.WorkspaceTest):
         from wk.sysimage import guestbase
         for p in (mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True),
                   mock.patch.object(guestbase.Base, "ensure", return_value=None),
-                  mock.patch.object(guestbase.Base, "stale", return_value="")):
+                  mock.patch.object(guestbase.Base, "stale", return_value=""), mock.patch.object(places.Vm, "start")):
             p.start()
             self.addCleanup(p.stop)
 
