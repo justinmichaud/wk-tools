@@ -123,7 +123,7 @@ def where_prose(t, where):
         return "the machine holding the workspace, which keeps its record: a build box or a peer workstation is handed it"
     return {"host": "this host's own hardware; refused inside a workspace and on a build machine",
             "store": "the machine holding the store -- the podman VM on macOS, this machine otherwise; refused inside a workspace",
-            "local": "this machine, never forwarded"}.get(where, "the machine you type it on" if t.here else
+            "local": "this machine, never forwarded"}.get(where, "the machine you type it on" if t.here or not t.forward else
                                                           "the workspace's place, on the machine holding it (the podman VM for a "
                                                           "container workspace on macOS; that machine's own wk when it has one)")
 

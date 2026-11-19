@@ -1408,7 +1408,7 @@ class Vm(Driver):
                     "      curl -fsSLO https://github.com/cirruslabs/tart/releases/latest/download/tart.tar.gz\n"
                     "      tar -xzf tart.tar.gz -C ~/.local/share/tart/\n"
                     "      ln -sfn ~/%s ~/.local/bin/tart\n"
-                    "    Licence: FSL-1.1-ALv2; internal use is a Permitted Purpose (README.md, Setup)." % TART_APP)
+                    "    Licence: FSL-1.1-ALv2; internal use is a Permitted Purpose." % TART_APP)
         return bin
 
     def store_init(self):

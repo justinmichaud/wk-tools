@@ -183,7 +183,7 @@ machine.
 ```sh
 git clone https://github.com/justinmichaud/wk-tools ~/Development/wk-tools
 cd ~/Development/wk-tools
-./setup                        # idempotent; a second run prints no changes
+./setup                        # idempotent; a second run prints no changes; then a new terminal, which has wk on its PATH
 ./setup --dry-run              # what it would change
 ./setup --stage quiesce        # one sudo prompt: the privileged helpers
 wk key sudo setup              # closes sudo's timestamp and NOPASSWD
@@ -279,6 +279,9 @@ wk sysimage build macos-guest-base --rm        # erase it; asks again about the 
 ```
 
 A guest is an APFS clone of one base carrying Xcode and a settled desktop.
+The first `wk new --on vm` builds that base, which outlasts the hour `wk new`
+waits (`WK_NEW_TIMEOUT`): the creation goes on detached, and `wk status
+<name> --log --follow` follows it.
 Everything else (the checkout, credentials, the shell) converges on every
 start. `wk start` prints what it found on the desktop and refuses a guest
 with anything in front of it; `wk doctor <name>` asks again. The base is
