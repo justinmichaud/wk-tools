@@ -551,16 +551,14 @@ def from_host(root, driver, ws, machine, rep, want_gpu=False):
     if driver.kind == "vm" and not driver.egress_filtered(ws):
         rows.append(miss("this guest was booted with WK_VM_UNFILTERED, so it has the open network",
                          "wk stop %s && wk start %s   (without that variable)" % (ws, ws)))
-    if driver.kind == "vm":
-        rows += driver.check_rows(ws)
-    rep.rows(rows)
+    rep.rows(rows + (driver.check_rows(ws) if driver.kind == "vm" else []))
+    if state != "running":
+        return False
     wall = Wall(root, driver, ws, machine, want_gpu)
     results = run_at_once(wall.from_host())
     for _, found in results:
         rep.rows(found)
-    rep.rows(wall.person_write())
-    if driver.kind == "container":
-        rep.rows(wall.rootless_proxy())
+    rep.rows(wall.person_write() + (wall.rootless_proxy() if driver.kind == "container" else []))
     return could_publish(results)
 
 

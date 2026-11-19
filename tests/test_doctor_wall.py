@@ -631,7 +631,7 @@ class TestFromTheHost(_Wall):
         self.fake.answer(["podman", "inspect", "wk-demo"], out="exited\n")
         rep, out = self.report()
         self.assertIn("workspace state: exited", out)
-        self.assertGreaterEqual(rep.missing, 1)
+        self.assertEqual((1, False, []), (rep.missing, self.publishing, self.asked))
 
     def test_an_absent_workspace_and_a_remote_target_are_refused(self):
         self.fake.answer(["podman", "inspect", "wk-demo"], rc=125)
