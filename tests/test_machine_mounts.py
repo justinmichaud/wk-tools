@@ -623,7 +623,7 @@ class TestALoggedOutMachineJoins(TailnetStage):
 class TestWhatItWillNotDo(TailnetStage):
     def test_each_reason_not_to_join_is_reported_and_nothing_joins_or_starts(self):
         for env, key, says in (({}, "", "wk key set tailnet"), ({"WK_TEST_STATE": "stopped"}, None, "not running"),
-                               ({"WK_TEST_NO_TS": "1"}, None, "cannot be deployed"), ({"WK_DRY_RUN": "1"}, None, "dry run")):
+                               ({"WK_TEST_NO_TS": "1"}, None, "the next ./setup joins the tailnet"), ({"WK_DRY_RUN": "1"}, None, "dry run")):
             with self.subTest(says):
                 cp = self.run_block(env, **({} if key is None else {"key": key}))
                 self.assertIn(says, cp.stdout + cp.stderr)

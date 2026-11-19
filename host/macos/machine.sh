@@ -329,8 +329,8 @@ print("%s %s" % (s.get("BackendState", "?"), (me.get("TailscaleIPs") or ["-"])[0
 if [ "$(wk_py wk.places podman-vm State 2>/dev/null)" != running ]; then
     warn "podman machine '$WK_MACHINE' is not running, so its tailnet identity was not checked"
 elif ! _ts command -v tailscale >/dev/null 2>&1; then
-    warn "podman machine '$WK_MACHINE' has no tailscale, so it cannot reach a board.
-  Its image used to ship one; without it an image workspace on this workstation cannot be deployed."
+    die "podman machine '$WK_MACHINE' has no tailscale yet, so it cannot reach a board: the vmtools
+    stage layers it, and the next ./setup joins the tailnet."
 else
     read -r _ts_backend _ts_ip <<EOF
 $(_ts_state)
