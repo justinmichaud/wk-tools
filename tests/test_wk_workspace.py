@@ -946,56 +946,56 @@ class TestRmOne(WorkspaceTest):
         self.assertIn("Host wk-ws", self.w.files[self.conf])
 
 
-class TestRmNames(WorkspaceTest):
-    def names(self, *names, w=None):
+class TestRmName(WorkspaceTest):
+    def name(self, name, w=None):
         w = w or self.w
-        return workspace.rm_names(w.reg, w.records, list(names))
+        return workspace.rm_names(w.reg, w.records, [name])
 
-    def test_the_question_names_each_one_with_its_target_once_and_no_terminal_declines(self):
+    def test_the_question_names_it_with_its_place_and_no_terminal_declines(self):
         self.w.make("a")
-        self.w.make("b")
-        err = self.refused(lambda: self.names("a", "b"))
-        self.assertEqual(err.count("destroy them?"), 1)
-        self.assertIn("these 2 workspace(s), and every change in them, go:\n    a@fakebox\n    b@fakebox\ndestroy them?", err)
+        err = self.refused(lambda: self.name("a"))
+        self.assertIn("these 1 workspace(s), and every change in them, go:\n    a@fakebox\ndestroy them?", err)
         self.assertIn("aborted", err)
-        self.assertEqual(self.w.containers, {"wk-a", "wk-b"})
+        self.assertEqual(self.w.containers, {"wk-a"})
 
-    def test_a_name_that_is_not_there_is_said_and_the_rest_of_the_batch_still_goes(self):
-        os.environ["WK_YES"] = "1"
-        self.w.make("keep-not")
-        rc, err = self.stderr(lambda: self.names("keep-not", "nope"))
+    def test_a_name_that_is_not_there_is_said_and_asks_nobody(self):
+        rc, err = self.stderr(lambda: self.name("nope"))
         self.assertEqual(rc, 1)
         self.assertIn("no such workspace: nope", err)
-        self.assertIn("workspace 'keep-not' destroyed", err)
-        self.assertEqual(self.w.containers, set())
-        self.assertIn("invalid name '-x'", self.refused(lambda: self.names("-x")))
-
-    def test_nothing_found_asks_nobody(self):
-        rc, err = self.stderr(lambda: self.names("nope"))
-        self.assertEqual(rc, 1)
         self.assertNotIn("destroy them?", err)
+        self.assertIn("invalid name '-x'", self.refused(lambda: self.name("-x")))
 
     def test_an_unanswering_machine_is_1_without_the_no_such_line(self):
         w = self.make_world(kinds={"fakebox": "remote"})
         w.unreachable = "Host key verification failed."
-        rc, err = self.stderr(lambda: self.names("ws", w=w))
+        rc, err = self.stderr(lambda: self.name("ws", w=w))
         self.assertEqual(rc, 1)
         self.assertIn("fakebox did not answer: Host key verification failed.", err)
         self.assertNotIn("no such workspace", err)
         self.assertEqual([e for e in w.mutations() if w.mutates(e)], [], "a refusal before any effect keeps every record")
 
-    def test_one_refusal_does_not_end_the_batch_and_the_worst_status_is_returned(self):
+    def test_a_refusal_holds_no_lock_afterwards(self):
         os.environ["WK_YES"] = "1"
         self.w.make("a")
-        self.w.make("b")
         self.w.begin("build", "a", pid=4242)
         self.w.pids.add(4242)
-        rc, err = self.stderr(lambda: self.names("a", "b"))
-        self.assertEqual(rc, 1)
+        rc, err = self.stderr(lambda: self.name("a"))
         self.assertIn("'a' has work running in it", err)
-        self.assertIn("workspace 'b' destroyed", err)
-        self.assertEqual(self.w.containers, {"wk-a"})
-        self.assertEqual(self.w.lock_files(), [])
+        self.assertEqual(rc, 1)
+        self.assertEqual((self.w.containers, self.w.lock_files()), ({"wk-a"}, []))
+
+
+class TestRmSeveral(WorkspaceTest):
+    def test_several_names_are_asked_once_and_each_goes_through_its_own_places_wk_rm(self):
+        """A batch spanning places: the first name's place is not the others'."""
+        os.environ["WK_YES"] = "1"
+        self.w.answer(["env", "WK_PLACE=vm"])
+        self.w.answer(["env", "WK_PLACE=container"], rc=1)
+        self.w.reg.ws_place = {"mac": "vm", "linux": "container"}.get
+        rc, _ = self.stderr(lambda: workspace.rm_names(self.w.reg, self.w.records, ["mac", "linux"]))
+        self.assertEqual(rc, 1)
+        self.assertEqual([list(e[1]) for e in self.w.effects if e[0] == "run" and e[1][0] == "env"],
+                         [["env", "WK_PLACE=vm", WK, "rm", "mac", "--yes"], ["env", "WK_PLACE=container", WK, "rm", "linux", "--yes"]])
 
 
 class TestRmAll(WorkspaceTest):

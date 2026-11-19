@@ -31,14 +31,13 @@ def main(args, inv):
         if args.flag("--all"):
             return workspace.rm_all(reg, records)
         names = [store.ws_name()] + args.positionals
-        if not inv.vm_side():
+        if len(names) > 1 or not inv.vm_side():
             return workspace.rm_names(reg, records, names)
         workspace.refuse_unsaved_before_forward(reg, names)
         rc = inv.forward(inv.argv)
         if rc:
             raise Refused(rc)
-        for name in names:   # the podman VM removes the container; the ssh alias is this host's
-            sshalias.alias_remove(Local(), os.environ, name)
+        sshalias.alias_remove(Local(), os.environ, names[0])   # the podman VM removes the container; the alias is this host's
         return 0
     except LookupError as e:
         die(str(e))

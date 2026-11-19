@@ -498,30 +498,32 @@ def refuse_unsaved_before_forward(reg, names):
 
 
 def rm_names(reg, records, names):
-    """The named removals: each planned, one question for all, each destroyed independently; the worst status."""
-    worst = 0
-    found = []
-    for n in names:
-        require_name(n)
-        try:
-            found.append((n,) + rm_plan(reg, records, n))
-        except Refused as e:
-            if e.status == 1:
-                act.err(no_such_workspace(n))
-            worst = 1
-    if not found:
-        return worst
-    refuse_unsaved(reg, found)
-    confirm_destroy(len(found), "\n".join("    %s@%s" % (n, t.name) for n, t, _ in found))
-    for n, driver, what in found:
-        lock = Lock(driver.store, records.machine, records.clock)
-        try:
-            worst = max(worst, rm_one(driver, records, lock, n, what))
-        except Refused as e:
-            worst = max(worst, e.status)
-        finally:
-            lock.release_all()
-    return worst
+    """One removal planned, asked and destroyed here; several, which may live on different places, each by its own `wk rm`."""
+    if len(names) > 1:
+        return rm_each(reg, [(reg.ws_place(n), n) for n in names])
+    name = names[0]
+    require_name(name)
+    try:
+        driver, what = rm_plan(reg, records, name)
+    except Refused as e:
+        if e.status == 1:
+            act.err(no_such_workspace(name))
+        return 1
+    refuse_unsaved(reg, [(name, driver, what)])
+    confirm_destroy(1, "    %s@%s" % (name, driver.name))
+    lock = Lock(driver.store, records.machine, records.clock)
+    try:
+        return rm_one(driver, records, lock, name, what)
+    except Refused as e:
+        return e.status
+    finally:
+        lock.release_all()
+
+
+def rm_each(reg, rows):
+    """(place, name) rows, asked once; the worst status."""
+    confirm_destroy(len(rows), "\n".join("    %s@%s" % (n, t) for t, n in rows))
+    return max(reg.machine.act_run(rm_argv(reg.root, t, n), input="", stream=True).rc for t, n in rows)
 
 
 def all_workspaces(reg, records):
@@ -542,13 +544,11 @@ def all_workspaces(reg, records):
 
 
 def rm_all(reg, records):
-    """Every workspace `wk ls` finds, asked once as <name>@<place>, each through the one path a named removal takes."""
     rows = all_workspaces(reg, records)
     if not rows:
         info("no workspaces -- nothing to destroy")
         return 0
-    confirm_destroy(len(rows), "\n".join("    %s@%s" % (n, t) for t, n in rows))
-    return max(reg.machine.act_run(rm_argv(reg.root, t, n), input="", stream=True).rc for t, n in rows)
+    return rm_each(reg, rows)
 
 
 SELFTEST_PREFIX = "wk-test-"
