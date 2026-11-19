@@ -225,14 +225,13 @@ def probe_store(store, machine, branches, env):
     return "\n".join(lines) + "\n" + git_fields(machine)
 
 
-def report_store(out, gitremedy, fork_key, want):
+def report_store(out, gitremedy, want):
     """`gitremedy` only when the probe came from another machine; on the same one the config section already checked git."""
     f = kv(out)
     mirror, what = f.get("mirror", ""), "%s mirror" % project.get("CHECKOUT")
     rows = [ok(what) if mirror == "ok" else miss("%s carries no %s" % (what, mirror[4:]), "wk sync --mirror") if mirror.startswith("gap")
             else miss(what, "wk sync")]
     rows.append(check("snapshot", "wk sync", f.get("base") == "ok"))
-    rows.append(check("fork push key", "wk key deploy  (needs gh auth)", fork_key))
     rows.append(check("egress proxy running", "./setup --stage sdk, then systemctl --user status wk-proxy", f.get("proxy") == "ok"))
     rows.append(check("pi-hosts populated", "wk machine setup rpi5 / rpi4  (skip if no Pi devices)", f.get("pihosts") == "ok"))
     rows.append(check("fleet-request broker reachable from workspaces",
@@ -585,10 +584,10 @@ class Doctor:
             miss("/var/lib/tailscale (podman VM) -- it reaches no board without it", "./setup --stage machine  (needs: wk key set tailnet)")
 
     def workspaces_store(self):
-        fork_key = self.machine.exists(os.path.join(self.paths()["push_held"], "build_key_fork"))
+        yield check("fork push key", "wk key deploy  (needs gh auth)", self.machine.exists(os.path.join(self.paths()["push_held"], "build_key_fork")))
         name = self.container.podman_machine()
         if not self.macos_host:
-            yield from report_store(self.probe_store(), "", fork_key, self.want())
+            yield from report_store(self.probe_store(), "", self.want())
         elif self.container.machine_state() == "absent":
             yield miss("podman machine '%s'" % name, "./setup --stage machine")
             return
@@ -603,7 +602,7 @@ class Doctor:
                 yield unk("store inside the VM", "/opt/wk-tools missing in the VM? run ./setup --stage sdk")
                 return
             yield from report_store(out, "podman machine ssh %s -- git config --global include.path /opt/wk-tools/dotfiles/gitconfig" % name,
-                                    fork_key, self.want())
+                                    self.want())
         sdk = sdk_row(self.container)
         if sdk:
             yield sdk

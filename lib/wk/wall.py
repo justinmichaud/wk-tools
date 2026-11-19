@@ -398,7 +398,7 @@ class Wall:
         found = self.inside(CLAUDE_TOKEN_SCAN)
         if found:
             rows.append(miss("a claude.ai token is readable in '%s': %s" % (self.ws, " ".join(found.splitlines())),
-                             "the injector is its one holder: remove it, and 'wk key check claude-login' outside says "
+                             "the injector is its one holder: remove it, and 'wk key check' outside says "
                              "whether the login still works"))
         else:
             rows.append(ok("no claude.ai token is readable in here (the login, ~/.claude, /secrets, /run/wk)"))
@@ -412,10 +412,10 @@ class Wall:
             rows.append(ok("the placeholder login is authenticated through the injector (HTTP 200), from a login no workspace holds"))
         elif code == "401" and said:
             rows += [note("no claude.ai session here can authenticate: " + said.strip()),
-                     note("'wk key check claude-login' says what this machine holds")]
+                     note("'wk key check' says what this machine holds")]
         elif code == "401":
             rows.append(miss("Anthropic refused the claude.ai login the injector put on a request (HTTP 401)",
-                             "'wk key check claude-login'; 'wk key set claude-login --replace' stores a new one"))
+                             "'wk key check'; 'wk key set claude-login --replace' stores a new one"))
         else:
             rows.append(miss("api.anthropic.com answered '%s' -- the injector is not in the path for it" % (code or "nothing"),
                              self.driver.daemon_remedy(self.ws, "inject")))

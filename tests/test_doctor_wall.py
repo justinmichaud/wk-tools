@@ -235,7 +235,7 @@ FAILS = (
     ("claude_login", {}, {"/.credentials.json": ""}, ("is not the placeholder login", "'wk start demo'")),
     ("claude_login", {}, {"/.credentials.json": "[]"}, ("is not the placeholder login", "'wk start demo'")),
     ("claude_login", {}, {"sk-ant-o[ar]t": "/run/wk/.credentials.json"},
-     ("a claude.ai token is readable in 'demo': /run/wk/.credentials.json", "'wk key check claude-login'")),
+     ("a claude.ai token is readable in 'demo': /run/wk/.credentials.json", "'wk key check'")),
     ("claude_login", {}, {"api.anthropic.com/v1/models": 'HTTP/1.1 401 Unauthorized\r\n\r\n{"type": "error"}\n401'},
      ("Anthropic refused", "wk key set claude-login --replace")),
     ("claude_login", {}, {"api.anthropic.com/v1/models": "\n000"}, ("not in the path", "wk-github-inject")),

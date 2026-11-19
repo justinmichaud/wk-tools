@@ -313,7 +313,7 @@ FULL_STORE_BLOB = ("mirror=ok\nbase=ok\nproxy=ok\npihosts=ok\nbroker=ok\n"
 
 class TestReportStore(unittest.TestCase):
     def rows(self, blob, gitremedy):
-        return doctor.report_store(blob, gitremedy, True, WANT)
+        return doctor.report_store(blob, gitremedy, WANT)
 
     def test_a_remedy_reports_the_container_machine(self):
         text = text_of(self.rows(FULL_STORE_BLOB, "podman machine ssh wk -- git config ..."))
@@ -348,7 +348,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
         rows = list(doc.workspaces_store()) + list(doc.machine_local())
         self.assertIn((UNK, "podman machine 'wk' is stopped", "wk start, then re-run wk doctor for the store checks"), rows)
         self.assertTrue(any("read-github-pat (podman VM) -- not visible while the podman machine is stopped" in r[1] for r in rows), rows)
-        self.assertEqual([], [r for r in rows if r[0] == MISS], rows)
+        self.assertEqual([(MISS, "fork push key", "wk key deploy  (needs gh auth)")], [r for r in rows if r[0] == MISS], "the key is this host's, read whatever the machine's state")
         podman = [e[1] for e in fake.effects if e[0] == "run" and e[1][0] == "podman"]
         self.assertTrue(podman)
         self.assertEqual({INSPECT}, set(podman), "only the state was asked")
@@ -366,7 +366,7 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
         fake = Fake()
         fake.answer(("python3", "-c"), rc=0)
         rows = list(fake_doctor(True, machine=fake).workspaces_store())
-        self.assertEqual([(MISS, "podman machine 'wk'", "./setup --stage machine")], [r for r in rows if r[0] == MISS])
+        self.assertEqual([(MISS, "fork push key", "wk key deploy  (needs gh auth)"), (MISS, "podman machine 'wk'", "./setup --stage machine")], [r for r in rows if r[0] == MISS])
 
     def test_a_running_machine_is_asked_for_the_probe_and_its_git_identity(self):
         fake = Fake()
@@ -375,10 +375,10 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
         fake.answer(("python3", "-c"), rc=0)
         rows = list(fake_doctor(True, machine=fake).workspaces_store())
         self.assertEqual((MISS, "podman machine 'wk' runs docker://quay.io/podman/machine-os:5.8",
-                          "'wk rm' its workspaces, then:  podman machine rm wk && ./setup --stage machine"), rows[0])
+                          "'wk rm' its workspaces, then:  podman machine rm wk && ./setup --stage machine"), rows[1])
         self.assertTrue(any("container machine: git user.name" in r[1] for r in rows), rows)
         fake.answer(("podman", "machine", "ssh", "wk", "--"), out="ostree-remote-image:fedora:docker://quay.io/podman/machine-os:5.8")
-        self.assertEqual(OK, list(fake_doctor(True, machine=fake).workspaces_store())[0][0])
+        self.assertEqual(OK, list(fake_doctor(True, machine=fake).workspaces_store())[1][0])
 
     def test_a_machine_whose_tooling_answers_nothing_is_unknown(self):
         fake = Fake()
