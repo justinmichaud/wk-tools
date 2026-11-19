@@ -6,17 +6,13 @@ last step lands.
 
 ## Where we are
 
-Measured 2026-10-22 12:00 MST on the host, after the day's cuts (`./wk selftest`).
+Measured 2026-11-19 on the host (`./wk selftest`).
 
 | | |
 | --- | --- |
-| code | 26.5k non-blank lines of Python outside `tests/` (26.1k in the budget rows: `lib/wk`, `lib/*.py`, `cmd/` without its help, `wk`), 6.9k of shell (what runs on a board, a bench install or in a place, the helpers and the setup stages); 25 commands, each a table and one function, the six largest bodies in `lib/` |
-| tests | 42.2k lines, 137 modules, 3,253 unit and lint tests (121 lint), 171 in the live tier |
-| `wk selftest` (lint then unit) | 3,253 tests, 4.5 minutes, green; the lint tier alone 9 s |
-| the slowest unit test | 10.8 s (`test_crash_only`'s stage converge), under the 30 s budget the runner enforces |
-| owed tests | 28 lint (the budget rows, `lint.no_addresses`, `lint.one_wifi_reader`, `lint.test_shape`), 55 in the unit tier counting the owed-live stubs |
-| the Owed table | `tests/test_owed_live.py` is generated from it at import: one stub per `live`/`unit` name no test holds (67) |
-| the last live run from the host | 2026-10-22, lane 16 on b5b423a: 171 tests, 1 failure (`git-webkit setup` did not finish in one of the lane's three fresh workspaces; the other two and the dev-integration rows ran it), and the guest rows on the rebuilt base: 13 of 14 `DevIntegrationTart` steps and all six `TestTheLiveWayIn`/`TestTheLiveRemount` rows green, the 14th being the doctor's store row the stopped podman machine withholds; then six container rows written and run green the same day (`enter.shell`, `logs.follow[container]`, `ai.commit_wall`, `sync.fresh_workspace_wired`, `run.lldb_tty`, `profile.modes[sampling|bytecode|samply]`, `tests/test_container_live.py`), the bytecode one after jsc's `-p` replaced the find-and-move; then `profile.modes[sysprof]`, `build.babysit_e2e`, `start.roundtrip` and `run.rr_record_replay` (its Mac half: rr refused by name on Apple Silicon; the record is a Linux host's) and `test.suite[container]` (one stress test's variants through `wk test <ws> <path>`, after the path became the runner's `--filter`) the same way |
+| code and tests | `python3 -m tests.test_lint_budgets` prints each row's size beside its interim and its budget |
+| `wk selftest` (lint then unit) | 3,255 tests, 5 minutes, green; 48 owed |
+| the last live runs from the host | 2026-11-19 on the podman machine re-created from the pinned image and a guest of the current base: `DevIntegrationContainer` and `DevIntegrationTart` each pass creation, git, pi, the jsc-debug build, the push to the fork, git-webkit, sync and the editor; the four steps that need a Claude session fail on a claude.ai login its issuer refuses to refresh (`wk key set claude-login --replace`), and removal waits for them |
 
 Why bugs come back:
 
@@ -1347,7 +1343,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A macOS guest's `git push` reaches the Mac's push service through the guest's forward and its own listener, and the Mac proxy sends a guest with an agent to the injector's reading socket by its address | 5 | `live push.guest_forward` |
 | Speedometer 3 under MiniBrowser runs without its `wakeLock` error: an upstream WebKit patch, landed last, after every other owed row | end | `live bench.speedometer3_wakelock[mbp]` |
 | The podman machine boots the image the tree pins (`store.MACHINE_IMAGE`), and `wk doctor` names one that does not with its re-creation | 2 | `unit doctor.TestTheStoreOnAMacHost`, `live setup.vm_image_pinned` |
-| A CMake port links with lld in a container: measured 2026-10-22, the SDK image (Ubuntu 26.04.1) puts the Swift 6.3.2 toolchain's `/opt/swift/usr/bin/ld.lld` first, which fails to load `libxml2.so.2` (the image has `libxml2.so.16`), so WebKit's `-fuse-ld=lld` probe fails, `USE_LD_LLD` turns itself off and every link runs GNU BFD `ld`: two gtk-debug links held 8.5 GB each; the image's own LLD 22.1.2 (`/usr/bin/lld-22`) runs | 3 | `live build.links_with_lld` |
+| A CMake port links with lld in a container on the image workspaces are made from. The SDK image (Ubuntu 26.04) carries the Swift toolchain built for 24.04, whose `ld.lld` needs a `libxml2.so.2` the image lacks, so WebKit's `-fuse-ld=lld` probe fails and every link is GNU `ld` (8.5 GB and more a gtk-debug link). The fix is the fork's `swift-ubuntu2604` branch, for upstream (Swift 6.4.2, built for 26.04): on an image built from it gtk-debug configured `USE_LD_LLD=ON`, linked with LLD 21 and finished in 92 min at three jobs in the 20 GB podman machine (measured 2026-11-19). Owed until the image `wk new` pulls carries it | 3 | `live build.links_with_lld` |
 | A `gtk-release` build in a container on the Mac's 20 GB podman VM finishes under the default sizing: WebCore's unified and derived sources at -O3 -g hold 14.3 GB anonymous at four jobs (measured 2026-10-21 from the cgroup's `memory.stat`; three runs killed at 3072 MB per job), so a CMake web port is sized at 4608 MB per job; the watchdog reads `anon`+`shmem`, since `memory.current` carried 2.2 GB of page cache and slab at that peak; and the OOM advice it prints changes the next run's job count from a macOS host | 3 | `live build.preset[gtk-release]` |
 | `wk run --profile --browser --process ui\|web\|network\|gpu` attaches samply to a live MiniBrowser in a workspace with a display, heaptrack and massif reach `--browser` on the CMake ports, and the fixed-wait attach holds on a slow page | 3 | `live run.browser_profile` |
 | `wk run --lldb` in a fresh workspace symbolicates glibc, Mesa and GTK frames, and `gtk-debug` runs under lldb | 3 | `live run.debug_symbols` |
@@ -1381,6 +1377,9 @@ Decisions are asked as questions, and their answers are recorded under "Decision
 - What a side's spread growing means: the report pools every subtest's values into one sd per arm and names only B
   (measured: identical noise, one of two subtests 30% faster, B's sd 42.8 against A's 26.7 is flagged). Is it each
   subtest's relative sd, or the suite row's run-to-run sd, and is a noisier A named too?
+- Until upstream's SDK image carries the Swift toolchain built for its own Ubuntu (the fork's `swift-ubuntu2604` branch, not
+  yet proposed upstream), a CMake web port still links with GNU `ld` in every workspace: open the upstream pull request and
+  wait for its image, or build the image here from the fork and make that the one `wk new` pulls?
 - Is the JIT-dumped samply run the warmup round, labelled no measurement, or a measured leg (`JSC_useJITDump=1` has been
   seen to crash the WebKitGTK UI process, lib/wk/profile.py)?
 - Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
