@@ -8,6 +8,8 @@ import sys
 from wk import kv, project, record, repos
 
 BROKER_SOCKET = "/run/wk/broker.sock"
+# podman 5.4's own default is Fedora CoreOS 41, kernel 6.12.13, whose timer migration soft-locks an idle vCPU; 5.8 is kernel 7.2.
+MACHINE_IMAGE = "docker://quay.io/podman/machine-os:5.8"
 GUEST_BROKER_SOCKET = ".wk-broker.sock"
 PUSH_SOCKET = "/run/wk/push.sock"
 GUEST_PUSH_SOCKET = ".wk-push.sock"
@@ -55,7 +57,6 @@ class Store:
         return self.env.get("HOME") or os.path.expanduser("~")
 
     def podman_machine(self):
-        """The podman machine a macOS host's container workspaces run in."""
         return self.env.get("WK_MACHINE") or "wk"
 
     def state_dir(self):
@@ -321,7 +322,7 @@ def main(argv):
     s = Store()
     for k, v in (("WK_STORE", s.store_dir()), ("keyring_dir", s.keyring_dir()), ("keyring_agent_rw_dir", s.keyring_agent_rw_dir()),
                  ("keyring_claude_login", s.keyring_claude_login()),
-                 ("keyring_push_dir", s.keyring_push_dir()), ("mirror_parent", s.mirror_parent())):
+                 ("keyring_push_dir", s.keyring_push_dir()), ("mirror_parent", s.mirror_parent()), ("machine_image", MACHINE_IMAGE)):
         print("%s=%s" % (k, shlex.quote(v)))
     return 0
 

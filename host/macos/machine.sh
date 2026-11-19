@@ -234,11 +234,12 @@ if ! wk_py wk.places podman-vm State >/dev/null 2>&1; then
         return 0 2>/dev/null || exit 0
     fi
     info "creating podman machine '$WK_MACHINE' (${_cores} cpus, ${_mem} MiB, ${_disk} GiB)"
-    log  "this downloads a Fedora CoreOS image and takes a few minutes"
+    log  "this downloads $machine_image and takes a few minutes"
 
     # Naming any --volume overrides podman's defaults (/Users, /private, /var/folders).
     # No --playbook: it runs from a first-boot unit whose failures nothing reads.
     podman machine init "$WK_MACHINE" \
+        --image "$machine_image" \
         --cpus "$_cores" \
         --memory "$_mem" \
         --disk-size "$_disk" \

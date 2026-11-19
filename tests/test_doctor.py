@@ -375,8 +375,11 @@ class TestTheStoreOnAMacHost(unittest.TestCase):
         fake.answer(("podman", "machine", "ssh", "wk", "--"), out=FULL_STORE_BLOB)
         fake.answer(("python3", "-c"), rc=0)
         rows = list(fake_doctor(True, machine=fake).workspaces_store())
-        self.assertEqual((OK, "podman machine 'wk' running", ""), rows[0])
+        self.assertEqual((MISS, "podman machine 'wk' runs docker://quay.io/podman/machine-os:5.8",
+                          "'wk rm' its workspaces, then:  podman machine rm wk && ./setup --stage machine"), rows[0])
         self.assertTrue(any("container machine: git user.name" in r[1] for r in rows), rows)
+        fake.answer(("podman", "machine", "ssh", "wk", "--"), out="ostree-remote-image:fedora:docker://quay.io/podman/machine-os:5.8")
+        self.assertEqual(OK, list(fake_doctor(True, machine=fake).workspaces_store())[0][0])
 
     def test_a_machine_whose_tooling_answers_nothing_is_unknown(self):
         fake = Fake()

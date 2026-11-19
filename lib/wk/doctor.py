@@ -16,7 +16,7 @@ from wk.key.cli import Key
 from wk.kv import kv
 from wk.machine import TIMED_OUT, Local, Ssh
 from wk.machine_cmd import deps as machine_deps
-from wk.store import Store, in_vm
+from wk.store import MACHINE_IMAGE, Store, in_vm
 
 OK, MISS, UNK, NOTE = "ok", "miss", "unk", "note"
 MARK = {OK: "\033[32mok\033[0m", MISS: "\033[31m--\033[0m", UNK: "\033[33m??\033[0m"}
@@ -366,7 +366,6 @@ def named(rows, name):
 
 
 def desktop_rows(rd, name):
-    """Guest `name`'s desktop readings (guest.desktop_readings) as rows."""
     v = rd.get
     cu = v("console_user", "")
     rows = [miss("nobody is logged in at the window (console user '%s'), so there is no desktop" % cu, RESTART)
@@ -599,7 +598,8 @@ class Doctor:
             yield unk("podman machine '%s' is stopped" % name, "wk start, then re-run wk doctor for the store checks")
             return
         else:
-            yield ok("podman machine '%s' running" % name)
+            booted = self.in_vm("rpm-ostree status --booted --json | jq -r '.deployments[0][\"container-image-reference\"]'") or ""
+            yield check("podman machine '%s' runs %s" % (name, MACHINE_IMAGE), "'wk rm' its workspaces, then:  podman machine rm %s && ./setup --stage machine" % name, booted.endswith(MACHINE_IMAGE))
             out = self.in_vm("WK_STORE=/var/lib/wk python3 /opt/wk-tools/wk doctor --probe-store")
             if not out:
                 yield unk("store inside the VM", "/opt/wk-tools missing in the VM? run ./setup --stage sdk")
