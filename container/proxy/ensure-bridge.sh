@@ -77,4 +77,5 @@ export WK_SSH_SETENV
 WK_TOOLS_DIR=/opt/wk-tools
 . "$WK_TOOLS_DIR/shell/path.sh"
 
+cd "${WK_SRC:-.}" 2>/dev/null || true   # a command starts in the checkout, as a shell does
 exec "$@"
