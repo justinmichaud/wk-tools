@@ -43,7 +43,6 @@ def task_records_for(records, name):
 
 
 def task_lines(tasks):
-    """One line per job, with the command that stops it."""
     return "\n".join("    %s (pid %s on %s)  stop it:  %s" % (t.field("kind"), t.field("pid"), t.field("machine"), t.field("kill"))
                      for t in tasks)
 
@@ -349,8 +348,7 @@ def fetch_from_mirror(driver, name, here):
         info("no mirror in reach of '%s', so its checkout is as old as what it was made from" % name)
         log("  wk sync %s    fetches it over the network" % name)
     else:
-        info("nothing to run in '%s' yet, so its checkout was not fetched in" % name)
-        log("  wk sync %s    once it is up" % name)
+        info("nothing runs in '%s' yet, so its checkout is fetched in when it starts" % name)
         return False
     return True
 

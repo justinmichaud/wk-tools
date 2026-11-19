@@ -104,7 +104,7 @@ class Report:
         elif state == NOTE:
             self.out.write("        %s\n" % what)
         else:
-            self.out.write("  %s    %-46s -> %s\n" % (MARK[state], what, remedy))
+            self.out.write("  %s    %s\n" % (MARK[state], "%-46s -> %s" % (what, remedy) if remedy else what))
         self.missing += state == MISS
 
     def rows(self, rows):

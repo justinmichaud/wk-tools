@@ -1323,7 +1323,7 @@ class Vm(Driver):
         return g.argv("cd %s 2>/dev/null; exec \"${SHELL:-/bin/zsh}\" -l" % shlex.quote(self.src(ws)), tty=True), None
 
     def exec_argv(self, ws, argv, tty=False, person=False):
-        return self._guest_or_die(ws).argv(shlex.join(argv), tty=tty), None
+        return self._guest_or_die(ws).argv("cd %s 2>/dev/null; %s" % (shlex.quote(self.src(ws)), shlex.join(argv)), tty=tty), None
 
     def copier(self, ws):
         return self._guest_or_die(ws)

@@ -796,8 +796,7 @@ class TestFreshen(WorkspaceTest):
     def test_a_workspace_nothing_answers_in_is_reported_not_fetched(self):
         self.w.probe = None
         err = self.freshen()
-        self.assertIn("nothing to run in 'ws' yet, so its checkout was not fetched in", err)
-        self.assertIn("wk sync ws    once it is up", err)
+        self.assertIn("nothing runs in 'ws' yet, so its checkout is fetched in when it starts", err)
         self.assertEqual(len(self.runs(head="exec")), 1)
 
     def test_a_failed_fetch_warns_and_is_not_fatal(self):

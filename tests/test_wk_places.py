@@ -287,7 +287,7 @@ class TestVm(VmTest):
         kind, argv, cwd = self.fake.effects[-1]
         self.assertEqual(kind, "run_tty")
         self.assertEqual(argv[:5], (self.t.tart(), "exec", "-i", "-t", "wk-mac"))
-        self.assertEqual(argv[-1], "lldb -o attach")
+        self.assertEqual(argv[-1], "cd /Users/admin/WebKit 2>/dev/null; lldb -o attach")
         self.assertIsNone(cwd)
 
     def test_a_stopped_guest_is_refused_naming_its_start(self):
