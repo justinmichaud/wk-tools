@@ -439,8 +439,7 @@ class Ssh(Machine):
     """A host over ssh, or `podman`'s or `tart`'s channel: each call one bounded round trip run by `via` (this host)."""
 
     def __init__(self, dest, opts=None, timeout=10, via=None, control_dir=None, channel=None, kind="ssh"):
-        self.dest = dest
-        self.name = dest
+        self.dest = self.name = dest
         self.control_dir = control_dir
         self.opts = list(opts or []) + ["-o", "BatchMode=yes", "-o", "ConnectTimeout=%d" % timeout]
         self.via = via or Local()
@@ -490,8 +489,7 @@ class Ssh(Machine):
         return self._far("cat %s" % shlex.quote(path), path)
 
     def read_tree(self, anchor, rel, patterns, depth=3):
-        parts = [p for p in rel.split("/") if p]
-        r = self._ssh(shlex.join(["sh", "-c", FAR_TREE, "sh", anchor, str(depth)] + parts))
+        r = self._ssh(shlex.join(["sh", "-c", FAR_TREE, "sh", anchor, str(depth)] + [p for p in rel.split("/") if p]))
         if r.rc == 3 and "wk-planted " in r.err:
             raise Planted(r.err.split("wk-planted ", 1)[1].splitlines()[0])
         if not r.ok:
@@ -505,10 +503,7 @@ class Ssh(Machine):
         return self._ssh("test -d %s" % shlex.quote(path)).ok
 
     def listdir(self, path):
-        r = self._ssh("ls -1A %s" % shlex.quote(path))
-        if not r.ok:
-            raise OSError(r.err.strip())
-        return sorted(r.out.split())
+        return sorted(self._far("ls -1A %s" % shlex.quote(path), path).split())
 
     def alive(self, pid):
         return self._ssh("kill -0 %d" % pid).ok
