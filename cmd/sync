@@ -27,7 +27,7 @@ workspace, and so is one in the snapshot every new workspace starts from.
   0  everything in scope was brought up to date and is wired right
   1  something did not take, did not fetch, or is wired wrong (above)
 """
-from wk import store, sync, workspace
+from wk import store, sync
 from wk.act import die
 from wk.decl import Command, Opt
 from wk.lock import Lock
@@ -65,9 +65,7 @@ def parse(args, name=""):
     for opt in args.order:   # two scopes are refused in the order they were typed
         if scope_named.get(opt) is not None:
             set_scope(scope_named[opt], opt)
-    if named:
-        workspace.require_name(named)
-        name = named
+    name = named or name
     if name:
         set_scope("ws", "'%s'" % name)
     return scope or "here", name, place, args.flag("--fix")

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from tests import fakes
 from tests.fakes import FakeRegistry, Result
-from tests.support import REPO, load_cmd
+from tests.support import REPO
 from tests.test_wk_places import LINUX_PROBE
 from tests.test_wk_workspace import DRIVERS, WorkspaceTest, said
 
@@ -879,19 +879,6 @@ class TestTheBrokerClient(unittest.TestCase):
         cp = subprocess.run([sys.executable, str(REPO / "container" / "broker" / "wk-broker-client.py"), "sync"],
                             env=dict(os.environ, WK_BROKER_SOCKET="/nonexistent/broker.sock"), capture_output=True, text=True)
         self.assertEqual(cp.returncode, 2)
-
-
-# What no command line reaches: the one import of a lib module this file keeps.
-sys.path.insert(0, str(REPO / "lib"))
-from wk import decl  # noqa: E402
-
-
-class TestNotReachableFromTheCLI(fakes.FlowTest):
-    def test_an_invalid_name_is_refused(self):
-        """The dispatcher refuses a name no place holds before cmd/sync reads it (TestTheCommandLine), and inside a
-        workspace the dispatcher refuses a name argument outright, so this refusal is reached by no command line."""
-        cmd = load_cmd("sync")
-        self.assertIn("invalid name", self.refused(lambda: cmd.parse(decl.parse("sync", cmd.COMMAND, ["bad/name"])[1], "")))
 
 
 if __name__ == "__main__":
