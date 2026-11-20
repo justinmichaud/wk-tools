@@ -243,7 +243,7 @@ def builds_on_the_books_env(tmp, *labels):
     tmp = Path(tmp)
     sys.path.insert(0, str(REPO / "lib"))
     from wk import record
-    records = record.Records(env={"XDG_STATE_HOME": str(tmp), "HOME": str(tmp)})
+    records = record.Records(env={"WK_STORE": str(tmp), "HOME": str(tmp)})
     for label in labels:
         records.begin("build", "here", label, "true", "", ["compile"], holds=["build:" + record.host_name()])
     binp = tmp / "bin"
@@ -252,7 +252,7 @@ def builds_on_the_books_env(tmp, *labels):
     (binp / "podman").write_text(
         '#!/bin/sh\ncase "$1 $2" in "machine ssh")\n' + lines + "    ;;\nesac\nexit 0\n")
     (binp / "podman").chmod(0o755)
-    return {"PATH": f"{binp}:{os.environ['PATH']}", "XDG_STATE_HOME": str(tmp)}
+    return {"PATH": f"{binp}:{os.environ['PATH']}", "WK_STORE": str(tmp)}
 
 
 def bench_ls_runs(stdout):

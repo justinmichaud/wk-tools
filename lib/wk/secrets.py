@@ -39,9 +39,9 @@ def first_line(text):
 
 
 LOGIN_WRITE = 'umask 077 && mkdir -p "$HOME/$1" && cat > "$HOME/$1/.credentials.json"'
-# A container links its read-only /secrets, so a later `wk key set` reaches it: rc 1 is a link to nothing held yet.
+# A container links its read-only keyring view (WK_SECRETS_VIEW, default /secrets), so a later `wk key set` reaches it: rc 1 is a link to nothing held yet.
 # A write removes first: umask sets the mode of a file `cat >` creates, not of one already there.
-DELIVERY = {"link": 'ln -sfn "/secrets/$2" "$HOME/$1" || exit 2; test -e "$HOME/$1"',
+DELIVERY = {"link": 'ln -sfn "${WK_SECRETS_VIEW:-/secrets}/$2" "$HOME/$1" || exit 2; test -e "$HOME/$1"',
             "write": 'umask 077 && rm -f "$HOME/$1" && cat > "$HOME/$1"', "withdraw": 'rm -f "$HOME/$1"'}
 
 

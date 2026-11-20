@@ -486,11 +486,11 @@ class WorkspaceShell(Local):
     """A workspace's shell, run here with HOME at its home; every argv kept."""
 
     def __init__(self, home):
-        self.home, self.argvs = home, []
+        self.home, self.argvs, self.view = home, [], home + ".view"
 
     def run(self, argv, input=None, timeout=None, stream=False):
         self.argvs.append(argv)
-        return super().run(["env", "HOME=" + self.home] + list(argv), input=input, timeout=timeout)
+        return super().run(["env", "HOME=" + self.home, "WK_SECRETS_VIEW=" + self.view] + list(argv), input=input, timeout=timeout)
 
 
 class TestTheDelivery(SecretsTest):
@@ -518,7 +518,7 @@ class TestTheDelivery(SecretsTest):
                     if kind not in kinds.split(","):
                         self.assertFalse(os.path.lexists(p), home_file)
                     elif kind == "container":
-                        self.assertEqual("/secrets/" + store_file, os.readlink(p))
+                        self.assertEqual("%s/%s" % (m.view, store_file), os.readlink(p))
                     else:
                         self.assertEqual("%s-%s\n" % (name, PLACEHOLDER), open(p).read())
                         self.assertEqual(0o600, os.stat(p).st_mode & 0o777)
@@ -546,13 +546,13 @@ class TestTheDelivery(SecretsTest):
     def test_a_container_is_given_them_by_its_first_run(self):
         home = os.path.join(self.tmp, "home")
         os.makedirs(home)
-        env = dict(os.environ, HOME=home, PYTHONPATH=ROOT + "/lib")
+        env = dict(os.environ, HOME=home, PYTHONPATH=ROOT + "/lib", WK_SECRETS_VIEW=home + ".view")
         cp = subprocess.run([sys.executable, "-m", "wk.secrets", "deliver", "container", "/opt/wk-tools"], capture_output=True,
                             text=True, env=env, timeout=60)
         self.assertEqual(0, cp.returncode, cp.stderr)
         self.assertEqual("/opt/wk-tools/" + secrets.PUSH_CLIENT, subprocess.run(
             ["git", "config", "--global", "core.sshCommand"], env=env, capture_output=True, text=True).stdout.strip())
-        self.assertEqual("/secrets/litellm-key", os.readlink(os.path.join(home, ".wk-litellm-key")))
+        self.assertEqual(home + ".view/litellm-key", os.readlink(os.path.join(home, ".wk-litellm-key")))
         self.assertIn("wk key set litellm", cp.stderr)
 
     def test_a_build_box_is_given_them_by_wk_machine_setup(self):
