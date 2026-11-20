@@ -275,20 +275,18 @@ class TestTheDeployKeysAreCopiedWhereTheServiceReadsThem(SecretsTest):
 
 
 class TestTheInjectorsFiles(SecretsTest):
-    def test_the_first_line_is_written_under_umask_077_never_as_an_argument_and_cleared(self):
+    def test_the_first_line_is_written_under_umask_077_never_as_an_argument(self):
         self.w.seed()
         s, path = self.w.sec(), self.tmp + "/a dir/push-github-pat"
-        self.assertTrue(s.cred_write(path, "github-pat"))
+        self.assertTrue(s.cred_sync(path, "github-pat"))
         self.assertEqual("ghp-held\n", self.w.files[path])
         for argv in self.w.argvs():
             self.assertNotIn("ghp-held", " ".join(argv))
-        s.cred_clear(path)
-        self.assertNotIn(path, self.w.files)
 
     def test_nothing_held_writes_nothing(self):
         """An empty token file would be a token file: the injector would send `Authorization: Bearer`."""
         path = self.tmp + "/pat"
-        self.assertFalse(self.w.sec().cred_write(path, "github-pat"))
+        self.assertTrue(self.w.sec().cred_sync(path, "github-pat"))
         self.assertNotIn(path, self.w.files)
 
     def test_sync_is_write_or_clear(self):
@@ -657,9 +655,10 @@ class TestNothingButAFileIsReadOrWrittenThroughALink(SecretsTest):
     def test_an_injectors_copy_is_written_at_mode_600_and_cleared_through_a_path_with_a_space(self):
         os.makedirs(self.tmp + "/a dir")
         pat = self.tmp + "/a dir/push-github-pat"
-        self.assertTrue(self.sec.cred_write(pat, "github-pat"))
+        self.assertTrue(self.sec.cred_sync(pat, "github-pat"))
         self.assertEqual((self.REAL + "\n", 0o600), (open(pat).read(), os.stat(pat).st_mode & 0o777))
-        self.sec.cred_clear(pat)
+        os.remove(self.token)
+        self.sec.cred_sync(pat, "github-pat")
         self.assertFalse(os.path.exists(pat))
 
     def test_the_setup_entry_point_writes_every_file_the_injector_reads(self):

@@ -107,9 +107,6 @@ class Secrets:
     def bugzilla_key_path(self):
         return os.path.join(self.store.keyring_push_dir(), "bugzilla-api-key")
 
-    def agent_secrets(self):
-        return agent_secrets()
-
     def cred_path(self, name):
         home = self.env.get("HOME") or os.path.expanduser("~")
         fixed = {"github-pat": self.github_pat_path, "bugzilla-api-key": self.bugzilla_key_path,
@@ -118,17 +115,24 @@ class Secrets:
                  "tailnet-api": lambda: self.env.get("WK_TS_API_SECRET") or os.path.join(home, ".config", "wk", "tailscale-api-key")}
         if name in fixed:
             return fixed[name]()
-        row = next((r for r in self.agent_secrets() if r[0] == name), None)
+        row = next((r for r in AGENT_SECRETS if r[0] == name), None)
         if row is None:
             return None
         if "remote" in row[4].split(",") and os.path.isfile(remote_marker_path(self.env)):
             return os.path.join(home, row[2])
         return os.path.join(self.store.keyring_dir(), row[1])
 
+    def secretfile(self, verb, path, input="", act=False, echo=True):
+        """lib/secretfile.py's <verb> on `path`; a refusal's reason goes to stderr unless `echo` is off."""
+        r = (self.machine.act_run if act else self.machine.run)(
+            ["python3", os.path.join(self.root, "lib", "secretfile.py"), verb, path], input=input)
+        if echo:
+            sys.stderr.write(r.err)
+        return r
+
     def read(self, path):
         """Every byte, "" when absent, None when lib/secretfile.py refused it (a link or a shared inode)."""
-        r = self.machine.run(["python3", os.path.join(self.root, "lib", "secretfile.py"), "read", path], input="")
-        sys.stderr.write(r.err)
+        r = self.secretfile("read", path)
         return r.out if r.ok else None
 
     def cred_read(self, name):
@@ -139,8 +143,7 @@ class Secrets:
         path = self.cred_path(name)
         if not path:
             return False
-        r = self.machine.run(["python3", os.path.join(self.root, "lib", "secretfile.py"), "present", path], input="")
-        sys.stderr.write(r.err)
+        r = self.secretfile("present", path)
         return True if r.rc == 0 else False if r.rc == 1 else None
 
     def check_value(self, name, value, path="", repos=None, evidence=None):
@@ -210,22 +213,18 @@ class Secrets:
         r = self.machine.run(self.machine_argv("sha256sum < %s" % shlex.quote(path)))
         return r.ok and r.out.split()[:1] == [hashlib.sha256(value.encode()).hexdigest()]
 
-    def cred_write(self, path, name):
-        """The first line of a held credential, down a pipe: an empty file would be a token the injector sends."""
-        value = first_line(self.cred_read(name))
+    def _converge(self, path, value, mkdir=False):
+        """`value` is the file's whole content, down a pipe; empty withdraws the file: an empty file would be a token the injector sends."""
         if not value:
-            return False
-        if self._holds(path, value + "\n"):
+            return self._holds(path, None) or self._act("rm -f %s" % shlex.quote(path)).ok
+        if self._holds(path, value):
             return True
-        return self._act("umask 077 && cat > %s" % shlex.quote(path), input=value + "\n").ok
-
-    def cred_clear(self, path):
-        return self._holds(path, None) or self._act("rm -f %s" % shlex.quote(path)).ok
+        make = "mkdir -p %s && " % shlex.quote(os.path.dirname(path)) if mkdir else ""
+        return self._act("umask 077 && %scat > %s" % (make, shlex.quote(path)), input=value).ok
 
     def cred_sync(self, path, name):
-        if first_line(self.cred_read(name)):
-            return self.cred_write(path, name)
-        return self.cred_clear(path)
+        value = first_line(self.cred_read(name))
+        return self._converge(path, value + "\n" if value else "")
 
     def machine_creds(self):
         return ((self.machine_read_pat(), "github-pat"), (self.machine_pat(), "github-pat"),
@@ -240,11 +239,7 @@ class Secrets:
         if src == dest:
             return True
         key = self.read(src)
-        if not (key or "").strip():
-            return self._holds(dest, None) or self._act("rm -f %s" % shlex.quote(dest)).ok
-        if self._holds(dest, key):
-            return True
-        return self._act("umask 077 && mkdir -p %s && cat > %s" % (shlex.quote(os.path.dirname(dest)), shlex.quote(dest)), input=key).ok
+        return self._converge(dest, key if (key or "").strip() else "", mkdir=True)
 
     def push_converge_machine(self):
         if not self.machine.isdir(self.store.keyring_push_dir()):
@@ -327,7 +322,7 @@ class Secrets:
 
     def view_files(self, kind):
         want = {f: "0644" for f in PUBLIC}
-        for row in self.agent_secrets():
+        for row in AGENT_SECRETS:
             if kind in row[4].split(","):
                 want[row[1]] = "0600"
         return want

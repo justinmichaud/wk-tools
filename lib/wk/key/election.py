@@ -175,7 +175,7 @@ class Election:
             except Refused:
                 return False
         ok = True
-        for fork, repo in [f[:2] for f in self.push_keys()]:
+        for fork, repo in self.fork_repos():
             ok = self.fleet_key(fork, repo) and ok
         return ok
 

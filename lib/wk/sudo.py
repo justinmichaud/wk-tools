@@ -48,10 +48,13 @@ def seconds(minutes):
         return None
 
 
+TIMEOUT_SECS = seconds(TIMEOUT_MIN)
+
+
 class Sudo:
     def __init__(self, machine, env=None, linux=None):
         self.machine, self.env, self._linux = machine, os.environ if env is None else env, linux
-        self.timeout_desc = "%g seconds" % seconds(TIMEOUT_MIN)
+        self.timeout_desc = "%g seconds" % TIMEOUT_SECS
 
     def dropin(self):
         return DROPIN_FMT % self.machine.run(["id", "-un"]).out.strip()
@@ -75,7 +78,7 @@ class Sudo:
         m = TIMEOUT.search(listing.out)
         timeout = m.group(1) if m and m.group(1) else "unset"
         secs = seconds(timeout)
-        if secs is not None and 0 <= secs <= seconds(TIMEOUT_MIN):
+        if secs is not None and 0 <= secs <= TIMEOUT_SECS:
             if not secs:
                 return 0, "a password is required, and no timestamp is kept at all (timeout 0) -- stricter than the %s this installs, so nothing to do%s" % (self.timeout_desc, held)
             return 0, "a password is required, and the timestamp lasts %g seconds%s" % (secs, held)

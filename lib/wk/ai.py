@@ -75,12 +75,6 @@ class Ai:
                 "without it. Make it again:  wk rm %s && wk new %s" % (self.agent, self.name, self.name, self.name))
         return lines[-1]
 
-    def checks(self):
-        wall.agent_checks(self.root, self.driver, self.name, self.machine)
-
-    def guest_egress(self):
-        wall.guest_egress(self.env, self.driver, self.name, self.machine)
-
     def wall_available(self):
         """A builtin needs `sh -c`: a place's exec hands argv to an exec, not a shell (measured)."""
         return self.exec(list(HAVE) + ["bwrap"]).ok
@@ -89,7 +83,7 @@ class Ai:
         """A person's Claude session, not the babysitter's `-p`; the setup token a driver is given wins over the login."""
         if self.agent != "claude" or not on_a_terminal():
             return []
-        if any(r[0] == "claude" and self.driver.kind in r[4].split(",") for r in secrets.agent_secrets()):
+        if any(r[0] == "claude" and self.driver.kind in r[4].split(",") for r in secrets.AGENT_SECRETS):
             warn("Remote Control is off for this session: a %s place authenticates with the\n"
                  "  `claude setup-token` credential, which Remote Control refuses" % self.driver.kind)
             return []
@@ -134,9 +128,9 @@ class Ai:
         if t.kind == "remote" and self.exec(["sh", "-c", GH_LOGIN]).ok:
             die("'%s' holds a GitHub credential in the account the agent would run as\n    (~/.config/gh/hosts.yml, or gh is "
                 "logged in there), and nothing an agent runs\n    may post as you. Remedy, on %s:  gh auth logout" % (t.name, t.name))
-        self.checks()
+        wall.agent_checks(self.root, t, name, self.machine)
         if t.kind == "vm":
-            self.guest_egress()
+            wall.guest_egress(self.env, t, name, self.machine)
         return self.session(agent_bin, mode, args)
 
 

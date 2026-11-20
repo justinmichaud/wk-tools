@@ -88,7 +88,7 @@ class Key(Creds, DeployKeys, Election, Check):
         return 0
 
     def show(self):
-        for fork, repo in [f[:2] for f in self.push_keys()]:
+        for fork, repo in self.fork_repos():
             self.out.write("# %s\n%s\n" % (repo, self.pub_of(fork)))
         return 0
 

@@ -17,9 +17,9 @@ class DeployKeys:
         return self.sec.read(self.sec.push_key_path(fork))
 
     def ensure(self):
-        self.private_dir(self.sec.store.keyring_dir())
-        self.private_dir(self.sec.store.keyring_push_dir())
-        for fork, repo in [f[:2] for f in self.push_keys()]:
+        self.machine.ensure_dir_mode(self.sec.store.keyring_dir(), "0700")
+        self.machine.ensure_dir_mode(self.sec.store.keyring_push_dir(), "0700")
+        for fork, repo in self.fork_repos():
             key = self.sec.push_key_path(fork)
             if self.machine.exists(key):
                 unchanged("key for " + repo)
@@ -71,7 +71,7 @@ class DeployKeys:
 
     def rotate_keys(self):
         """The old keys off GitHub first: one left there keeps write access."""
-        for fork, repo in [f[:2] for f in self.push_keys()]:
+        for fork, repo in self.fork_repos():
             for key_id in self.gh.titled(repo, TITLE):
                 if self.gh.delete(repo, key_id):
                     changed("%s: removed the old shared deploy key (%s)" % (repo, key_id))

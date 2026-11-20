@@ -14,6 +14,9 @@ class Creds:
         """Every repo's deploy keys, each GitHub repository resolved."""
         return repos.push_rows(self.machine, self.root)
 
+    def fork_repos(self):
+        return [k[:2] for k in self.push_keys()]
+
     def key_names(self):
         return [k[0] for k in secrets.push_keys()]
 
@@ -29,15 +32,12 @@ class Creds:
     def path(self, name):
         return self.sec.cred_path(name)
 
-    def _secretfile(self, verb, path, input="", run=None):
-        return (run or self.machine.run)(["python3", os.path.join(self.root, "lib", "secretfile.py"), verb, path], input=input)
-
     def present(self, name):
         return bool(self.sec.cred_stored(name))
 
     def fingerprint(self, name):
         p = self.path(name)
-        return self._secretfile("fingerprint", p).out.strip() if p else ""
+        return self.sec.secretfile("fingerprint", p, echo=False).out.strip() if p else ""
 
     def stored_verdict(self, name):
         return self.sec.cred_verdict(name)
@@ -45,10 +45,6 @@ class Creds:
     def verdict_text(self, name):
         fp = self.fingerprint(name)
         return self.stored_verdict(name) + ("\n    fingerprint: %s" % fp if fp else "")
-
-    def private_dir(self, d):
-        """0700 asserted on every run: a directory made by hand is as open as its umask left it."""
-        self.machine.ensure_dir_mode(d, "0700")
 
     def mint(self, name):
         """In the foreground on this terminal, as a mint may need a person."""
@@ -59,9 +55,8 @@ class Creds:
 
     def store(self, name, value):
         p = self.path(name)
-        self.private_dir(os.path.dirname(p))
-        r = self._secretfile("write", p, value + "\n", run=self.machine.act_run)
-        sys.stderr.write(r.err)
+        self.machine.ensure_dir_mode(os.path.dirname(p), "0700")
+        r = self.sec.secretfile("write", p, value + "\n", act=True)
         if not r.ok:
             return False
         return self.sec.publish_view("container")
@@ -71,7 +66,7 @@ class Creds:
         self.sec.publish_view("container")
 
     def cred_line(self, name, state, where):
-        var = next((r[3] for r in self.sec.agent_secrets() if r[0] == name), "-")
+        var = next((r[3] for r in secrets.AGENT_SECRETS if r[0] == name), "-")
         return "%-13s %-8s %s%s" % (name, state, where or "", "  ($%s in a workspace)" % var if var != "-" else "")
 
     def cred_report(self, name):

@@ -419,7 +419,7 @@ class TestAGuest(_Flow):
         self.driver = SimDriver(self.fake, self.env, kind="vm")
         self.driver.answers["find claude"] = Result(0, "claude\n")
         self.reg = sim_registry(self.env, self.fake, self.driver)
-        p = mock.patch.object(AI.Ai, "checks")
+        p = mock.patch.object(wall, "agent_checks")
         p.start()
         self.addCleanup(p.stop)
 

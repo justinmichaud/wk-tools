@@ -32,7 +32,7 @@ class _Inside(_Flow, _Wall):
         refused = False
         with contextlib.redirect_stderr(err):
             try:
-                AI.Ai(AI.ROOT, self.env, self.reg, self.driver, "claude", "demo").checks()
+                wall.agent_checks(AI.ROOT, self.driver, "demo", self.reg.machine)
             except Refused:
                 refused = True
         os.environ.pop("WK_FORCE", None)

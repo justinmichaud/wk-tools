@@ -242,7 +242,7 @@ class Wall:
 
     def secrets_view(self):
         rows, kept = [], []
-        for row in secrets.agent_secrets():
+        for row in secrets.AGENT_SECRETS:
             if self.driver.kind in row[4].split(","):
                 continue
             path = "/secrets/" + row[1]
@@ -528,11 +528,10 @@ class Wall:
         return checks
 
 
-def verdict(rep, publishing=False):
-    return "publishing" if publishing else "broken" if rep.missing else "intact"
-
-
-def could_publish(results):
+def report(results, rep):
+    """Every check's rows into `rep`, and whether one that guards publishing found a miss."""
+    for _, found in results:
+        rep.rows(found)
     return any(r[0] == MISS for name, found in results if name in PUBLISHING for r in found)
 
 
@@ -555,19 +554,14 @@ def from_host(root, driver, ws, machine, rep, want_gpu=False):
     if state != "running":
         return False
     wall = Wall(root, driver, ws, machine, want_gpu)
-    results = run_at_once(wall.from_host())
-    for _, found in results:
-        rep.rows(found)
+    publishing = report(run_at_once(wall.from_host()), rep)
     rep.rows(wall.person_write() + (wall.rootless_proxy() if driver.kind == "container" else []))
-    return could_publish(results)
+    return publishing
 
 
 def from_inside(root, driver, ws, machine, rep):
     """`wk doctor` in a workspace: every row into `rep`, and whether an agent in here could publish."""
-    results = run_at_once(Wall(root, driver, ws, machine).from_inside())
-    for _, found in results:
-        rep.rows(found)
-    return could_publish(results)
+    return report(run_at_once(Wall(root, driver, ws, machine).from_inside()), rep)
 
 
 def measure(root, driver, ws, machine, want_gpu=False):
@@ -580,7 +574,7 @@ def measure(root, driver, ws, machine, want_gpu=False):
         info("checking workspace '%s' (%s)" % (ws, driver.name))
         publishing = from_host(root, driver, ws, machine, rep, want_gpu)
     sys.stderr.write("\n")
-    v = verdict(rep, publishing)
+    v = "publishing" if publishing else "broken" if rep.missing else "intact"
     if v == "publishing":
         warn("an agent in '%s' could publish (see above)" % ws)
     elif v == "broken":
