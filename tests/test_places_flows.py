@@ -1,9 +1,11 @@
 """A place's driver as a person meets it: `wk new`, `wk rm`, `wk ls`, `wk start` and `wk stop` typed into a world whose
 places are the real drivers over fake podman, tart and ssh."""
+import hashlib
 import json
 import os
 import shlex
 import unittest
+from unittest import mock
 
 from tests import fakes
 from tests.fakes import FakeRegistry, FlowTest, Result
@@ -44,8 +46,7 @@ class World(wsworld.World):
 
     def asked_to(self, head=None):
         """Each argv handed to act_run, its scratch directory taken out."""
-        return [self.rel(e[1]) for e in self.effects if e[0] == "act" and (head is None or os.path.basename(e[1][0]) == head
-                                                                            or any(os.path.basename(a) == head for a in e[1]))]
+        return [self.rel(e[1]) for e in self.effects if e[0] == "act" and (head is None or os.path.basename(e[1][0]) == head or any(os.path.basename(a) == head for a in e[1]))]
 
 
 def flag_pairs(argv):
@@ -90,8 +91,7 @@ class TestAContainerIsListedStartedAndStopped(Flow):
         self.w.make("young", base=False)
         self.w.containers.add("wk-orphan")
         rc, out, _ = self.wk(self.w, "ls")
-        self.assertEqual([l.split()[:3] for l in out.splitlines()[1:]], [["gone", "fakebox", "broken"], ["orphan", "fakebox", "broken"],
-                                                                        ["young", "fakebox", "creating"]])
+        self.assertEqual([l.split()[:3] for l in out.splitlines()[1:]], [["gone", "fakebox", "broken"], ["orphan", "fakebox", "broken"], ["young", "fakebox", "creating"]])
 
     def test_ls_shows_the_arch_recorded_at_creation(self):
         self.w.make("ws")
@@ -148,8 +148,7 @@ class TestAContainerIsCreated(Flow):
             self.assertIn(pair, pairs)
         self.assertEqual([self.w.rel(e[1]) for e in self.w.effects if e[0] == "mkdir" and e[1].startswith(self.w.ws_dir())],
                          [d, d + "/home", d + "/ccache", d + "/changes", d + "/overlay-work", d + "/build"])
-        self.assertEqual(self.w.asked_to("install"), [("install", "-m", "0755", os.path.join(str(wsworld.REPO), "container", "firstrun.sh"),
-                                                    d + "/home/.wkdev-firstrun")])
+        self.assertEqual(self.w.asked_to("install"), [("install", "-m", "0755", os.path.join(str(wsworld.REPO), "container", "firstrun.sh"), d + "/home/.wkdev-firstrun")])
         mine = [self.w.rel(e) for e in self.w.effects if e[0] == "write" and e[1].startswith(self.w.ws_dir()) or e[0] == "act" and e[1][0] == "install"]
         self.assertEqual([e[0] for e in mine], ["write", "act", "write"])
         self.assertEqual((mine[0][1], mine[2][1]), (d + "/arch", d + "/base-id"))
@@ -165,8 +164,7 @@ class TestAContainerIsCreated(Flow):
         self.assertEqual([(a[2].split("\n")[0], a[-1]) for a in fills], [("export WK_AGENTS_CACHE=/store/cache/agents WK_CLAUDE_VERSION=" +
                                                                           a[2].split("WK_CLAUDE_VERSION=")[1].split("\n")[0], "fetch") for a in fills])
         self.assertEqual(len(fills), 1, "the cache is filled here, from the store's side")
-        for pair in (("--env", "CCACHE_DIR=/var/lib/wk/ws/ws/ccache"), ("--volume", "/store/ws/ws:/var/lib/wk/ws/ws"),
-                     ("--env", "CCACHE_MAXSIZE=40G")):
+        for pair in (("--env", "CCACHE_DIR=/var/lib/wk/ws/ws/ccache"), ("--volume", "/store/ws/ws:/var/lib/wk/ws/ws"), ("--env", "CCACHE_MAXSIZE=40G")):
             self.assertIn(pair, pairs)
 
     def test_the_ccache_is_sized_by_wk_ccache_maxsize(self):
@@ -254,6 +252,44 @@ class TestAContainerIsCreated(Flow):
         self.assertEqual(spawn[2], "/store/log/new-ws.log")
 
 
+class TestAContainerIsWaitedFor(Flow):
+    def initialises(self, after=None, words=""):
+        def create(argv, f):
+            f.containers.add(argv[argv.index("--name") + 1])
+            f.dirs.add(argv[argv.index("--home") + 1])
+            return Result(0)
+        self.w.wkdev_create, self.w.last_words, sleep = create, words, self.w.clock.sleep
+
+        def firstrun(seconds):
+            sleep(seconds)
+            if len(self.w.clock.slept) == after:
+                self.w.files[self.w.ws_dir() + "/home/.wk-ready"] = ""
+        self.w.clock.sleep = firstrun
+
+    def test_its_creation_polls_the_marker_on_the_clock_until_it_is_down(self):
+        self.initialises(after=3)
+        rc, _, err = self.created()
+        self.assertEqual((rc, self.w.clock.slept, wsworld.said(err)), (0, [2, 2, 2], "==> workspace 'ws' created"))
+
+    def test_its_creation_gives_up_at_wk_ready_wait_showing_the_containers_last_words(self):
+        self.initialises(words="one\n\ntwo\n")
+        self.w.env["WK_READY_WAIT"] = "4"
+        rc, _, err = self.created()
+        self.assertEqual((rc, self.w.clock.slept, wsworld.said(err)), (1, [2, 2], "error: 'ws' was created but never finished initialising (above):"))
+        self.assertIn("    one\n    two\nerror:", err)
+        self.assertEqual([e[1] for e in self.w.effects if e[0] == "run" and e[1][:2] == ("podman", "logs")], [("podman", "logs", "wk-ws")])
+
+    def test_a_mirror_under_the_containers_home_has_its_mountpoint_made_in_the_workspaces_home_as_the_user(self):
+        self.w.env.update({"WK_CONTAINER_USER": "u", "WK_STORE": "/home/u/.local/share/wk"})
+        self.w.driver = self.w.reg.load("fakebox")
+        self.w.publish("main-1")
+        self.w.dirs.add(self.w.driver.store.mirror_dir())
+        rc, _, err = self.created()
+        made = [e[1] for e in self.w.effects if e[0] == "mkdir" and e[1].startswith("/home/u/.local/share/wk/ws/ws/home/")]
+        self.assertEqual((rc, made), (0, ["/home/u/.local/share/wk/ws/ws/home/.local/share/wk/git"]))
+        self.assertIn(("--volume", "/home/u/.local/share/wk/git:/home/u/.local/share/wk/git:ro"), flag_pairs(self.w.asked_to("wkdev-create")[0]))
+
+
 class TestAContainerIsDestroyed(Flow):
     def test_rm_removes_the_container_then_its_directory_and_its_creation_log(self):
         self.w.make("ws")
@@ -265,6 +301,57 @@ class TestAContainerIsDestroyed(Flow):
         self.assertEqual(self.w.left(), {})
 
 
+class MacHost(World):
+    """A Mac whose containers are in the podman machine `wk`: `podman -c wk` is its podman, and a shell there reads its files and its wk lists."""
+
+    def __init__(self, tmp, kinds=None):
+        super().__init__(tmp, kinds)
+        del self.env["WK_IN_VM"]
+        self.react(["podman", "-c", "wk"], lambda a, f: f._answer(["podman"] + a[3:]))
+        self.react(["podman", "machine", "ssh", "wk", "--"], self._in_machine)
+        self.answer(["podman", "machine", "inspect", "wk"], out=json.dumps([{"Name": "wk", "State": "running", "Resources": {"CPUs": 8, "Memory": 16384}}]))
+
+    def _in_machine(self, argv, f):
+        cmd = argv[-1]
+        if cmd.startswith(("test -d ", "test -e ")):
+            return Result(0 if f.exists(cmd[8:]) else 1)
+        if cmd.endswith("/wk ls --json"):
+            return Result(0, json.dumps({"workspaces": [{"name": c[3:], "place": "fakebox", "state": "running"} for c in sorted(f.containers)]}))
+        return Result(0)
+
+
+class TestOnAMacHost(Flow):
+    world_class = MacHost
+
+    def setUp(self):
+        super().setUp()
+        self.w.make("w")
+        p = mock.patch("os.uname", return_value=os.uname_result(("Darwin", "mac", "25.0", "", "arm64")))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_ls_is_the_podman_machines_own_wk_ls(self):
+        rc, out, _ = self.wk(self.w, "ls")
+        self.assertEqual((rc, [l.split()[:3] for l in out.splitlines()[1:]]), (0, [["w", "fakebox", "running"]]))
+        self.assertIn(("podman", "machine", "ssh", "wk", "--", "WK_IN_VM=1 WK_HOST_SELF=1 WK_NO_DELEGATE=1 WK_ROW_LABEL=here /opt/wk-tools/wk ls --json"),
+                      [e[1] for e in self.w.effects if e[0] == "run"])
+
+    def test_a_container_workspace_is_found_in_the_machines_store_and_entered_by_the_machines_own_wk(self):
+        rc, _, err = self.wk(self.w, "enter", "w", "--", "git", "push")
+        self.assertEqual((rc, [e[1] for e in self.w.effects if e[0] == "exec"]),
+                         (0, [("podman", "machine", "ssh", "wk", "--", "WK_IN_VM=1 WK_HOST_SELF=1 WK_ROW_LABEL=here /opt/wk-tools/wk enter w -- git push")]))
+        self.assertIn(("podman", "machine", "ssh", "wk", "--", "test -d %s" % self.w.ws_dir("w")), [e[1] for e in self.w.effects if e[0] == "run"])
+
+
+    def test_a_run_is_entered_by_the_machines_own_wk_as_its_own_and_a_dry_run_is_not_handed_on(self):
+        for argv in (("run", "w", "--", "x.js"), ("run", "w", "--dry-run", "--", "x.js")):
+            os.environ.pop("WK_DRY_RUN", None)
+            self.w.effects = []
+            rc, _, err = self.wk(self.w, *argv)
+            line = [e[1][-1] for e in self.w.effects if e[0] == "exec"] or [l for l in err.splitlines() if "/opt/wk-tools/wk enter" in l]
+            self.assertEqual((rc, "/opt/wk-tools/wk enter w --own -- bash -lc " in line[0], "WK_DRY_RUN" in line[0]), (0, True, False), argv)
+
+
 class TestInsideAWorkspace(Flow):
     KIND = "local"
 
@@ -274,6 +361,31 @@ class TestInsideAWorkspace(Flow):
                             (("stop",), "a workspace cannot stop itself -- run 'wk stop ws' on the host")):
             self.assertEqual(self.run_wk(*argv), (1, "error: " + words))
         self.assertEqual([e for e in self.w.mutations() if e[0] != "mkdir"], [])
+
+
+class TestAJobInAWorkspaceIsSizedByIt(Flow):
+    KIND = "local"
+
+    def sized(self, sysname, cpu=None, mem=None):
+        os.environ.pop("WK_DRY_RUN", None)
+        self.w.files["/proc/meminfo"] = "MemTotal:       32806140 kB\nMemAvailable:   20480000 kB\n"
+        cgroup = {"/sys/fs/cgroup/cpu.max": cpu, "/sys/fs/cgroup/memory.max": mem}
+        self.w.files = {p: t for p, t in self.w.files.items() if p not in cgroup} | {p: t for p, t in cgroup.items() if t}
+        with mock.patch("os.uname", return_value=os.uname_result((sysname, "ws", "6.1", "", "x86_64"))):
+            rc, _, err = self.wk(self.w, "test", "--dry-run")
+        return rc, err.splitlines()[0]
+
+    def test_on_linux_by_its_cgroup_else_the_machine(self):
+        self.assertEqual(self.sized("Linux", "200000 100000\n", "4294967296\n"), (0, "resources: 2 jobs (cores=2 avail=4096MB @ 1536MB/job)"))
+        self.assertEqual(self.sized("Linux", "max 100000\n", "max\n"), (0, "resources: 8 jobs (cores=8 avail=20000MB @ 1536MB/job)"))
+
+    def test_an_unreadable_or_garbled_cgroup_limit_is_refused_not_replaced_by_the_machines(self):
+        self.assertEqual(self.sized("Linux", None, "max\n"), (1, "error: cannot read /sys/fs/cgroup/cpu.max (no such file: /sys/fs/cgroup/cpu.max): "
+                                                                  "a build in a container is sized by its cgroup's limits"))
+        self.assertEqual(self.sized("Linux", "lots\n", "max\n"), (1, "error: /sys/fs/cgroup/cpu.max reads 'lots', which is not what cgroup v2 writes there"))
+
+    def test_a_guest_has_no_cgroup_and_is_the_machines_size(self):
+        self.assertEqual(self.sized("Darwin"), (0, "resources: 6 jobs (cores=8 avail=20480MB @ 3072MB/job)"))
 
 
 class Fleet(fakes.World):
@@ -369,8 +481,7 @@ class TestABuildBox(FleetFlow):
         self.assertEqual(self.rows(), (0, [["a", "box", "present"]]))
         asked = self.w.asked("box")
         self.assertEqual((len(asked), "uname -s" in asked[0]), (3, True))
-        self.assertEqual(asked[1:], ["test -f $HOME/.wk-remote && test -x /home/u/wk/tools/wk",
-                                     "cd $HOME && WK_NO_DELEGATE=1 WK_ROW_LABEL=box /home/u/wk/tools/wk ls --json"])
+        self.assertEqual(asked[1:], ["test -f $HOME/.wk-remote && test -x /home/u/wk/tools/wk", "cd $HOME && WK_NO_DELEGATE=1 WK_ROW_LABEL=box /home/u/wk/tools/wk ls --json"])
         ssh = [i for i, e in enumerate(self.w.effects) if e[0] == "run" and e[1][0] == "ssh"]
         self.assertEqual({self.w.effects[i - 1] for i in ssh}, {("mkdir", "/st/wk/ssh")}, "each ssh makes its ControlPath directory first")
 
@@ -417,12 +528,136 @@ class TestABuildBox(FleetFlow):
         self.assertEqual([e for e in self.w.mutations() if e[0] == "act"], [])
 
 
+class TestABoxWorkspaceIsMadeFromHere(FleetFlow):
+    """`box` has no wk of its own, so its workspace is made from here: `touch` of the marker makes `there` present; agents install."""
+
+    def setUp(self):
+        super().setUp()
+        self.there = {"half": "creating", "there": "present"}
+        self.w.far = {"test -f $HOME/.wk-remote": Result(1), "/home/u/wk/ws/a ]": lambda f: Result(0, self.there.get("a", "absent") + "\n"),
+                      "/home/u/wk/ws/half ]": Result(0, "creating\n"), "/home/u/wk/ws/there ]": Result(0, "present\n"),
+                      "git init --bare": Result(0, "mirror-fetch origin ok\nmirror-fetch wpe FAILED\n"), "git clone": Result(0),
+                      "git remote": Result(0), "ccache.conf": Result(0), "touch": lambda f: (self.there.update(a="present"), Result(0))[1],
+                      "WK_AGENTS_CACHE=": Result(0, "claude=installed\npi=installed\n"), "workspace-config.py": Result(0)}
+
+    def acts(self):
+        return [t for t in self.w.asked("box") if not any(n in t for n in ("uname -s", "echo absent", "cd /home/u/wk/ws/a/WebKit && "))]
+
+    def new(self, name="a", *argv):
+        self.w.effects = []
+        rc, _, err = self.wk(self.w, "new", name, "--on", "box", "--_detached", *argv)
+        return rc, err
+
+    def test_the_mirror_is_refreshed_first_and_the_ready_marker_goes_down_last(self):
+        rc, err = self.new()
+        self.assertEqual((rc, wsworld.said(err)), (0, "==> workspace 'a' created"))
+        acts = self.acts()
+        self.assertEqual([a.split("\n")[0] for a in acts], ["set -e", "git clone --quiet --shared -b main /home/u/wk/mirror /home/u/wk/ws/a/WebKit",
+                                                             "set -e", "[ -f /home/u/wk/cache/ccache/ccache.conf ] || printf %s 'max_size = 40G",
+                                                             "touch /home/u/wk/ws/a/.wk-ready"])
+        self.assertIn("M=/home/u/wk/mirror\n", acts[0])
+        self.assertIn("git remote add mirror /home/u/wk/mirror", acts[2])
+        self.assertIn("  origin   ok\n  wpe      FAILED\n", err)
+        self.assertIn(("mkdir", "/st/wk/remote/box/ws/a"), self.w.effects, "its record is kept here")
+
+    def test_a_failed_round_trip_ends_the_creation_where_it_stood(self):
+        self.w.far["git clone"] = Result(128, "", "fatal: not a git repository\n")
+        rc, err = self.new()
+        self.assertEqual((rc, wsworld.said(err), len(self.acts())), (1, "error: could not create the checkout on box.example", 2))
+        self.w.far.update({"git clone": Result(0), "touch": Result(255)})
+        rc, err = self.new()
+        self.assertEqual((rc, wsworld.said(err)), (1, "error: could not mark 'a' ready on box.example -- treat it as half-made and " "re-run 'wk new a --on box'"))
+
+    def test_remotes_that_do_not_wire_only_warn_and_the_marker_still_goes_down(self):
+        self.w.far["git remote"] = Result(1)
+        rc, err = self.new()
+        self.assertEqual((rc, self.acts()[-1]), (0, "touch /home/u/wk/ws/a/.wk-ready"))
+        self.assertIn("warning: could not wire the remotes in /home/u/wk/ws/a/WebKit", "\n".join(err.splitlines()))
+
+    def test_a_dry_run_reads_the_box_and_runs_nothing_there(self):
+        rc, err = self.new("a", "--dry-run")
+        self.assertEqual((rc, self.acts()), (0, []))
+        self.assertIn("would run on box.example: sh -c", err)
+        self.assertIn("touch /home/u/wk/ws/a/.wk-ready", err)
+
+
+class TestThisMachineAsABox(FleetFlow):
+    def test_every_round_trip_of_a_creation_is_a_local_shell_never_ssh(self):
+        rr, there = str(self.w.tmp / "rr"), {}
+        (self.w.tmp / "machines" / "me.conf").write_text("kind=build\nlocal=1\nroot=%s\n" % rr)
+
+        def sh(argv, f):
+            text = argv[2]
+            there.update(a="present\n") if text.startswith("touch ") else None
+            return Result(0, LINUX_PROBE if "uname -s" in text else there.get("a", "absent\n") if "echo absent" in text else "claude=installed\npi=installed\n")
+        self.w.react(["sh", "-c"], sh)
+        rc, _, err = self.wk(self.w, "new", "a", "--on", "me", "--_detached")
+        acts = [e[1][2].split("\n")[0] for e in self.w.effects if e[0] == "act" and e[1][:2] == ("sh", "-c")][:5]
+        self.assertEqual((rc, acts[1], acts[4]), (0, "git clone --quiet --shared -b main %s/mirror %s/ws/a/WebKit" % (rr, rr), "touch %s/ws/a/.wk-ready" % rr))
+        self.assertEqual([e for e in self.w.effects if e[0] == "run" and e[1][0] == "ssh"], [])
+
+    def test_a_command_on_a_terminal_runs_here_in_the_checkout(self):
+        (self.w.tmp / "machines" / "me.conf").write_text("kind=build\nlocal=1\nroot=%s\n" % (self.w.tmp / "rr"))
+        self.w.react(["sh", "-c"], lambda a, f: Result(0, LINUX_PROBE if "uname -s" in a[2] else "present\n"))
+        self.w.answer(["bash", "-lc"])
+        rc, _, err = self.wk(self.w, "run", "a", "--profile=bytecode", "--", "x.js")
+        tty = next(e for e in self.w.effects if e[0] == "run_tty")
+        self.assertEqual((rc, tty[1][:2], tty[2]), (0, ("bash", "-lc"), str(self.w.tmp / "rr" / "ws" / "a" / "WebKit")))
+
+
+class TestABoxsOwnWkIsHandedTheCommand(FleetFlow):
+    """Only `wk rm` here: a hand-over the dispatcher makes (`wk build`, `wk status`) replaces this process with ssh, and
+    --force leaves a process-wide record of the barrier it crossed."""
+
+    def setUp(self):
+        super().setUp()
+        self.there = "present"
+        self.w.far.update({"/home/u/wk/ws/a ]": lambda f: Result(0, self.there + "\n"), "wk rm a": lambda f: (setattr(self, "there", "absent"), Result(0))[1]})
+        self.w.answer(["git", "-C", str(wsworld.REPO), "rev-parse", "HEAD"], out="abc1234def\n")
+        self.tools_at("0000stale000")
+
+    def tools_at(self, sha):
+        self.w.far["/wk doctor --probe-tools"] = Result(0, "sha=%s\ndirty=no\n" % sha)
+
+    def rm(self, *argv):
+        for v in self.UNSET:   # the dispatcher exports --yes and --dry-run into this process
+            os.environ.pop(v, None)
+        self.w.effects = []
+        rc, _, err = self.wk(self.w, "rm", "a", *argv)
+        return rc, err, [a for a in self.w.asked("box") if "wk rm" in a or "probe-tools" in a]
+
+    def test_one_at_another_wk_tools_commit_is_refused_naming_the_sync_and_asked_again_each_time(self):
+        rc, err, asked = self.rm("--yes")
+        self.assertEqual((rc, wsworld.said(err), asked), (1, "error: 'rm' is not handed to box: wk-tools on box is at 0000stale000, and this "
+                                                            "workstation's at abc1234def.", ["cd $HOME && WK_YES=1 /home/u/wk/tools/wk doctor --probe-tools"]))
+        self.assertIn("    Bring it level:  wk sync --tools box", err.splitlines())
+        self.tools_at("abc1234")
+        rc, err, asked = self.rm("--yes")
+        self.assertIn("==> 'a' destroyed on box.example, by that machine's own wk", err.splitlines())
+        self.assertEqual((rc, wsworld.said(err), asked), (0, "==> workspace 'a' destroyed",
+                                                          ["cd $HOME && WK_YES=1 /home/u/wk/tools/wk doctor --probe-tools",
+                                                           "cd $HOME && WK_YES=1 WK_EXPORTS_READ=1 WK_ROW_LABEL=box /home/u/wk/tools/wk rm a"]))
+
+    def test_a_dry_run_names_the_hand_over_and_runs_nothing_there(self):
+        self.tools_at("abc1234")
+        rc, err, asked = self.rm("--dry-run")
+        self.assertEqual((rc, asked), (0, ["cd $HOME && WK_DRY_RUN=1 /home/u/wk/tools/wk doctor --probe-tools"]))
+        (line,) = [l for l in err.splitlines() if l.startswith("would run: ssh")]
+        self.assertIn("WK_DRY_RUN=1 WK_EXPORTS_READ=1 WK_ROW_LABEL=box /home/u/wk/tools/wk rm a", line)
+
+
 class TestAPeer(FleetFlow):
     def test_ls_asks_its_own_wk_and_never_for_a_box_marker(self):
         self.w.far["/opt/wk-tools/wk ls --json"] = self.w.lists(("pw", "pal", "running"), ("half", "pal", "creating"))
         self.assertEqual(self.rows(), (0, [["pw", "pal", "running"], ["half", "pal", "creating"]]))
         asked = self.w.asked("pal")
         self.assertEqual(asked[1:], ["test -x /opt/wk-tools/wk", "cd $HOME && WK_NO_DELEGATE=1 WK_ROW_LABEL=pal /opt/wk-tools/wk ls --json"])
+
+    def test_one_with_no_wk_tools_of_its_own_is_refused_the_command(self):
+        self.w.far["test -x"] = Result(1)
+        rc, _, err = self.wk(self.w, "new", "x", "--on", "pal")
+        self.assertEqual((rc, err.splitlines()[0], [e for e in self.w.mutations() if e != ("mkdir", "/st/wk/ssh")]),
+                         (1, "error: 'new' acts on a workspace on pal, which has no wk-tools of its own to", []))
 
     def test_rm_hands_its_workspace_to_its_own_wk_and_a_refusal_there_changes_nothing_here(self):
         self.w.far["/opt/wk-tools/wk ls --json"] = self.w.lists(("pw", "pal", "running"))
@@ -435,6 +670,248 @@ class TestAPeer(FleetFlow):
         rc, _, err = self.wk(self.w, "rm", "pw", "--yes")
         self.assertEqual((rc, err.splitlines()[-1]), (1, "error: pal.example did not destroy 'pw' (above); nothing here was changed -- re-run 'wk rm pw'"))
         self.assertEqual([e for e in self.w.work() if e[0] == "remove"], [])
+
+
+GUEST_FILES = tuple("/vmstore/vm/mac." + f for f in ("run.log", "unfiltered", "push-forward.log", "broker-forward.log"))
+BASE_INPUTS = ("vm/provision-base.sh", "vm/desktop.sh", "vm/mount-mirror.sh", "bench/mac-pyobjc.sh")
+BASE_IMAGE = "ghcr.io/cirruslabs/macos-tahoe-xcode@sha256:f441eb487a18b4588c096adcff5eb48fddca550909e01c472580872b48c166b0"
+
+
+def sealed_inputs():
+    """What `wk sysimage build macos-guest-base` records of this tree's provisioning inputs when it seals the base."""
+    text = b"".join((wsworld.REPO / rel).read_bytes() for rel in BASE_INPUTS) + ("image=%s\nuser=admin\n" % BASE_IMAGE).encode()
+    return hashlib.sha256(text + b"WK_MOUNT_MIRROR=/usr/local/libexec/wk-mount-mirror").hexdigest()[:16]
+
+
+class Guests(wsworld.World):
+    """A Mac with tart: the base `wk-base` sealed against this tree, an image it `pulled`, a clone `tart run` boots at an address
+    whose guest agent answers every exec, 200 GB free; guests boot unfiltered (WK_VM_UNFILTERED), as Softnet is test_guest's."""
+
+    def __init__(self, tmp, kinds=None):
+        super().__init__(tmp, kinds)
+        self.vms["wk-base"] = "stopped"
+        self.base_ready = os.path.join(self.env["WK_VM_STORE"], "vm", "base.ready")
+        self.files[self.base_ready] = "image=%s\ninputs=%s\n" % (BASE_IMAGE, sealed_inputs())
+        self.env["WK_VM_UNFILTERED"] = "1"
+        self.pulled = [BASE_IMAGE]
+        self.react([self.tart, "list"], lambda a, f: Result(0, json.dumps([{"Name": n, "State": s, "Source": "local"} for n, s in sorted(f.vms.items())]
+                                                                          + [{"Name": i, "State": "stopped", "Source": "OCI"} for i in f.pulled])))
+        self.answer([self.tart, "ip"], out="192.168.64.9\n")
+        self.answer([self.tart, "exec"])
+        self.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 209715200 1% /\n")
+        self.answer(["chmod"])
+
+    def spawn(self, argv, log):
+        pid = super().spawn(argv, log)
+        if "run" in argv:
+            self.vms[argv[-1]] = "running"
+        return pid
+
+    def tart_did(self):
+        return [e[1][1:] for e in self.effects if e[0] == "act" and e[1][0] == self.tart and e[1][1] != "exec"]
+
+
+class GuestFlow(wsworld.WorkspaceTest):
+    world_class = Guests
+
+    def make_world(self, **kw):
+        return super().make_world(kinds={"fakebox": "vm"}, **kw)
+
+    def typed(self, *argv):
+        self.w.effects = []
+        rc, out, err = self.wk(self.w, *argv)
+        return rc, out, err
+
+    def created(self, *argv):
+        return self.typed("new", "ws", "--_detached", *argv)
+
+
+class TestAGuestIsCreated(GuestFlow):
+    def test_new_clones_the_base_sizes_it_marks_it_ready_and_then_boots_it(self):
+        rc, _, err = self.created()
+        self.assertEqual((rc, wsworld.said(err)), (0, "==> workspace 'ws' created"))
+        self.assertEqual(self.w.tart_did(), [("clone", "wk-base", "wk-ws"), ("set", "wk-ws", "--cpu", "9", "--memory", "20480", "--random-mac",
+                                                                            "--display", "1280x800", "--display-refit")])
+        self.assertEqual([a[1] for a in self.w.streamed if a[0] == self.w.tart], ["clone", "set"])
+        made = [self.w.rel(e[:2]) if e[0] != "spawn" else ("spawn", e[1][-1]) for e in self.w.effects if e[0] in ("write", "spawn") and ("vmstore/ws" in e[1] or "run" in e[1])]
+        self.assertEqual(made[:2], [("write", "/vmstore/ws/ws/.wk-ready"), ("spawn", "wk-ws")])
+        self.assertEqual(self.w.vms["wk-ws"], "running")
+        (forward,) = [e[1] for e in self.w.effects if e[0] == "spawn" and e[1][0] == "ssh"]
+        self.assertEqual((forward[-1], forward[forward.index("-i") + 1]), ("wk-ws.vm.invalid", self.w.env["WK_VM_STORE"] + "/vm/id_ed25519"))
+        self.assertIn("ProxyCommand=%s/container/ssh-transport vm ws" % wsworld.REPO, forward)
+
+    def test_its_size_and_display_are_the_overrides_when_given(self):
+        self.w.env.update({"WK_VM_CPUS": "4", "WK_VM_MEM_MB": "8192", "WK_VM_DISPLAY": "1920x1080"})
+        self.created()
+        self.assertEqual(self.w.tart_did()[1][2:], ("--cpu", "4", "--memory", "8192", "--random-mac", "--display", "1920x1080", "--display-refit"))
+
+    def test_a_base_that_cannot_be_built_clones_nothing(self):
+        del self.w.vms["wk-base"]
+        self.w.pulled = []
+        self.w.answer([self.w.tart, "pull"], rc=1, err="no route to ghcr.io\n")
+        rc, _, err = self.created()
+        self.assertEqual((rc, wsworld.said(err), self.w.tart_did()), (1, "error: tart pull failed (exit 1): what it said is above", [("pull", BASE_IMAGE)]))
+
+    def test_a_stale_base_is_refused_naming_the_rebuild_unless_forced(self):
+        self.w.files[self.w.base_ready] = "inputs=0000000000000000\n"
+        rc, _, err = self.created()
+        self.assertEqual((rc, wsworld.said(err), self.w.tart_did()), (1, "error: 'wk-base' predates its own provisioning inputs: vm/provision-base.sh, "
+                                                                          "vm/desktop.sh, vm/mount-mirror.sh, bench/mac-pyobjc.sh, WK_VM_IMAGE or "
+                                                                          "WK_VM_USER has changed since it was built.", []))
+        self.assertIn("  WK_VM_FORCE=1 clones it anyway.", err.splitlines())
+        self.w.env["WK_VM_FORCE"] = "1"
+        rc, _, err = self.created()
+        self.assertEqual((rc, self.w.tart_did()[0]), (0, ("clone", "wk-base", "wk-ws")))
+        self.assertIn("warning: WK_VM_FORCE=1 -- 'ws' is cloned from a base that predates its own provisioning inputs: vm/provision-base.sh, "
+                      "vm/desktop.sh, vm/mount-mirror.sh, bench/mac-pyobjc.sh, WK_VM_IMAGE or WK_VM_USER has changed since it was built", err.splitlines())
+
+    def test_a_full_host_is_refused_counting_the_podman_machine_before_anything_is_cloned(self):
+        self.w.make("mac")
+        self.w.env["WK_VM_MAX"] = "2"
+        self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "running", "Resources": {"Memory": 8192}}]))
+        rc, _, err = self.created()
+        lines = err.splitlines()
+        i = lines.index("error: 2 VM(s) are already running on this host:")
+        self.assertEqual((rc, lines[i + 1:i + 3], self.w.tart_did()), (1, ["      mac", "      podman machine wk"], []))
+
+    def test_the_front_makes_the_store_and_a_private_vm_directory(self):
+        vm = self.w.env["WK_VM_STORE"] + "/vm"
+        self.w.answer(["find", vm, "-maxdepth"])   # not yet 0700
+        rc, _, err = self.typed("new", "ws", "--no-wait")
+        self.assertEqual(rc, 0, err)
+        made = [self.w.rel(e[1]) for e in self.w.effects if e[0] == "mkdir" and e[1].startswith(self.w.env["WK_VM_STORE"])]
+        self.assertEqual(made[:3], ["/vmstore", "/vmstore/ws", "/vmstore/vm"])
+        self.assertIn(("chmod", "0700", "/vmstore/vm"), [self.w.rel(e[1]) for e in self.w.effects if e[0] == "act"])
+
+    def test_a_dry_run_names_the_clone_and_the_delete_and_changes_nothing(self):
+        self.w.make("mac")
+        before = (dict(self.w.files), set(self.w.dirs), dict(self.w.vms))
+        rc, _, err = self.typed("new", "ws", "--dry-run")
+        self.assertIn("would run: %s clone wk-base wk-ws" % self.w.tart, err.splitlines())
+        rc, _, err = self.typed("rm", "mac", "--dry-run")
+        self.assertIn("would run: %s delete wk-mac" % self.w.tart, err.splitlines())
+        self.assertEqual((self.w.files, self.w.dirs, self.w.vms), before)
+
+
+class TestAGuestIsReached(GuestFlow):
+    def test_ls_lists_each_guest_by_tarts_word_once_its_marker_is_down_and_never_the_base_or_a_pulled_image(self):
+        self.w.make("mac")
+        self.w.make("half", marker=False)
+        rc, out, _ = self.typed("ls")
+        self.assertEqual((rc, [l.split()[:3] for l in out.splitlines()[1:]]), (0, [["half", "fakebox", "creating"], ["mac", "fakebox", "running"]]))
+
+    def test_a_command_goes_through_the_guest_agent_never_an_address(self):
+        self.w.make("mac")
+        rc, _, err = self.typed("enter", "mac", "--", "echo", "hi")
+        self.assertEqual((rc, [e[1] for e in self.w.effects if e[0] == "exec"]),
+                         (0, [(self.w.tart, "exec", "-i", "wk-mac", "/bin/zsh", "-lc", "cd /Users/admin/WebKit 2>/dev/null; echo hi")]))
+
+    def test_a_profiled_run_gets_a_pty_through_the_guest_agent(self):
+        self.w.make("mac")
+        rc, _, err = self.typed("run", "mac", "--profile=instruments", "--", "x.js")
+        tty = next(e for e in self.w.effects if e[0] == "run_tty")
+        self.assertEqual((rc, tty[1][:5], tty[1][-1].split(" && ")[0], tty[2]),
+                         (0, (self.w.tart, "exec", "-i", "-t", "wk-mac"), "cd /Users/admin/WebKit 2>/dev/null; bash -lc 'cd /Users/admin/WebKit", None))
+
+    def test_the_editors_alias_reaches_sshd_through_the_transport_and_a_stopped_guest_has_no_route(self):
+        self.w.make("mac")
+        rc, out, _ = self.typed("zed", "mac", "--url")
+        self.assertEqual((rc, out), (0, "ssh://wk-mac/Users/admin/WebKit\n"))
+        text = self.w.files[self.w.env["HOME"] + "/.ssh/config.d/wk"]
+        self.assertIn("Host wk-mac\n    # generated by wk -- removed by wk rm\n    HostName wk-mac.vm.invalid\n", text)
+        self.assertIn("ProxyCommand %s/container/ssh-transport vm mac" % wsworld.REPO, text)
+        self.assertIn("IdentityFile %s/vm/id_ed25519" % self.w.env["WK_VM_STORE"], text)
+        self.w.vms["wk-mac"] = "stopped"
+        rc, _, err = self.typed("zed", "mac", "--url")
+        self.assertEqual((rc, wsworld.said(err)), (1, "error: 'mac' is not running, so there is no route to it."))
+
+    def test_a_stopped_guest_is_refused_naming_its_start(self):
+        self.w.make("mac")
+        self.w.vms["wk-mac"] = "stopped"
+        for argv in (("scp", "mac", ":a", str(self.tmp / "b")), ("enter", "mac", "--", "true")):
+            rc, _, err = self.typed(*argv)
+            self.assertEqual((rc, wsworld.said(err)), (1, "error: 'mac' is not running (wk start mac)"), argv)
+        self.assertEqual([e for e in self.w.effects if e[0] in ("exec", "act")], [])
+
+    def test_a_guest_being_created_is_waited_for_on_the_clock_until_its_creation_ends(self):
+        self.w.make("mac", marker=False)
+        creation = self.w.begin(name="mac", pid=4242)
+        self.w.pids.add(4242)
+        sleep = self.w.clock.sleep
+
+        def ends(seconds):
+            sleep(seconds)
+            if len(self.w.clock.slept) == 2:
+                self.w.files[self.w.ws_dir("mac") + "/.wk-ready"] = ""
+                creation.end(0)
+        self.w.clock.sleep = ends
+        rc, _, err = self.typed("enter", "mac", "--", "true")
+        self.assertEqual((rc, self.w.clock.slept, err.splitlines()[0], wsworld.said(err)), (0, [2, 2], "==> waiting for 'mac' to finish being created", "==> 'mac' is ready"))
+
+    def test_without_a_store_of_its_own_the_place_refuses_to_be_driven(self):
+        self.w.make("mac")
+        del self.w.env["WK_VM_STORE"]
+        for argv in (("ls",), ("new", "ws")):
+            rc, _, err = self.typed(*argv)
+            self.assertEqual((rc, wsworld.said(err)), (1, "error: the vm place has no store of its own on this machine -- set WK_VM_STORE apart from WK_STORE"))
+
+    def resources(self):
+        os.environ.pop("WK_DRY_RUN", None)
+        rc, _, err = self.typed("test", "g", "--dry-run")
+        return rc, err.splitlines()[0]
+
+    def test_as_tart_has_it_configured_else_as_this_host_would_size_one(self):
+        self.w.make("g")
+        self.w.answer([self.w.tart, "get", "wk-g"], out='{"CPU": 6, "Memory": 12288}')
+        self.assertEqual(self.resources(), (0, "resources: 4 jobs (cores=6 avail=12288MB @ 3072MB/job)"))
+        self.w.answer([self.w.tart, "get", "wk-g"], rc=1)
+        self.w.env.update({"WK_VM_CPUS": "3", "WK_VM_MEM_MB": "4096"})
+        self.assertEqual(self.resources(), (0, "resources: 1 jobs (cores=3 avail=4096MB @ 3072MB/job)"))
+
+
+class TestOffAMac(fakes.FlowTest):
+    def test_the_vm_place_holds_no_name_and_refuses_to_be_driven(self):
+        with mock.patch("os.uname", return_value=os.uname_result(("Darwin", "mac", "25.0", "", "arm64"))):
+            w = Guests(self.tmp, kinds={"fakebox": "vm"})
+            w.make("mac")
+        with mock.patch("os.uname", return_value=os.uname_result(("Linux", "box", "6.1", "", "x86_64"))):
+            for argv, line in ((("new", "ws"), "error: the vm place holds macOS guests, so it exists only on a macOS host -- run this on the Mac that holds them"),
+                               (("enter", "mac"), "warning: no such workspace: mac -- 'wk ls' lists them")):
+                w.effects = []
+                rc, _, err = self.wk(w, *argv)
+                self.assertEqual((rc != 0, err.splitlines()[0], w.mutations()), (True, line, []))
+
+
+class TestAGuestIsDestroyed(GuestFlow):
+    def test_rm_deletes_the_guest_kills_its_runner_and_removes_every_file_of_it_directory_last(self):
+        self.w.make("mac")
+        self.w.pids.add(4242)
+        self.w.react(["pgrep"], lambda a, f: Result(0, "4242\n") if 4242 in f.pids else Result(1))
+        rc, _, err = self.typed("rm", "mac", "--yes")
+        self.assertEqual((rc, wsworld.said(err)), (0, "==> workspace 'mac' destroyed"))
+        acts = [self.w.rel(e if e[0] != "act" else e[1][1:]) for e in self.w.work()
+                if e[0] == "kill" or e[0] == "remove" and "/vmstore/" in e[1] or e[0] == "act" and e[1][0] == self.w.tart]
+        self.assertEqual(acts, [("stop", "wk-mac"), ("delete", "wk-mac"), ("kill", 4242, 15)] + [("remove", f) for f in GUEST_FILES]
+                         + [("remove", "/vmstore/ws/mac"), ("remove", "/vmstore/log/new-mac.log")])
+        self.assertEqual((self.w.left("mac"), "still alive" in err), ({}, False))
+
+    def test_a_runner_that_outlives_the_delete_is_named_with_its_kill(self):
+        self.w.make("mac")
+        self.w.answer(["pgrep"], out="4242\n")
+        rc, _, err = self.typed("rm", "mac", "--yes")
+        self.assertIn("warning: a 'tart run' for 'wk-mac' is still alive (pid 4242), holding a VM slot:  kill -9 4242", err.splitlines())
+
+    def test_a_guest_deleted_by_hand_has_only_its_files_cleared(self):
+        self.w.make("mac")
+        del self.w.vms["wk-mac"]
+        rc, _, err = self.typed("rm", "mac", "--yes")
+        self.assertEqual((rc, self.w.tart_did()), (0, []))
+        self.assertEqual([self.w.rel(e) for e in self.w.work() if e[0] == "remove" and "/vmstore/" in e[1]],
+                         [("remove", f) for f in GUEST_FILES] + [("remove", "/vmstore/ws/mac"), ("remove", "/vmstore/log/new-mac.log")])
+
+    def test_the_golden_base_is_never_destroyed(self):
+        rc, _, err = self.typed("rm", "base", "--yes")
+        self.assertEqual((rc, wsworld.said(err), self.w.tart_did()), (1, "error: refusing to delete the golden base (wk sysimage build macos-guest-base --rm)", []))
 
 
 if __name__ == "__main__":
