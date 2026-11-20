@@ -311,7 +311,7 @@ def check_needs(cmd, t, machine=None):
     for n in t.needs:
         if n == "gh-auth":
             from wk.doctor import gh_authenticated
-            if not gh_authenticated():
+            if not gh_authenticated(machine):
                 missing.append("gh-auth    gh cannot reach the GitHub API (not logged in, or the token expired): gh auth login")
         elif n == "tailnet":
             if not Reach(machine).peers():

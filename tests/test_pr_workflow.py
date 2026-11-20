@@ -33,7 +33,7 @@ ALICE = "https://github.com/alice/WebKit"
 HEAD, MAIN, OLD, NEW = "b" * 40, "c" * 40, "d" * 40, "e" * 40
 BOX_REF = "refs/wk/push/fakebox/eng/x"
 FORK_SSH = "git@github.com:justinmichaud/WebKit.git"
-GH = '#!/bin/sh\n[ "$1 $2" = "api user" ] && [ -e "$0.dead" ] && exit 1\nexit 0\n'
+GH = "#!/bin/sh\nexit 0\n"
 
 
 class World(ws.World):
@@ -56,6 +56,7 @@ class World(ws.World):
         self.gh_path.write_text(GH)
         self.gh_path.chmod(0o755)
         self.env["PATH"] = "%s:%s" % (self.gh_path.parent, os.environ["PATH"])
+        self.answer(["gh", "api", "user"])
         self.src, self.mirror = BOX_SRC if kind == "remote" else SRC, os.path.join(store, "git", "WebKit.git")
         self.branches, self.head, self.dirty, self.refs, self.fails, self.main = {"main": MAIN}, "main", 0, {}, {}, MAIN
         self.config = {"remote.%s.url" % n: u for n, u in URLS.items()}
@@ -69,7 +70,7 @@ class World(ws.World):
         self._remote()
 
     def dead_token(self):
-        Path(str(self.gh_path) + ".dead").write_text("")
+        self.answer(["gh", "api", "user"], rc=1)
 
     def _in_ws(self, argv, f):
         rest = list(argv[2:])

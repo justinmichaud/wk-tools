@@ -1845,7 +1845,7 @@ class Remote(Driver):
     def sync(self, named=False):
         host = self.label()
         ok = self.sync_tools("")
-        if ok:
+        if ok and not act.dry_run():
             said(self.name, "pushed " + tools.head(self.root, self.here))
         self._mirror_update(self.root_there())
         act.info("the %s mirror on %s is up to date" % (project.get("CHECKOUT"), host))
