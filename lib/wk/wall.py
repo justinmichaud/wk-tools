@@ -10,7 +10,7 @@ import credcheck
 from wk import claudelogin, guest, project, pushgate, secrets
 from wk.store import no_such_workspace
 from wk.act import barrier, die, info, warn
-from wk.doctor import MISS, Report, miss, note, ok
+from wk.doctor import MISS, Report, guest_rows, miss, note, ok
 from wk.resources import arch_has_gpu
 
 # Named places, never the checkout: it ships PEM fixtures. A key is its header alone on a line, or (in a
@@ -551,7 +551,7 @@ def from_host(root, driver, ws, machine, rep, want_gpu=False):
     if driver.kind == "vm" and not driver.egress_filtered(ws):
         rows.append(miss("this guest was booted with WK_VM_UNFILTERED, so it has the open network",
                          "wk stop %s && wk start %s   (without that variable)" % (ws, ws)))
-    rep.rows(rows + (driver.check_rows(ws) if driver.kind == "vm" else []))
+    rep.rows(rows + (guest_rows(driver, ws) if driver.kind == "vm" else []))
     if state != "running":
         return False
     wall = Wall(root, driver, ws, machine, want_gpu)

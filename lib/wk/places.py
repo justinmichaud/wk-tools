@@ -174,7 +174,7 @@ class Registry:
     def far_root(self):
         """This far end's root: its own conf's, since two machines of one home share the marker and nothing machine-specific is in it."""
         conf = self.fleet.load(self.self_place()) or {}
-        return conf.get("root") or default_root(self.env.get("HOME", os.path.expanduser("~")))
+        return conf.get("root") or default_root(Store(self.env).home())
 
     def self_place(self):
         if not self.in_remote_host():
@@ -231,8 +231,7 @@ class Registry:
         return self.all()
 
     def on_place(self, name, ws, ask=False):
-        """Whether `ws` is on `name`: its directory, its environment, or a creation still running. `ask`: a machine
-        whose one probe does not answer is named, since what is there is not in the answer."""
+        """Whether `ws` is on `name`: its directory, its environment, or a creation running. `ask`: name a machine that does not answer."""
         try:
             t = self.load(name)
         except LookupError:
@@ -479,8 +478,7 @@ class Driver:
         raise NotImplementedError
 
     def state(self, ws, info=None):
-        """absent | creating | broken | present | unreachable: the record and the environment read together.
-        Broken is one half gone -- the environment after creation finished, or the directory under a live environment."""
+        """absent | creating | broken | present | unreachable; broken is one half gone (the environment after creation, or the directory)."""
         env = self.info(ws) if info is None else info
         ws_dir, m = self.store.ws_dir(ws), self.store_machine
         if env == "unreachable":
@@ -672,8 +670,7 @@ class Driver:
         raise NotImplementedError
 
     def exec_tty(self, ws, argv, timeout=None):
-        """Blocking, this process's own stdio inherited -- a real pty for lldb/samply/xctrace -- control returns here, unlike `enter_argv`'s exec.
-        `exec_argv` is already the whole command line (its own `ssh`, for a machine), so `self.here` runs it."""
+        """Blocking, this process's own stdio inherited (a real pty for lldb/samply/xctrace); control returns here, unlike `enter_argv`'s exec."""
         cmd, cwd = self.exec_argv(ws, argv, tty=True)
         return self.here.run_tty(cmd, cwd=cwd, timeout=timeout)
 
@@ -752,8 +749,7 @@ def podman_vm_route(rec):
     if not (c.get("Port") and c.get("IdentityPath") and c.get("RemoteUsername")):
         act.die("podman names no ssh port, key and user for its machine '%s', so nothing can reach it.\n"
                 "    ./setup --stage machine makes it again" % rec.get("Name", "?"))
-    return (["-p", str(c["Port"]), "-i", c["IdentityPath"], "-o", "StrictHostKeyChecking=no",
-             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR"], "%s@127.0.0.1" % c["RemoteUsername"])
+    return (["-p", str(c["Port"]), "-i", c["IdentityPath"]] + reach.UNPINNED, "%s@127.0.0.1" % c["RemoteUsername"])
 
 
 class Container(Driver):
@@ -1202,7 +1198,7 @@ class Vm(Driver):
         if self._vm_store is None:
             if not self.possible():
                 act.die("the vm place holds macOS guests, so it exists only on a macOS host -- run this on the Mac that holds them")
-            if not self.vm_store_apart():
+            if not Store(self.env).vm_store_apart():
                 act.die("the vm place has no store of its own on this machine -- set WK_VM_STORE apart from WK_STORE")
             self._vm_store = Store(dict(self.env, WK_STORE=Store(self.env).vm_store_dir()))
         return self._vm_store
@@ -1244,20 +1240,10 @@ class Vm(Driver):
     def mem_mb(self, ws):
         return self._sized(ws, "Memory", guest.vm_mem_mb, Resources.envelope_mem_mb)
 
-    def login_note(self):
-        guest.login_note(self.env)
-
     def remount_mirror(self, ws):
         """A fresh mount re-reads the refs a refresh renamed over."""
         r = self.act_exec(ws, ["sudo", "-n", GUEST_MOUNT_MIRROR, MIRROR_TAG, GUEST_MIRROR_MOUNT])
         return "" if r.ok else (r.err.strip() or r.out.strip() or "exit %d" % r.rc)
-
-    def check_rows(self, ws):
-        from wk import doctor
-        return doctor.guest_rows(self, ws)
-
-    def vm_store_apart(self):
-        return Store(self.env).vm_store_apart()
 
     def vm_dir(self):
         """Where the guests' daemons and keys live, even where the vm store is the container's and lists no guest."""
@@ -1327,7 +1313,7 @@ class Vm(Driver):
 
     def enter_argv(self, ws):
         g = self._guest_or_die(ws)
-        self.login_note()
+        guest.login_note(self.env)
         return g.argv("cd %s 2>/dev/null; exec \"${SHELL:-/bin/zsh}\" -l" % shlex.quote(self.src(ws)), tty=True), None
 
     def exec_argv(self, ws, argv, tty=False, person=False):
@@ -1347,8 +1333,8 @@ class Vm(Driver):
         os.execvp(self.tart_or_die(), [self.tart_or_die(), "exec", "-i", self.vm(ws), "/usr/bin/nc", "127.0.0.1", "22"])
 
     def ssh_argv(self, ws):
-        return ["ssh", "-o", "ProxyCommand=" + self.ssh_proxy(ws), "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-                "-o", "LogLevel=ERROR", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=10",
+        return ["ssh", "-o", "ProxyCommand=" + self.ssh_proxy(ws)] + reach.UNPINNED + [
+                "-o", "BatchMode=yes", "-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=10",
                 "-i", self.key(), "-l", self.user(), self.vm(ws) + ".vm.invalid"]
 
     def ssh_endpoint(self, ws):
@@ -1425,16 +1411,13 @@ class Vm(Driver):
         rec = podman_vm(self.machine, self.podman_machine())
         return rec if rec and rec.get("State") == "running" else None
 
-    def podman_running(self):
-        return self._podman_up() is not None
-
     def podman_mem_mb(self):
         rec = self._podman_up()
         return int(rec["Resources"]["Memory"]) if rec else 0
 
     def podman_containers(self):
         """An unreadable answer counts as busy: stopping a machine underneath something is the mistake this guards."""
-        if not self.podman_running():
+        if not self._podman_up() is not None:
             return 0
         r = Ssh.podman(self.podman_machine(), via=self.machine).run(["podman", "ps", "-q"])
         return len(r.out.split()) if r.ok else 1
@@ -1446,7 +1429,7 @@ class Vm(Driver):
     def running_vms(self):
         """Every VM on this host, the podman machine included: Virtualization.framework counts them against one limit."""
         names = [v["Name"][3:] for v in self._vms() if v.get("State") == "running" and str(v.get("Name", "")).startswith("wk-")]
-        if self.podman_running():
+        if self._podman_up() is not None:
             names.append("podman machine %s" % self.podman_machine())
         return names
 
@@ -1539,7 +1522,7 @@ class LocalWorkspace(Driver):
         return self.root
 
     def home(self):
-        return self.env.get("HOME", os.path.expanduser("~"))
+        return Store(self.env).home()
 
     def os(self):
         return "macos" if os.uname().sysname == "Darwin" else "linux"
@@ -1620,7 +1603,7 @@ class Remote(Driver):
             here_place = ""
         self.is_local = bool(env.get("WK_REMOTE_LOCAL")) or (bool(here_place) and here_place == name)
         self.conf_root = env.get("WK_REMOTE_ROOT", "")
-        here_root = self.conf_root or default_root(env.get("HOME", os.path.expanduser("~")))
+        here_root = self.conf_root or default_root(Store(env).home())
         store = env.get("WK_REMOTE_STORE") or (here_root if self.is_local else os.path.join(Store(env).state_dir(), "remote", name))
         self._store = Store(dict(env, WK_STORE=store))
         self.probe_seconds = int(env.get("WK_PROBE_SECONDS") or 20)

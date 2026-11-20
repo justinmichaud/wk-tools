@@ -948,7 +948,7 @@ class TestVmWrite(VmTest):
     def test_a_guest_without_a_store_of_its_own_refuses_to_be_driven(self):
         env = {k: v for k, v in self.env.items() if k != "WK_VM_STORE"}
         t = places.Registry(REPO, env=env, machine=self.fake).load("vm")
-        self.assertFalse(t.vm_store_apart())
+        self.assertFalse(places.Store(t.env).vm_store_apart())
         err = self.refused(lambda: t.created("mac"))
         self.assertIn("set WK_VM_STORE apart from WK_STORE", err)
         self.assertEqual(t.list(), [("mac", "running")])
