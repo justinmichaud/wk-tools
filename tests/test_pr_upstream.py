@@ -1,367 +1,210 @@
-"""Asking GitHub a question from inside a wired checkout, and what `wk pr`
-leaves behind in one."""
-import contextlib
+"""What `wk pr` and `wk sync --fix` leave in a real checkout wired to a real mirror: the PR head fetched from GitHub past
+the mirror's rewrite, and every branch tracking the fork it is pushed to."""
 import importlib.util
-import io
-import subprocess
-import sys
+import os
 import unittest
-from unittest import mock
 
-from tests.support import REPO, scratch_dir
+from tests import test_pr_workflow
+from tests.support import REPO, GitMirror, git_commit, git_run
+from tests.test_new_fetch import URLS, WorkspaceFlow, firstrun, problems, real
+from tests.test_wk_workspace import said
 
-sys.path.insert(0, str(REPO / "lib"))
-from wk import act, git, pr  # noqa: E402
-from wk.machine import Local, Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
-
-GITHUB = "https://github.com/justinmichaud"
+DOTFILES = "[fetch]\n\tprune = true\n[push]\n\tdefault = current\n"   # what a workspace's git has of dotfiles/gitconfig that matters here
+SSH = '#!/bin/sh\nfor a; do cmd=$a; done\nrepo=${cmd#* }\nrepo=$(eval echo "$repo")\nexec ${cmd%% *} "$GITHUB/$repo"\n'
 
 
-def git_(*args, cwd=None):
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True,
-                          text=True, check=True).stdout.strip()
+def github(tmp):
+    """GitHub as the directory `tmp/hub`: a global git config with the workspace's dotfiles, the URLs `serve` adds, and
+    an ssh that lands a push in `hub/<owner>/<repo>.git`; the environment that git reads it from."""
+    (tmp / "gitconfig").write_text(DOTFILES)
+    (tmp / "ssh").write_text(SSH)
+    (tmp / "ssh").chmod(0o755)
+    return {"GIT_CONFIG_GLOBAL": str(tmp / "gitconfig"), "GIT_SSH_COMMAND": str(tmp / "ssh"), "GITHUB": str(tmp / "hub")}
 
 
-def wire_fetches(src, mirror, remotes=git.REMOTES):
-    subprocess.run(["sh", "-c", git.render(str(src), git.fetch_config(str(mirror), ["main"], remotes))],
-                   check=True, capture_output=True)
+def repo(tmp, name, url=None):
+    """A repository `name` on GitHub, read at its direct (no `.git`) URL, or `url`, when served."""
+    bare = tmp / "hub" / (name + ".git")
+    git_run("init", "-q", "--bare", "-b", "main", str(bare), cwd=tmp)
+    if url is not None:
+        with open(tmp / "gitconfig", "a") as f:
+            f.write('[url "%s"]\n\tinsteadOf = %s\n' % (bare, url or "https://github.com/" + name))
+    return bare
 
 
-class In(Local):
-    """This machine, with every command run from inside `cwd` -- the checkout whose config is in the way."""
-
-    def __init__(self, cwd):
-        self.cwd = cwd
-
-    def run(self, argv, input=None, timeout=None):
-        cp = subprocess.run(argv, cwd=str(self.cwd), capture_output=True, text=True)
-        return Result(cp.returncode, cp.stdout, cp.stderr)
+def rev(tree, *args):
+    return git_run("rev-parse", *args, cwd=tree, check=False).stdout.strip()
 
 
-class Here:
-    """A workspace that is a directory here: exec runs the argv, with the checkout at `src`."""
-
-    kind = "container"
-
-    def __init__(self, src):
-        self._src = str(src)
-        self.ran = []
-
-    def src(self, ws):
-        return self._src
-
-    def exec(self, ws, argv, tty=False, timeout=None, person=False):
-        self.ran.append(list(argv))
-        cp = subprocess.run(argv, capture_output=True, text=True)
-        return Result(cp.returncode, cp.stdout, cp.stderr)
-
-    act_exec = exec
+def upstream(tree, branch):
+    return tuple(git_run("config", "--get", "branch.%s.%s" % (branch, k), cwd=tree, check=False).stdout.strip() for k in ("remote", "merge"))
 
 
-class Wired(unittest.TestCase):
-    def setUp(self):
-        self.dir = self.enterContext(scratch_dir(prefix="wk-test-upstream-"))
-        self.mirror = self.dir / "mirror.git"
-        self.fork = self.dir / "fork.git"
-        self.src = self.dir / "src"
-
-        seed = self.dir / "seed"
-        seed.mkdir()
-        git_("init", "-q", "-b", "main", str(seed))
-        self.commit(seed, "one")
-        self.origin_main = git_("rev-parse", "main", cwd=seed)
-        git_("branch", "topic", cwd=seed)
-
-        for bare in (self.mirror, self.fork):
-            git_("init", "-q", "--bare", "-b", "main", str(bare))
-        # The same repository under a second name, which is what GitHub's two
-        # spellings of one URL are: the rewrite is keyed on one of them.
-        (self.dir / "fork").symlink_to(self.fork)
-        git_("push", "-q", str(self.mirror), "main", cwd=seed)
-        git_("push", "-q", str(self.mirror), "topic:refs/remotes/fork/topic", cwd=seed)
-        self.commit(seed, "two")
-        self.fork_main = git_("rev-parse", "main", cwd=seed)
-        git_("push", "-q", str(self.fork), "main", "topic", cwd=seed)
-
-        git_("clone", "-q", str(self.mirror), str(self.src))
-        # The rewrite covers exactly the URLs the questions below ask for.
-        self.remotes = (("origin", str(self.mirror)), ("fork", str(self.fork)))
-        wire_fetches(self.src, self.mirror, self.remotes)
-
-    def commit(self, repo, text):
-        (repo / text).write_text(text + "\n")
-        git_("add", text, cwd=repo)
-        git_("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", text, cwd=repo)
+def pushed(tree):
+    """Where a bare `git push` sends the branch checked out, by a dry run of it."""
+    out = git_run("push", "--dry-run", "--porcelain", cwd=tree, check=False).stdout
+    return [l.split("\t")[1] for l in out.splitlines() if l[:1] in "* +!=" and "\t" in l]
 
 
+class GitHub(test_pr_workflow.World):
+    """`ws`'s checkout `co` is a real clone of a real mirror, wired by firstrun.sh: its upstream URLs read the mirror,
+    and their direct spellings GitHub (`github`), where justinmichaud's WebKit fork carries `topic` one commit past
+    the copy of it the mirror holds and WebKit/WebKit is the mirror's upstream."""
 
-class TestLsRemote(Wired):
-    def test_it_answers_from_the_fork_not_the_mirror(self):
-        self.assertNotEqual(self.fork_main, self.origin_main)
-        for ref, want in (("refs/heads/topic", self.origin_main), ("refs/heads/main", self.fork_main), ("refs/heads/no-such", "")):
-            with self.subTest(ref=ref):
-                self.assertEqual(pr.ls_remote(In(self.src), str(self.fork), ref), want)
+    def __init__(self, tmp, kind="container"):
+        super().__init__(tmp, kind)
+        self.up, self.co, self.git_env = GitMirror(self.tmp), self.tmp / "co", github(self.tmp)
+        seed = self.up.seed
+        git_run("push", "-q", str(self.up.mirror), "main:refs/remotes/fork/topic", cwd=seed)
+        git_run("checkout", "-q", "-b", "topic", cwd=seed)
+        self.topic = git_commit(seed, "fork-only")
+        git_run("checkout", "-q", "main", cwd=seed)
+        self.fork = repo(self.tmp, "justinmichaud/WebKit", "")
+        git_run("push", "-q", str(self.fork), "topic", "main", cwd=seed)
+        repo(self.tmp, "WebKit/WebKit", "")
+        git_run("push", "-q", str(self.tmp / "hub" / "WebKit" / "WebKit.git"), "main", cwd=seed)
+        git_run("clone", "-q", str(self.up.mirror), str(self.co), cwd=self.tmp)
+        firstrun(self.co, str(self.up.mirror))
+        self.react(["git", "ls-remote"], lambda a, f: real(["sh", "-c", 'cd "$0" && exec "$@"', str(f.co)] + a, f.git_env))
 
+    def account(self, name, repos):
+        """`name`'s forks, each carrying `topic` at the fork's head."""
+        for r in repos:
+            git_run("push", "-q", str(repo(self.tmp, "%s/%s" % (name, r), "")), "%s:refs/heads/topic" % self.topic, cwd=self.up.seed)
 
-class TestBranchRepos(unittest.TestCase):
-    def ask(self, **sha_by_repo):
-        here = Fake()
-
-        def answer(argv, f):
-            repo = argv[2].rsplit("/", 1)[-1]
-            if repo in sha_by_repo:
-                return Result(0, "%s\trefs/heads/topic\n" % sha_by_repo[repo])
-            return Result(128, "", "repository not found")   # a fork with no such repository
-        here.react(["git", "ls-remote"], answer)
-        return here, pr.branch_repos(here, "justinmichaud", "topic")
-
-    def test_both_projects_are_asked_and_each_one_carrying_the_branch_is_found(self):
-        here, _ = self.ask()
-        self.assertEqual([e[1][2] for e in here.effects], [f"{GITHUB}/WebKit", f"{GITHUB}/WPEWebKit"])
-        self.assertEqual(self.ask()[1], [])
-        self.assertEqual(self.ask(WPEWebKit="beef")[1], [("WPEWebKit", f"{GITHUB}/WPEWebKit.git", "beef")])
-        self.assertEqual(self.ask(WebKit="cafe")[1], [("WebKit", f"{GITHUB}/WebKit.git", "cafe")])
-        self.assertEqual(len(self.ask(WebKit="cafe", WPEWebKit="beef")[1]), 2)
-
-
-class TestTheDirectSpellingEscapesEveryWiredRewrite(unittest.TestCase):
-    def setUp(self):
-        self.dir = self.enterContext(scratch_dir(prefix="wk-test-direct-"))
-        self.mirror = self.dir / "WebKit.git"
-        self.src = self.dir / "src"
-        git_("init", "-q", "--bare", "-b", "main", str(self.mirror))
-        git_("init", "-q", "-b", "main", str(self.src))
-        wire_fetches(self.src, self.mirror)
-
-    def get_url(self, url):
-        return git_("ls-remote", "--get-url", url, cwd=self.src)
-
-    def test_every_wired_url_is_rewritten_to_the_mirror(self):
-        for _, url in git.REMOTES:
-            self.assertEqual(self.get_url(url), str(self.mirror), url)
-
-    def test_and_its_direct_spelling_is_not(self):
-        for _, url in git.REMOTES:
-            direct = git.direct_url(url)
-            self.assertNotEqual(direct, url, f"{url} is not spelled with .git")
-            self.assertEqual(self.get_url(direct), direct, direct)
-
-    def test_an_account_that_is_not_wired_is_not_rewritten_either(self):
-        url = "https://github.com/alice/WebKit.git"
-        self.assertEqual(self.get_url(url), url)
+    def in_checkout(self, argv):
+        if argv[:1] != ["git"]:
+            return super().in_checkout(argv)
+        return real([a.replace(self.src, str(self.co)) for a in argv], self.git_env)
 
 
-class Checkout(Wired):
-    def run_checkout(self, spec, found=None, remotes=None, force=False):
-        driver = Here(self.src)
-        rows = found if found is not None else [("WebKit", str(self.fork), git_("rev-parse", "topic", cwd=self.fork))]
-        with mock.patch.object(pr, "branch_repos", lambda *a: rows), mock.patch.dict("os.environ", {"WK_FORCE": "1" if force else ""}), \
-                contextlib.redirect_stderr(io.StringIO()) as err:
-            pr.checkout(driver, Local(), "ws", spec, remotes or self.remotes)
-        return driver, err.getvalue()
-
-    def upstream(self, branch="topic"):
-        return (git_("config", "--get", f"branch.{branch}.remote", cwd=self.src),
-                git_("config", "--get", f"branch.{branch}.merge", cwd=self.src))
-
-
-class TestThePrFetchRetiresNothing(Checkout):
-    def test_the_one_fetch_is_by_the_direct_url_with_no_prune(self):
-        driver, _ = self.run_checkout("justinmichaud:topic")
-        fetches = [a for a in driver.ran if "fetch" in a]
-        self.assertEqual(len(fetches), 1, fetches)
-        self.assertIn("--no-prune", fetches[0])
-        self.assertIn(str(self.dir / "fork"), fetches[0])
-        self.assertNotIn(str(self.fork), fetches[0])
-
-
-class Pushable(Checkout):
-    """A wired checkout whose fork remote has a real URL and pushes land in the fork."""
+class PrFlow(test_pr_workflow.PrTest):
+    world_class = GitHub
 
     def setUp(self):
         super().setUp()
-        # `wk new` wires the URL beside the refspec the fixture already wrote.
-        git_("remote", "set-url", "fork", str(self.fork), cwd=self.src)
-        git_("config", "push.default", "current", cwd=self.src)
-        # A push is not rewritten to the mirror, so the user's own pushes land in the fork.
-        git_("config", f"url.{self.dir / 'fork'}.pushInsteadOf", str(self.fork), cwd=self.src)
-        self.forks = [("fork", "justinmichaud/WebKit", "github-webkit")]
+        os.environ.update(self.w.git_env)
 
-    def check(self):
-        script = git.wiring_check_script(str(self.src), "", self.forks, ["main"])
-        return subprocess.run(["sh", "-c", script], cwd=str(self.src), capture_output=True, text=True).stdout
-
-    def resolves(self):
-        return git_("rev-parse", "--abbrev-ref", "@{u}", cwd=self.src)
+    def head(self):
+        return rev(self.w.co, "HEAD")
 
 
-class TestThePrBranchIsLeftPushable(Pushable):
-    def assert_bare_push_goes_to_own_name(self, name):
-        cp = self.push()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("%s -> %s" % (name, name), cp.stderr + cp.stdout)
-
-    def test_a_real_push_u_is_reported_and_converged(self):
-        git_("checkout", "-q", "-b", "mine", cwd=self.src)
-        self.commit(self.src, "mine")
-        git_("push", "-q", "-u", "fork", "mine", cwd=self.src)
-        self.assertEqual(self.upstream("mine"), ("fork", "refs/heads/mine"))
-        self.assertNotEqual(subprocess.run(["git", "rev-parse", "@{u}"], cwd=str(self.src), capture_output=True).returncode, 0)
-        self.assertIn("branch mine was set up by git push -u", self.check())
-        self.assertIn("wk sync --fix", self.check())
-        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), self.forks), ["converged: mine tracks fork/mine"])
-        # The next `wk sync` brings the fork's branch into the mirror, and the checkout's fetch brings it here.
-        git_("push", "-q", str(self.mirror), "mine:refs/remotes/fork/mine", cwd=self.src)
-        git_("fetch", "-q", "fork", cwd=self.src)
-        self.assertEqual(self.resolves(), "fork/mine")
-        self.assertNotIn("push -u", self.check())
-        self.assert_bare_push_goes_to_own_name("mine")
-        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), self.forks), [])
-
-    def test_a_real_checkout_track_or_branch_u_resolves_and_pushes(self):
-        git_("fetch", "-q", "fork", cwd=self.src)
-        for name, how in (("topic", [["checkout", "-q", "--track", "fork/topic"]]),
-                          ("other", [["checkout", "-q", "-b", "other"], ["branch", "-u", "fork/topic"]])):
-            with self.subTest(name=name):
-                for argv in how:
-                    git_(*argv, cwd=self.src)
-                self.assertEqual(self.resolves(), "fork/topic")
-                self.assertNotIn("push -u", self.check())
-                self.assert_bare_push_goes_to_own_name(name)
-
-    def push(self):
-        self.commit(self.src, "work-%s" % git_("rev-parse", "--short", "HEAD", cwd=self.src))
-        return subprocess.run(["git", "push", "--dry-run"], cwd=str(self.src), capture_output=True, text=True)
-
-    def test_the_branch_tracks_the_forks_branch_by_name_and_a_bare_push_resolves(self):
-        _, err = self.run_checkout("justinmichaud:topic")
-        self.assertIn("'ws' is on topic (WebKit, from fork)", err)
-        self.assertEqual(self.upstream(), ("fork", "refs/remotes/fork/topic"))
-        self.assertEqual(self.resolves(), "fork/topic")
-        self.assert_bare_push_goes_to_own_name("topic")
-
-    def test_the_second_fork_converges_the_same_way(self):
-        git_("remote", "add", "forkwpe", str(self.fork), cwd=self.src)
-        git_("config", "remote.forkwpe.fetch", "+refs/remotes/forkwpe/*:refs/remotes/forkwpe/*", cwd=self.src)
-        git_("push", "-q", str(self.mirror), "topic:refs/remotes/forkwpe/topic", cwd=self.fork)
-        git_("fetch", "-q", "forkwpe", cwd=self.src)
-        git_("checkout", "-q", "-b", "topic", "refs/remotes/forkwpe/topic", cwd=self.src)
-        git_("config", "branch.topic.remote", "forkwpe", cwd=self.src)
-        git_("config", "branch.topic.merge", "refs/heads/topic", cwd=self.src)
-        forks = [("fork", "justinmichaud/WebKit", "github-webkit"), ("forkwpe", "justinmichaud/WPEWebKit", "github-wpewebkit")]
-        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), forks), ["converged: topic tracks forkwpe/topic"])
-        self.assertEqual(self.resolves(), "forkwpe/topic")
-        self.assert_bare_push_goes_to_own_name("topic")
-
-    def test_origin_and_wpe_refuse_a_bare_push(self):
-        for remote in ("origin", "wpe"):
-            if remote == "wpe":
-                git_("remote", "add", "wpe", str(self.fork), cwd=self.src)
-            git_("remote", "set-url", "--push", remote, git.NO_PUSH, cwd=self.src)
-            git_("branch", "-f", "t-" + remote, "main", cwd=self.src)
-            git_("checkout", "-q", "t-" + remote, cwd=self.src)
-            git_("config", "branch.t-%s.remote" % remote, remote, cwd=self.src)
-            git_("config", "branch.t-%s.merge" % remote, "refs/heads/main", cwd=self.src)
-            cp = self.push()
-            self.assertNotEqual(cp.returncode, 0, remote + cp.stdout)
-            self.assertIn("no-push", cp.stderr)
+class TestAPrHeadCheckedOut(PrFlow):
+    def test_a_forks_branch_comes_from_the_fork_past_the_mirror_and_tracks_it_so_a_bare_push_goes_to_its_own_name(self):
+        rc, err = self.pr("ws", "justinmichaud:topic")
+        co = self.w.co
+        self.assertEqual((rc, said(err), self.head(), upstream(co, "topic")), (0, "  %s fork-only" % self.w.topic[:7], self.w.topic, ("fork", "refs/remotes/fork/topic")))
+        self.assertEqual((rev(co, "--abbrev-ref", "@{u}"), pushed(co), rev(co, "origin/main")), ("fork/topic", ["refs/heads/topic:refs/heads/topic"], self.w.up.sha1))
 
     def test_it_converges_over_an_upstream_already_recorded_wrong(self):
-        self.run_checkout("justinmichaud:topic")
-        git_("branch", "--set-upstream-to=refs/remotes/fork/topic", "topic", cwd=self.src)
-        self.run_checkout("justinmichaud:topic")
-        self.assertEqual(self.upstream(), ("fork", "refs/remotes/fork/topic"))
+        self.pr("ws", "justinmichaud:topic")
+        git_run("branch", "--set-upstream-to=refs/remotes/fork/topic", "topic", cwd=self.w.co)
+        self.assertEqual((self.pr("ws", "justinmichaud:topic")[0], upstream(self.w.co, "topic")), (0, ("fork", "refs/remotes/fork/topic")))
 
     def test_an_account_with_no_remote_gets_one_named_for_it(self):
-        other = self.dir / "alice.git"
-        git_("clone", "-q", "--bare", str(self.fork), str(other))
-        (self.dir / "alice").symlink_to(other)
-        driver, err = self.run_checkout("alice:topic", found=[("WPEWebKit", str(other), git_("rev-parse", "topic", cwd=other))])
-        self.assertEqual(git_("config", "--get", "remote.alice-wpewebkit.url", cwd=self.src), str(other))
-        self.assertEqual(self.upstream(), ("alice-wpewebkit", "refs/heads/topic"))
-        self.assertEqual(self.resolves(), "alice-wpewebkit/topic")
-        git_("pull", "--ff-only", "-q", cwd=self.src)
+        self.w.account("alice", ["WPEWebKit"])
+        rc, err = self.pr("ws", "alice:topic")
+        co = self.w.co
+        self.assertEqual((rc, git_run("config", "remote.alice-wpewebkit.url", cwd=co).stdout.strip(), upstream(co, "topic"), rev(co, "--abbrev-ref", "@{u}")),
+                         (0, "https://github.com/alice/WPEWebKit.git", ("alice-wpewebkit", "refs/heads/topic"), "alice-wpewebkit/topic"))
+
+    def test_a_branch_in_both_of_an_accounts_projects_is_refused_by_name_before_anything_moves(self):
+        self.w.account("alice", ["WebKit", "WPEWebKit"])
+        rc, err = self.pr("ws", "alice:topic")
+        self.assertEqual((rc, said(err), self.head()), (1, "error: 'topic' exists in more than one of alice's repositories:", self.w.up.sha1))
 
     def test_local_commits_the_head_lacks_are_kept_unless_forced(self):
-        self.run_checkout("justinmichaud:topic")
-        self.commit(self.src, "mine")
-        mine = git_("rev-parse", "HEAD", cwd=self.src)
-        _, err = self.run_checkout("justinmichaud:topic")
-        self.assertIn("local 'topic' has 1 commit(s) the PR head does not have", err)
-        self.assertIn("wk pr ws justinmichaud:topic --force", err)
-        self.assertEqual(git_("rev-parse", "HEAD", cwd=self.src), mine)
-        _, err = self.run_checkout("justinmichaud:topic", force=True)
-        self.assertIn("discarding 1 local commit(s)", err)
-        self.assertEqual(git_("rev-parse", "HEAD", cwd=self.src), git_("rev-parse", "topic", cwd=self.fork))
+        self.pr("ws", "justinmichaud:topic")
+        mine = git_commit(self.w.co, "mine")
+        rc, err = self.pr("ws", "justinmichaud:topic")
+        self.assertEqual((rc, "warning: local 'topic' has 1 commit(s) the PR head does not have" in err.splitlines(), self.head()), (0, True, mine))
+        self.assertIn("    wk pr ws justinmichaud:topic --force", err.splitlines())
+        rc, err = self.pr("ws", "justinmichaud:topic", "--force")
+        self.assertEqual((rc, self.head()), (0, self.w.topic))
 
-    def test_a_pull_head_is_left_tracking_nothing(self):
-        git_("update-ref", "refs/pull/1234/head", "topic", cwd=self.fork)
-        self.run_checkout("1234", remotes=(("origin", str(self.fork)),))
-        self.assertEqual(git_("rev-parse", "--abbrev-ref", "HEAD", cwd=self.src), "pr/1234")
-        cp = subprocess.run(["git", "config", "--get", "branch.pr/1234.remote"], cwd=str(self.src), capture_output=True, text=True)
-        self.assertEqual(cp.returncode, 1, cp.stdout)
+    def test_a_pull_request_head_is_checked_out_tracking_nothing_even_where_git_would_track_it(self):
+        git_run("config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", cwd=self.w.co)   # a checkout wired before the narrowing
+        git_run("update-ref", "refs/pull/1234/head", self.w.up.sha1, cwd=self.w.tmp / "hub" / "WebKit" / "WebKit.git")
+        self.assertEqual(self.pr("ws", "1234")[0], 0)
+        self.assertEqual((rev(self.w.co, "--abbrev-ref", "HEAD"), upstream(self.w.co, "pr/1234")), ("pr/1234", ("", "")))
 
     def test_no_such_pull_request_is_refused_before_anything_moves(self):
-        driver = Here(self.src)
-        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-            pr.checkout(driver, Local(), "ws", "999", (("origin", str(self.fork)),))
-        self.assertIn("no pull request #999", err.getvalue())
-        self.assertEqual(driver.ran, [])
-
-    def test_a_branch_in_both_projects_is_refused_by_name(self):
-        rows = [("WebKit", "u1", "a"), ("WPEWebKit", "u2", "b")]
-        driver = Here(self.src)
-        with mock.patch.object(pr, "branch_repos", lambda *a: rows), contextlib.redirect_stderr(io.StringIO()) as err, \
-                self.assertRaises(act.Refused):
-            pr.checkout(driver, Local(), "ws", "justinmichaud:topic")
-        self.assertIn("exists in more than one of justinmichaud's repositories", err.getvalue())
-        self.assertEqual(driver.ran, [])
-
-    def test_the_retarget_points_a_branch_the_same_way(self):
-        git_("fetch", "-q", "--no-prune", str(self.dir / "fork"), "refs/heads/topic:refs/remotes/fork/topic", cwd=self.src)
-        git_("checkout", "-q", "-b", "topic", "refs/remotes/fork/topic", cwd=self.src)
-        git_("config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", cwd=self.src)
-        git_("update-ref", "refs/remotes/origin/topic", "refs/remotes/fork/topic", cwd=self.src)
-        git_("config", "branch.topic.remote", "origin", cwd=self.src)
-        git_("config", "branch.topic.merge", "refs/heads/topic", cwd=self.src)
-        git_("config", "remote.origin.url", git.REMOTES[0][1], cwd=self.src)
-        forks = [("fork", "justinmichaud/WebKit", "github-webkit")]
-        lines = pr.retarget(Here(self.src), "ws", str(self.src), forks, ["main"], (("origin", git.REMOTES[0][1]), ("fork", str(self.fork))))
-        self.assertEqual(lines, ["retargeted: topic now tracks fork/topic"])
-        self.assertEqual(self.upstream(), ("fork", "refs/remotes/fork/topic"))
-        self.assertEqual(pr.retarget(Here(self.src), "ws", str(self.src), forks, ["main"]), [], "a branch on its fork is left alone")
+        rc, err = self.pr("ws", "999")
+        self.assertEqual((rc, said(err), self.head()), (1, "error: no pull request #999 on WebKit (checked https://github.com/WebKit/WebKit.git)", self.w.up.sha1))
 
 
-class TestTheMergeRefFollowsTheRemotesRefspec(Pushable):
-    def test_a_heads_refspec_fork_is_not_flagged_and_not_rewritten(self):
-        git_("config", "--replace-all", "remote.fork.fetch", "+refs/heads/*:refs/remotes/fork/*", cwd=self.src)
-        git_("fetch", "-q", "--no-prune", str(self.dir / "fork"), "refs/heads/topic:refs/remotes/fork/topic", cwd=self.src)
-        git_("checkout", "-q", "-b", "mine", "fork/topic", cwd=self.src)
-        git_("config", "branch.mine.remote", "fork", cwd=self.src)
-        git_("config", "branch.mine.merge", "refs/heads/topic", cwd=self.src)
-        self.assertEqual(self.resolves(), "fork/topic")
-        self.assertNotIn("push -u", self.check())
-        self.assertEqual(pr.converge(Here(self.src), "ws", str(self.src), self.forks), [])
-        self.assertEqual(self.upstream("mine"), ("fork", "refs/heads/topic"))
+class TestABranchOpened(PrFlow):
+    def test_a_branch_opened_twice_is_pushed_each_time_and_left_tracking_its_fork(self):
+        co = self.w.co
+        git_run("checkout", "-q", "--track", "-b", "mine", "origin/main", cwd=co)
+        for draft in ((), ("--draft",)):
+            git_commit(co, "work%s" % len(draft))
+            rc, err = self.pr("open", "ws", *draft)
+            self.assertEqual((rc, rev(self.w.fork, "mine"), self.w.gh()[-1][-1]), (0, self.head(), "--draft" if draft else "--fill"), draft)
+        self.assertEqual(upstream(co, "mine"), ("fork", "refs/remotes/fork/mine"))
 
-    def test_a_branch_pushed_before_opens_again_and_stays_wired(self):
-        """`unit pr.open_twice`: once opened, `mine` tracks its fork, whose `@{u}` resolves nowhere; it opens again all the same."""
-        url = "https://github.com/justinmichaud/WebKit.git"
-        for argv in (("remote", "set-url", "origin", git.REMOTES[0][1]), ("remote", "set-url", "fork", url),
-                     ("config", f"url.{self.dir / 'fork'}.pushInsteadOf", url), ("checkout", "-q", "--track", "-b", "mine", "origin/main")):
-            git_(*argv, cwd=self.src)
-        driver = Here(self.src)
-        driver.here = Fake()
-        for draft in (False, True):
-            self.commit(self.src, str(draft))
-            with mock.patch.object(pr.secrets, "forks", lambda: self.forks), contextlib.redirect_stderr(io.StringIO()):
-                pr.pr_open(driver, "ws", draft, False)
-            self.assertEqual(git_("rev-parse", "mine", cwd=self.fork), git_("rev-parse", "HEAD", cwd=self.src), draft)
-        gh = ("gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "justinmichaud:mine", "--fill")
-        self.assertEqual([e[1] for e in driver.here.effects if e[0] == "exec"], [gh, gh + ("--draft",)])
-        self.assertEqual(self.upstream("mine"), ("fork", "refs/remotes/fork/mine"))
-        self.assertNotIn("problem: branch", self.check())
+
+class TestTheWiringOfABranch(WorkspaceFlow):
+    """`wk sync <ws>` names a branch whose upstream does not resolve or is no fork, and `--fix` points it at its fork."""
+
+    def setUp(self):
+        super().setUp()
+        env = github(self.tmp)
+        repo(self.tmp, "justinmichaud/WebKit")
+        os.environ.update(env)
+        self.w.git_env.update(env)
+
+    def notes(self, err):
+        return [l.strip() for l in err.splitlines() if l.startswith("    ") and not l.startswith("    - ")]
+
+    def test_a_push_u_is_named_and_fix_records_it_so_it_resolves_once_the_mirror_carries_it(self):
+        git_run("checkout", "-q", "-b", "mine", cwd=self.ws)
+        for k, v in (("remote", "fork"), ("merge", "refs/heads/mine")):   # what `git push -u fork mine` records
+            git_run("config", "branch.mine." + k, v, cwd=self.ws)
+        rc, err = self.sync("ws")
+        self.assertEqual(rc, 1)
+        self.assertTrue(any(p.startswith("branch mine was set up by git push -u") and "wk sync --fix" in p for p in problems(err)))
+        self.assertIn("converged: mine tracks fork/mine", self.notes(self.sync("ws", "--fix")[1]))
+        git_run("push", "-q", self.w.mirror, "mine:refs/remotes/fork/mine", cwd=self.ws)
+        rc, err = self.sync("ws")
+        self.assertEqual((rc, rev(self.ws, "--abbrev-ref", "@{u}"), pushed(self.ws)), (0, "fork/mine", ["refs/heads/mine:refs/heads/mine"]))
+        self.assertEqual(self.notes(self.sync("ws", "--fix")[1]), ["re-wired", "git-webkit: setup=ok"])
+
+    def test_the_second_fork_converges_the_same_way(self):
+        git_run("push", "-q", self.w.mirror, "main:refs/remotes/forkwpe/topic", cwd=self.w.up.seed)
+        self.sync("ws")
+        git_run("checkout", "-q", "-b", "topic", "forkwpe/topic", cwd=self.ws)
+        git_run("config", "branch.topic.merge", "refs/heads/topic", cwd=self.ws)
+        self.assertIn("converged: topic tracks forkwpe/topic", self.notes(self.sync("ws", "--fix")[1]))
+        self.assertEqual(rev(self.ws, "--abbrev-ref", "@{u}"), "forkwpe/topic")
+
+    def test_a_branch_tracking_an_upstream_is_retargeted_to_its_fork_once(self):
+        for ref in ("wpe", "forkwpe"):
+            git_run("push", "-q", self.w.mirror, "main:refs/remotes/%s/topic" % ref, cwd=self.w.up.seed)
+        self.sync("ws")
+        git_run("checkout", "-q", "--track", "-b", "topic", "wpe/topic", cwd=self.ws)
+        self.assertIn("retargeted: topic now tracks forkwpe/topic", self.notes(self.sync("ws", "--fix")[1]))
+        self.assertEqual(upstream(self.ws, "topic"), ("forkwpe", "refs/remotes/forkwpe/topic"))
+        self.assertEqual(self.notes(self.sync("ws", "--fix")[1]), ["re-wired", "git-webkit: setup=ok"], "a branch on its fork is left alone")
+
+    def test_a_branch_tracking_its_fork_by_hand_is_not_named_and_pushes_to_its_own_name(self):
+        self.sync("ws")
+        for name, how in (("side", [("checkout", "-q", "--track", "fork/side")]), ("other", [("checkout", "-q", "-b", "other"), ("branch", "-u", "fork/side")])):
+            for argv in how:
+                git_run(*argv, cwd=self.ws)
+            self.assertEqual((self.sync("ws")[0], rev(self.ws, "--abbrev-ref", "@{u}"), pushed(self.ws)), (0, "fork/side", ["refs/heads/%s:refs/heads/%s" % (name, name)]))
+
+    def test_origin_and_wpe_refuse_a_bare_push_and_every_upstream_url_reads_the_mirror_unless_spelled_directly(self):
+        for remote in ("origin", "wpe"):
+            git_run("checkout", "-q", "-B", "t-" + remote, "origin/main", cwd=self.ws)
+            for k, v in (("remote", remote), ("merge", "refs/heads/main")):
+                git_run("config", "branch.t-%s.%s" % (remote, k), v, cwd=self.ws)
+            cp = real(["git", "-C", str(self.ws), "push"])
+            self.assertEqual((cp.rc != 0, "no-push" in cp.err), (True, True), remote)
+        get_url = lambda u: git_run("ls-remote", "--get-url", u, cwd=self.ws).stdout.strip()   # noqa: E731
+        self.assertEqual([get_url(u) for u in URLS], [self.w.mirror] * 4)
+        for u in [u[:-4] for u in URLS] + ["https://github.com/alice/WebKit.git"]:
+            self.assertEqual(get_url(u), u)
 
 
 class TestTheBrokerServesTheMirrorRefresh(unittest.TestCase):
@@ -377,3 +220,7 @@ class TestTheBrokerServesTheMirrorRefresh(unittest.TestCase):
                          (["sync", "--mirror"], "store", True, True))
         with self.assertRaises(b.Refused):
             resolve({"machine": "rpi4"})
+
+
+if __name__ == "__main__":
+    unittest.main()
