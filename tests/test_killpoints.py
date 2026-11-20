@@ -318,7 +318,7 @@ ROWS = {
     "rm remote": rm_row("remote"),
     "sync tools": sync_row("tools"),
     "sync place": sync_row("place", fix=True),
-    "build": Row(build.BuildTest, lambda c: build.World(c.tmp), lambda c, w: quiet(c.make(w).front), build.World.state),
+    "build": Row(build.BuildTest, lambda c: build.World(c.tmp), lambda c, w: quiet(c.typed, w=w), build.World.state),
     "bench run": bench_row("container", "wpe-release"),
     "bench run vm": bench_row("vm", "mac-release"),
     "bench run board": Row(bboard.BoardTest, lambda c: c.world(), board_run, bboard.BoardWorld.state, board_mutations),
