@@ -88,7 +88,7 @@ class Side:
 
     def run(self, argv, mutates=False):
         r = self.ch.run(argv, mutates=mutates)
-        return Result(r.rc, r.out.replace("\r", ""), r.err)
+        return Result(r.rc, r.out, r.err)
 
     def out(self, argv):
         r = self.run(argv)
@@ -200,7 +200,7 @@ class GuestSide(Side):
 
     def home_dir(self):
         r = self.ch.run(["printenv", "HOME"], "host")
-        return r.out.replace("\r", "").strip() if r.ok else None
+        return r.out.strip() if r.ok else None
 
     def local(self):
         return False

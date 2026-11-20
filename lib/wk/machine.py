@@ -1,6 +1,5 @@
-"""The one seam for every effect: a Machine runs processes and touches files
-on this host, a host over ssh, or an in-memory fake; a mutating call prints
-under --dry-run and refuses before a destructive command has asked."""
+"""The one seam for every effect: a Machine runs processes and touches files on this host, a host over ssh, or an in-memory fake;
+a mutating call prints under --dry-run and refuses before a destructive command has asked."""
 
 import base64
 import errno
@@ -86,9 +85,8 @@ def isolated_module(lib, module, python="python3"):
 
 class Result:
     def __init__(self, rc, out="", err=""):
-        self.rc = rc
-        self.out = out
-        self.err = err
+        # A far side that allocates a terminal (tart exec, ssh -t, podman machine ssh) ends its lines with \r\n.
+        self.rc, self.out, self.err = rc, out.replace("\r", ""), err.replace("\r", "")
 
     @property
     def ok(self):

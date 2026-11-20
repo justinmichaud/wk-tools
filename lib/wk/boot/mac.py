@@ -85,7 +85,7 @@ class MacVolume(MacDriver):
     def fact(self, what, arg=""):
         with open(os.path.join(self.root, "lib", "wk", "mac.py")) as f:
             r = self.run(["python3", "-", what] + ([arg] if arg else []), input=f.read())
-        return r.out.replace("\r", "").strip() if r.ok else ""
+        return r.out.strip() if r.ok else ""
 
     def firmware_reading(self):
         """(the group the firmware boots, "bench", "host" or ""); the group is "" when the firmware publishes none."""
@@ -164,7 +164,7 @@ class MacVolume(MacDriver):
 
     def priv(self, verb):
         r = self.ch.priv(verb, side="host", mutates=verb != "status")
-        return r.ok, (r.out + r.err).replace("\r", "").strip()
+        return r.ok, (r.out + r.err).strip()
 
     def helper_problem(self):
         """"" when the boot helper answers and names its detach: an older one's reboot exits 0 having rebooted nothing."""

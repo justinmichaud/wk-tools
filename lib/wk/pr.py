@@ -108,7 +108,7 @@ def converge(driver, ws, src, forks):
 
 
 def _out(r):
-    return r.out.replace("\r", "").strip() if r.ok else ""
+    return r.out.strip() if r.ok else ""
 
 
 def retarget(driver, ws, src, forks, branches, remotes=git.REMOTES):
@@ -137,7 +137,7 @@ def _probe(driver, name, src, branch):
     if not dirty.ok:
         die("could not reach the checkout in '%s'" % name)
     local = _out(driver.exec(name, ["git", "-C", src, "rev-parse", "--verify", "--quiet", "refs/heads/" + branch]))
-    return local, len([l for l in dirty.out.replace("\r", "").splitlines() if l.strip()])
+    return local, len([l for l in dirty.out.splitlines() if l.strip()])
 
 
 def _source(driver, here, name, src, pr, remotes):
@@ -162,7 +162,7 @@ def _source(driver, here, name, src, pr, remotes):
             "    fetch that remote by hand." % (branch, user, "\n".join("    %s %s %s" % f for f in found)))
     repo, url, head = found[0]
     urls = driver.exec(name, ["git", "-C", src, "config", "--get-regexp", r"^remote\..*\.url$"])
-    remote = next((l.split()[0][len("remote."):-len(".url")] for l in urls.out.replace("\r", "").splitlines()
+    remote = next((l.split()[0][len("remote."):-len(".url")] for l in urls.out.splitlines()
                    if len(l.split()) == 2 and l.split()[1] == url), "")
     if remote:
         return repo, url, remote, branch, "refs/heads/" + branch, head, False

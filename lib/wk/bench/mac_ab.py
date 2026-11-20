@@ -247,8 +247,7 @@ class Plant(Task):
         inner = "printf %%s %s | base64 -d > /tmp/wk-guest.sh && bash /tmp/wk-guest.sh" % base64.b64encode(script.encode()).decode()
         argv = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new", "wk-" + self.ws, inner]
         m = self.manager()
-        r = m.act_run(argv) if mutates else m.run(argv)
-        return r.__class__(r.rc, r.out.replace("\r", ""), r.err)
+        return m.act_run(argv) if mutates else m.run(argv)
 
     def guest_src(self):
         src = (self.guest_sh('for p in ~/WebKit ~/webkit; do [ -d "$p/.git" ] && { echo "$p"; exit 0; }; done').out.split() or [""])[0]

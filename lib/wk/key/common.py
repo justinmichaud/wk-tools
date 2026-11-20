@@ -152,9 +152,9 @@ class Fleet:
         """(status, stdout): a read, so the far side is never told this run is a dry one."""
         env = {k: v for k, v in self.env.items() if k != "WK_DRY_RUN"}
         r = self.drivers[name].machine.run(self._argv(name, args, env), input="")
-        return r.rc, r.out.replace("\r", "")
+        return r.rc, r.out
 
     def tell(self, name, args, value):
         """The value on stdin, never an argument in `ps` over there."""
         r = self.drivers[name].machine.act_run(self._argv(name, args, self.env), input=value)
-        return r.ok, r.out.replace("\r", "")
+        return r.ok, r.out

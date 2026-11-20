@@ -164,7 +164,7 @@ def b64(text):
 
 
 def said(r):
-    return (r.out + r.err).replace("\r", "").rstrip("\n")
+    return (r.out + r.err).rstrip("\n")
 
 
 def indent(text, by="    "):
@@ -225,7 +225,7 @@ class Write:
         path = next((i.path for i in found if i.path and images.ws_preset(i.ws, self.env) == spec), "")
         if not path and images.quiet_load(spec, self.env):
             r = self.machine.run([os.path.join(self.root, "wk"), "sysimage", "path", spec])
-            path = r.out.replace("\r", "").strip() if r.ok else ""
+            path = r.out.strip() if r.ok else ""
             if not path:
                 act.die("'%s' is an image preset whose image workspace holds no image:\n        wk sysimage build %s"
                         % (spec, spec))
@@ -350,10 +350,10 @@ class Write:
         far = "exec 3>&1; %s | python3 -c %s | sudo -n %s write %s" % (filt, shlex.quote(METER), CARD_PRIV, shlex.quote(dev))
         r = self.piped(reader).run(["sh", "-c", far], "host", mutates=True)
         if not r.ok:
-            size = self.ssh("lsblk -dno SIZE %s" % shlex.quote(base(dev))).out.replace("\r", "").strip()
+            size = self.ssh("lsblk -dno SIZE %s" % shlex.quote(base(dev))).out.strip()
             act.die("could not write the image onto %s (%s) on %s; it was read through:  %s"
                     % (dev, size, name, shlex.join(reader)))
-        report = r.out.replace("\r", "")
+        report = r.out
         act.log(indent(report.rstrip("\n")))
         d = kv(report)
         return {k: d.get(k, "") for k in REPORT}
@@ -368,7 +368,7 @@ class Write:
             if not self.card("verify", dev, *[rep[k] for k in REPORT[2:]], mutates=False).ok:
                 act.die("%s does not read back as the image's boot and root." % dev)
             return
-        lines = self.card("verify", dev, rep["stream_bytes"], mutates=False).out.replace("\r", "").split()
+        lines = self.card("verify", dev, rep["stream_bytes"], mutates=False).out.split()
         got = lines[-1] if lines else ""
         if got != rep["stream_sha"]:
             act.die("%s does not read back as the image streamed to it\n    image: %s\n    disk:  %s"
@@ -415,7 +415,7 @@ class Write:
         if not self.card("identity", dev, old, new).ok:
             act.die("could not stamp a unique identity on %s: its root is still PARTUUID=%s-2, like every other card\n"
                     "    written from this image, and booted beside one the kernel may mount the wrong root." % (dev, old))
-        got = self.ssh("lsblk -no PARTUUID %s" % shlex.quote(part(dev, 2))).out.replace("\r", "").split()
+        got = self.ssh("lsblk -no PARTUUID %s" % shlex.quote(part(dev, 2))).out.split()
         if new + "-02" not in got:
             act.die("%s did not take the new identity; refusing to leave it ambiguous" % dev)
 

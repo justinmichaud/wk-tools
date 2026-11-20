@@ -238,7 +238,7 @@ class Guest:
             level(why.format(ws=self.ws))
 
     def _said(self, r):
-        sys.stderr.write(r.err.replace("\r", ""))
+        sys.stderr.write(r.err)
         return r.ok
 
     def guest_tools_push(self):
@@ -272,7 +272,7 @@ class Guest:
         t0 = self.host.clock.now()
         r = self.m.act_run(["env", "WK_SRC=" + src, "WK_MIRROR=" + mirror, "WK_TOOLS=" + self.vm.tools(self.ws), "bash", "-s"],
                            input=script)
-        out = (r.out + r.err).replace("\r", "")
+        out = (r.out + r.err)
         if "checkout=cloned" in out:
             info("%s's %s checkout made from its mirror in %ds" % (self.ws, project.get("CHECKOUT"), self.host.clock.now() - t0))
         if "setup=ok" in out:
@@ -431,7 +431,7 @@ def unexpected(root, machine, windows):
 
 def streamed(g, script):
     r = g.run(["bash", "-s"], input=script)
-    return r.out.replace("\r", "") if r.ok else ""
+    return r.out if r.ok else ""
 
 
 def window_reading(root, machine, g):
@@ -476,7 +476,7 @@ def blockers(rd):
 def setup_assistant(g):
     """A count, not pgrep's status: tart exec failing says 1 as well."""
     r = g.run(["sh", "-c", "pgrep -f 'Setup Assistant.app/Contents/MacOS' | grep -c . || true"])
-    n = r.out.replace("\r", "").strip() if r.ok else ""
+    n = r.out.strip() if r.ok else ""
     return "unreachable" if not n else "gone" if n == "0" else "up"
 
 
@@ -486,7 +486,7 @@ def unblock_desktop(root, g):
         return True
     info("driving Setup Assistant off the screen over the Accessibility API")
     r = g.act_run(["/usr/bin/python3", "-"], input=tree(root, "vm/desktop-unblock.py"))
-    sys.stderr.write((r.out + r.err).replace("\r", ""))
+    sys.stderr.write((r.out + r.err))
     return r.ok and setup_assistant(g) == "gone"
 
 

@@ -334,7 +334,7 @@ def fetch_from_mirror(driver, name, here):
     wk = wk_of(driver.root)
     mirror = shlex.quote(driver.mirror_dir())
     r = driver.exec(name, ["sh", "-c", "[ -n %s ] && [ -d %s ] && echo yes || echo no" % (mirror, mirror)])
-    lines = r.out.replace("\r", "").splitlines() if r.ok else []
+    lines = r.out.splitlines() if r.ok else []
     source = {"yes": "mirror", "no": "network"}.get(lines[-1].strip() if lines else "", "unreachable")
     if source == "mirror":
         r = here.act_run([wk, "sync", name])

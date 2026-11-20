@@ -325,7 +325,7 @@ class Build:
     def far_line(self, preset_env, bit, passthru):
         """The command line the place half resolves, asked of it under WK_DRY_RUN; it knows ionice and the cgroup clamp."""
         r = self.driver.exec(self.name, ["env"] + preset_env + ["WK_DRY_RUN=1", bit] + passthru)
-        return r.out.replace("\r", "").strip() if r.ok else None
+        return r.out.strip() if r.ok else None
 
     def run(self, budget, jobs, nice, budget_mb, preset_env, bit, passthru):
         """The steps: the log is truncated once the claim stands, so a refused build leaves the running one's log alone."""

@@ -373,7 +373,7 @@ class Change(Task):
         if not mode.startswith("bench "):
             return mode, []
         try:
-            return mode, s.bench().run(["sh", "-c", SLOTS]).out.replace("\r", "").split()
+            return mode, s.bench().run(["sh", "-c", SLOTS]).out.split()
         except Refused:
             return "unreachable", []
 

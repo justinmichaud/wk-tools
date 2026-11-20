@@ -45,14 +45,14 @@ def install(root, env, machine, run, ws, tools, src, cache, fill):
     if said.get("pi", "").startswith("no-node"):
         log("  no pi in '%s': it needs node >= 22.19 and npm, and found node %s" % (ws, said["pi"].split(" ", 1)[-1]))
     if not r.ok:
-        why = [l.rstrip() for l in (r.out + "\n" + r.err).replace("\r", "").splitlines() if l.strip() and not ASSIGN.match(l)]
+        why = [l.rstrip() for l in (r.out + "\n" + r.err).splitlines() if l.strip() and not ASSIGN.match(l)]
         die("could not install the coding agents in '%s' (%s).%s\n    claude.ai must answer where the agents cache is written, "
             "registry.npmjs.org the workspace;\n    'wk new %s' destroys the half-made workspace and tries again."
             % (ws, " ".join("%s=%s" % (a, said.get(a, "?")) for a in AGENTS), "".join("\n    " + l for l in why), ws))
     config = run(["bash", "-lc", "python3 %s %s" % (shlex.quote(tools + "/claude/workspace-config.py"), shlex.quote(src))])
     if not config.ok:
         die("could not record Claude's start-up answers in '%s', and every session there\n    would stop at a dialog instead "
-            "of starting:\n    %s" % (ws, (config.out + config.err).replace("\r", "").strip().replace("\n", "\n    ")))
+            "of starting:\n    %s" % (ws, (config.out + config.err).strip().replace("\n", "\n    ")))
     if said.get("pi") in ("present", "installed"):
         write_pi_models(root, env, machine, ws, *fill)
 

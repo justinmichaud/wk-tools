@@ -136,7 +136,7 @@ def agent_pids(t, ws, session=""):
     r = t.exec(ws, ["sh", "-c", scan])
     if not r.ok:
         return [] if t.info(ws) in NOT_RUNNING else None
-    return [p for p in r.out.replace("\r", "").split() if p.isdigit()]
+    return [p for p in r.out.split() if p.isdigit()]
 
 
 def allow(t, ws, proc=None, pid=None):

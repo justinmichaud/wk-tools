@@ -189,7 +189,7 @@ class Yocto(task.ContainerBuilder):
 
     def ws_head(self, driver, ws):
         r = driver.exec(ws, ["bash", "-c", "cd /src/WebKit && git rev-parse --abbrev-ref HEAD"])
-        lines = [l for l in r.out.replace("\r", "").split("\n") if l.strip()]
+        lines = [l for l in r.out.split("\n") if l.strip()]
         return lines[-1].strip() if r.ok and lines else ""
 
     def ensure_ws(self, driver, ws):
@@ -211,7 +211,7 @@ class Yocto(task.ContainerBuilder):
 
     def sections(self, driver, ws):
         r = driver.exec(ws, ["bash", "-c", "cat /src/WebKit/Tools/yocto/targets.conf"])
-        return re.findall(r"^\[([^\]]+)\]", r.out.replace("\r", ""), re.M) if r.ok else None
+        return re.findall(r"^\[([^\]]+)\]", r.out, re.M) if r.ok else None
 
     def check_target(self, driver, ws):
         """Asked here: bitbake's own version of it is a config-parse error hours into the stage."""

@@ -351,7 +351,7 @@ def device(root, name, env, machine, probe=fleet_probe, answers=None):
     if conf["kind"] != "board" or not fields["mode"]:
         return
     dest = conf.get("bench_ssh") if fields["mode"].startswith("bench") else conf.get("ssh") or name
-    out = Ssh(dest, timeout=reach.ssh_timeout(env), via=machine).run(["sh", "-c", PERF]).out.replace("\r", "").split("\n")
+    out = Ssh(dest, timeout=reach.ssh_timeout(env), via=machine).run(["sh", "-c", PERF]).out.split("\n")
     gov, temp = (out + ["", ""])[:2]
     yield note("cpu governor on %s: %s" % (dest, gov.strip() or "unknown"))
     if temp.strip().isdigit():
@@ -579,7 +579,7 @@ class Doctor:
         if self.container.machine_state() != "running":
             yield unk("/var/lib/tailscale (podman VM) -- not visible while the podman machine is stopped", "re-authable: ./setup --stage machine")
             return
-        ip = (self.in_vm("sudo tailscale ip -4 2>/dev/null | head -1") or "").replace("\r", "").strip()
+        ip = (self.in_vm("sudo tailscale ip -4 2>/dev/null | head -1") or "").strip()
         yield ok("/var/lib/tailscale (podman VM) (re-authable) -- on the tailnet at %s" % ip) if ip else \
             miss("/var/lib/tailscale (podman VM) -- it reaches no board without it", "./setup --stage machine  (needs: wk key set tailnet)")
 

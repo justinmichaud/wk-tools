@@ -427,7 +427,7 @@ class Sync:
             script = clone_fetch_and_check_script(src, origin, push)
         with stage(self.clock, "workspace fetch %s" % ws):
             r = driver.act_exec(ws, ["sh", "-c", script])
-        lines = r.out.replace("\r", "").splitlines()
+        lines = r.out.splitlines()
         said = kv.kv(r.out)
         problems = ["    - %s" % l[len("problem: "):] for l in lines if l.startswith("problem: ")]
         if said.get("fetch") != "0":
@@ -463,9 +463,9 @@ class Sync:
         if driver.kind not in ("container", "vm"):
             return True
         r = driver.act_exec(ws, ["sh", "-c", git.pr_tool_setup_script(src, self.forks())])
-        said = (r.out.replace("\r", "").strip().splitlines() or [""])[-1]
+        said = (r.out.strip().splitlines() or [""])[-1]
         if not r.ok:
-            notes.extend("    " + l for l in r.err.replace("\r", "").splitlines() if l.strip())
+            notes.extend("    " + l for l in r.err.splitlines() if l.strip())
             notes.append("    'git-webkit setup' did not finish (%s); 'wk sync %s --fix' again" % (said or "no answer", ws))
             return False
         notes.append("    git-webkit: %s" % said)

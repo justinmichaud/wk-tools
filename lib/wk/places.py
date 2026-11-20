@@ -465,7 +465,7 @@ class Driver:
         if self.info(ws) in STATES_NOT_THERE:
             return "-"
         r = self.exec(ws, ["git", "-C", self.src(ws), "rev-parse", "--abbrev-ref", "HEAD"])
-        out = r.out.replace("\r", "").strip()
+        out = r.out.strip()
         return out if r.ok and out else "-"
 
     def delegates(self):
@@ -640,7 +640,7 @@ class Driver:
     def path_kind(self, ws, path):
         """dir | file | absent | "" (a probe that answered nothing is not evidence of absent)."""
         out = self.run_as_owner(ws, ["/bin/sh", "-c", "if [ -d %s ]; then echo dir; elif [ -e %s ]; then echo file; else echo absent; fi"
-                                     % ((shlex.quote(path),) * 2)]).out.replace("\r", "").strip()
+                                     % ((shlex.quote(path),) * 2)]).out.strip()
         return out if out in ("dir", "file", "absent") else ""
 
     def run_as_owner(self, ws, argv):

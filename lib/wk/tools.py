@@ -89,7 +89,7 @@ def dest_ok(dest, home):
 
 
 def _said(r):
-    sys.stderr.write(r.err.replace("\r", ""))
+    sys.stderr.write(r.err)
 
 
 def push(root, here, far, dest, env):
@@ -137,7 +137,7 @@ def push(root, here, far, dest, env):
     if act.dry_run():
         return True
     _said(r)
-    got = (r.out.replace("\r", "").strip().splitlines() or [""])[-1]
+    got = (r.out.strip().splitlines() or [""])[-1]
     if got == sha:
         return True
     act.warn("wk-tools at %s did not end at %s (it answers '%s')" % (dest, sha, got or "nothing"))

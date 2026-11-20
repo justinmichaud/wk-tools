@@ -23,7 +23,7 @@ MAX_LOAD = 4
 
 
 def first_line(r):
-    return r.out.replace("\r", "").strip().split("\n")[0] if r.ok and r.out.strip() else ""
+    return r.out.strip().split("\n")[0] if r.ok and r.out.strip() else ""
 
 
 def linux_disk(run, read, path):

@@ -27,7 +27,7 @@ class PiSd(Driver):
 
     def state(self, addr):
         r = self.ch.card("second-state", addr)
-        return r.out.replace("\r", "") if r.ok else None
+        return r.out if r.ok else None
 
     def arm_sequence(self, p, image):
         slot = self.slot(p)
@@ -126,8 +126,8 @@ class PiTryboot(Driver):
     }
 
     def evidence(self):
-        staged = self.tryboot("staged").out.replace("\r", "").strip().split("\n")[0]
-        source = self.tryboot("source").out.replace("\r", "").strip().split("\n")[0]
+        staged = self.tryboot("staged").out.strip().split("\n")[0]
+        source = self.tryboot("source").out.strip().split("\n")[0]
         lines = ["arrangement=kernel from the SD via tryboot (one boot, firmware-reverting); bench root on %s" % self.c("device"),
                  "boot_source=" + self.SOURCES.get(source, "unreadable (the board did not answer the probe)"),
                  "tryboot_staged=" + (staged or "unreadable")]
@@ -201,7 +201,7 @@ class Rpi5Usb(Driver):
     def evidence(self):
         # The one-shot order is write-only from userspace, so the EEPROM's persistent order is the only evidence.
         for argv in (["vcgencmd", "bootloader_config"], ["rpi-eeprom-config"]):
-            order = kv(self.run(argv).out.replace("\r", "")).get("BOOT_ORDER", "")
+            order = kv(self.run(argv).out).get("BOOT_ORDER", "")
             if order:
                 return "eeprom_boot_order=" + order
         return ""

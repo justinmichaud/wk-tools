@@ -123,7 +123,6 @@ class Secrets:
         return os.path.join(self.store.keyring_dir(), row[1])
 
     def secretfile(self, verb, path, input="", act=False, echo=True):
-        """lib/secretfile.py's <verb> on `path`; a refusal's reason goes to stderr unless `echo` is off."""
         r = (self.machine.act_run if act else self.machine.run)(
             ["python3", os.path.join(self.root, "lib", "secretfile.py"), verb, path], input=input)
         if echo:

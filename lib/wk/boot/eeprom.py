@@ -47,7 +47,7 @@ class BootOrder:
         return (self.d.ch.sudo if sudo else self.d.ch.run)(argv, input=input, mutates=mutates)
 
     def said(self, r):
-        return r.out.replace("\r", "").rstrip("\n")
+        return r.out.rstrip("\n")
 
     def run(self, name):
         if name not in ORDERS:

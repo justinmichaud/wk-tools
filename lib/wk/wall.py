@@ -119,7 +119,7 @@ class Wall:
 
     def inside(self, cmd, person=False):
         """The container exec path appends \\r, which every numeric probe would then test as "2\\r"."""
-        return self.driver.exec(self.ws, ["bash", "-lc", cmd], person=person).out.replace("\r", "").rstrip("\n")
+        return self.driver.exec(self.ws, ["bash", "-lc", cmd], person=person).out.rstrip("\n")
 
     def with_agent(self, cmd):
         return self.inside(WITH_AGENT % cmd)
@@ -474,7 +474,7 @@ class Wall:
             return [note("a guest's GPU is Virtualization.framework's, reached through Metal, and this probe is EGL: what a benchmark "
                          "in there gets is measured by the benchmark, and its desktop rows above say whether its window is covered")]
         r = self.driver.exec(self.ws, ["bash", "-lc", os.path.join(self.driver.tools(self.ws), "container", "gpu", "gpu-probe.sh")])
-        rows = [note(l) for l in (r.out + r.err).replace("\r", "").splitlines()]
+        rows = [note(l) for l in (r.out + r.err).splitlines()]
         if r.rc == 0:
             return rows + [ok("GPU acceleration available")]
         what = "only software rendering inside the workspace" if r.rc == 1 else "no usable EGL inside the workspace (probe exit %d)" % r.rc
@@ -529,7 +529,6 @@ class Wall:
 
 
 def report(results, rep):
-    """Every check's rows into `rep`, and whether one that guards publishing found a miss."""
     for _, found in results:
         rep.rows(found)
     return any(r[0] == MISS for name, found in results if name in PUBLISHING for r in found)

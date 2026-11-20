@@ -284,7 +284,7 @@ def match_any(text, patterns):
 
 
 def pid_args(driver, ws, pid):
-    return driver.exec(ws, ["ps", "-o", "args=", "-p", str(pid)]).out.replace("\r", "").replace("\n", " ").strip()
+    return driver.exec(ws, ["ps", "-o", "args=", "-p", str(pid)]).out.replace("\n", " ").strip()
 
 
 def adopt(driver, ws, t, pid, want):

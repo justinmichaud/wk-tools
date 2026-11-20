@@ -24,7 +24,7 @@ def missing_layout_paths(runner, src, paths):
     q = shlex.quote(src)
     r = runner(["sh", "-c", "for t in " + shlex.join(paths) + "; do p=${t%%\\?*}; [ -e " + q + '/LayoutTests/"$p" ] || [ -e '
                 + q + '/"$p" ] || printf "%s\\n" "$t"; done'])
-    return [l for l in r.out.replace("\r", "").splitlines() if l] if r.ok else []
+    return [l for l in r.out.splitlines() if l] if r.ok else []
 
 
 def size_and_admit(reg, driver, name, preset, recs):

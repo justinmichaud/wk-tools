@@ -119,7 +119,7 @@ def pin(machine, lock, store, read, plan):
 def ws_reader(driver, ws):
     def read(path):
         r = driver.exec(ws, ["cat", "%s/Tools/Scripts/%s" % (driver.src(ws), path)])
-        return r.out.replace("\r", "") if r.ok else None
+        return r.out if r.ok else None
     return read
 
 

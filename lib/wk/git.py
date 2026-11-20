@@ -269,7 +269,7 @@ def probe_argv(src):
 
 def probe(run, src):
     r = run(probe_argv(src))
-    return kv.kv(r.out.replace("\r", "")) if r.ok else {}
+    return kv.kv(r.out) if r.ok else {}
 
 
 def main(argv):
