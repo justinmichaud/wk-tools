@@ -1,145 +1,114 @@
 """rr: `wk run --rr` records jsc and `wk gui --rr` MiniBrowser into the workspace's ~/wk-rr, `wk run --replay`
-replays the latest recording under lldb; a non-Linux place, a missing rr and closed perf events are refused.
-cmd/run and cmd/gui exec into `Driver.exec_argv`'s result, intercepted here before it replaces the process."""
-import contextlib
-import io
-import os
-import sys
+replays the latest recording under lldb; a non-Linux place, an Apple CPU, a missing rr and closed perf events are
+refused. Typed into a world holding workspace `ws` on a Linux x86_64 host."""
 import unittest
 from unittest import mock
 
-from tests.support import as_dispatched, invocation, load_cmd, REPO
+from tests.test_wk_gui import GuiTest, Result, Seat, uname
 
-sys.path.insert(0, str(REPO / "lib"))
-from wk import gui, ldpath, places  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
-from wk.act import Refused  # noqa: E402
-
-os.environ.setdefault("WK_ROOT", str(REPO))
-RUN, GUI = load_cmd("run"), load_cmd("gui")
+TRACE = "export _RR_TRACE_DIR=/home/u/wk-rr"
+PRIV = "/usr/local/libexec/wk-quiesce-priv"
 
 
-def _driver(os_name="linux", have_rr=True, paranoid="1"):
-    driver = mock.Mock()
-    driver.os.return_value = os_name
-    driver.kind, driver.env = "container", {}
-    driver.src.return_value = "/src/WebKit"
-    driver.home.return_value = "/home/u"
-    driver.lldb_opts.return_value = ""
-    driver.exec_argv.return_value = (["true"], None)
+class Recorder(Seat):
+    """The workspace (a container's user is `u`) answers whether rr is installed (`rr`) and perf_event_paranoid
+    (`paranoid`); this host has the quiesce helper when `helper`, and its perf-on lowers paranoid to 1 when sudo lets it (`lowers`)."""
 
-    def exec_(ws, argv, **kw):
+    def __init__(self, tmp, **kw):
+        super().__init__(tmp, **kw)
+        self.env["WK_CONTAINER_USER"] = "u"
+        self.rr, self.paranoid, self.helper, self.lowers = True, "1", False, True
+        self.react(["sh", "-c", 'command -v "$1" >/dev/null', "sh", PRIV], lambda a, f: Result(0 if f.helper else 1))
+        self.react(["sudo", "-n", PRIV, "perf-on"], lambda a, f: (setattr(f, "paranoid", "1" if f.lowers else f.paranoid), Result(0))[1])
+
+    def _in_ws(self, argv, f):
         if argv[-1] == "rr":
-            return mock.Mock(ok=have_rr, out="")
-        return mock.Mock(ok=True, out=paranoid + "\n")
-    driver.exec.side_effect = exec_
-    return driver
+            return Result(0 if f.rr else 1)
+        if argv[2:] == ["cat", "/proc/sys/kernel/perf_event_paranoid"]:
+            return Result(0, f.paranoid + "\n")
+        return super()._in_ws(argv, f)
 
 
-def uname(sysname, machine):
-    real = os.uname()
-    return lambda: os.uname_result((sysname, real.nodename, real.release, real.version, machine))
+class RrTest(GuiTest):
+    world_class = Recorder
 
+    def run_(self, *argv, w=None):
+        return self.typed("run", "--preset", "gtk-release", *argv, w=w)
 
-class RrTest(unittest.TestCase):
-    """On a Linux x86_64 host, whatever the suite runs on: a container on an Apple Silicon Mac is refused."""
-
-    def setUp(self):
-        p = mock.patch("os.uname", uname("Linux", "x86_64"))
-        p.start()
-        self.addCleanup(p.stop)
-
-    def go(self, mod, driver, argv, preset="gtk-release", **env):
-        reg = mock.Mock()
-        reg.present.return_value = driver
-        with mock.patch.object(places, "Registry", return_value=reg), \
-                mock.patch.dict(os.environ, dict({"WK_NAME": "ws", "WK_PRESET": preset, "WK_QUIET": "1"}, **env)):
-            if mod is GUI:
-                with mock.patch.object(gui, "is_macos", return_value=False), mock.patch.object(gui, "session_env", return_value=""):
-                    mod.main(as_dispatched("gui", argv), invocation())
-            else:
-                mod.main(as_dispatched("run", argv), invocation())
-        args, kw = driver.exec_argv.call_args
-        return args[1][2], kw["tty"]
-
-    def refused(self, mod, driver, argv, preset="gtk-release"):
-        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
-            self.go(mod, driver, argv, preset)
-        driver.exec_argv.assert_not_called()
-        return err.getvalue()
+    def probes(self):
+        return [e for e in self.w.effects if e[0] == "run" and e[1][-1] in ("rr", "/proc/sys/kernel/perf_event_paranoid")]
 
 
 class TestRecordAndReplay(RrTest):
-    def test_run_rr_records_jsc_into_the_workspace_trace_directory(self):
-        cmd, tty = self.go(RUN, _driver(), ["--rr", "--", "x.js"])
-        self.assertIn("export _RR_TRACE_DIR=/home/u/wk-rr", cmd)
-        self.assertRegex(cmd, r"exec rr record \S+/bin/jsc --validateOptions=1 x.js$")
-        self.assertIn("export LD_LIBRARY_PATH=", cmd)
-        self.assertFalse(tty)
+    def test_run_rr_records_jsc_into_the_workspace_trace_directory_without_a_tty(self):
+        rc, _, cmd = self.run_("--rr", "--", "x.js")
+        self.assertEqual((rc, cmd.split("; ")[1]), (0, TRACE))
+        self.assertRegex(cmd, r'^export LD_LIBRARY_PATH=.*; exec rr record \S+/GTK/Release/bin/jsc --validateOptions=1 x.js$')
+        self.assertIn("--no-tty", self.w.effects[-1][1])
 
-    def test_replay_runs_the_latest_trace_under_lldb_with_the_tail_for_rr(self):
-        cmd, tty = self.go(RUN, _driver(), ["--replay", "--", "-p", "1234"])
-        self.assertIn("export _RR_TRACE_DIR=/home/u/wk-rr", cmd)
-        self.assertTrue(cmd.endswith('exec rr replay -d "$LLDB" -p 1234'), cmd)
-        self.assertTrue(tty)
+    def test_replay_runs_the_latest_trace_under_lldb_on_a_tty_with_the_tail_for_rr(self):
+        rc, _, cmd = self.typed("run", "--replay", "--", "-p", "1234")
+        self.assertEqual((rc, cmd.splitlines()[-1]), (0, TRACE + '; exec rr replay -d "$LLDB" -p 1234'))
+        self.assertNotIn("--no-tty", self.w.effects[-1][1])
 
     def test_gui_rr_prefixes_minibrowser_with_the_recorder(self):
-        cmd, tty = self.go(GUI, _driver(), ["--rr"])
-        self.assertIn("export _RR_TRACE_DIR=/home/u/wk-rr", cmd)
-        self.assertIn("WEBKIT_MINI_BROWSER_PREFIX='rr record' Tools/Scripts/run-minibrowser", cmd)
+        rc, _, cmd = self.typed("gui", "--rr", "--preset", "gtk-release")
+        self.assertEqual((rc, cmd.split(" && ")[1]), (0, "WPE_BROWSER=minibrowser WEBKIT_MINI_BROWSER_PREFIX='rr record' "
+                                                          "Tools/Scripts/run-minibrowser --gtk --release -- --full-screen about:blank "))
+        self.assertTrue(cmd.startswith(TRACE + "; cd /src/WebKit"))
 
-    def test_a_dry_run_reads_nothing_and_prints_the_recording(self):
-        driver = _driver(have_rr=False, paranoid="3")
-        driver.exec_argv.return_value = (["ssh", "box", "rr record"], None)
-        reg = mock.Mock()
-        reg.present.return_value = driver
-        reg.machine = Fake()
-        with mock.patch.object(places, "Registry", return_value=reg), \
-                mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
-                mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release", "WK_DRY_RUN": "1"}), \
-                contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
-            RUN.main(as_dispatched("run", ["--rr", "--", "x.js"]), invocation())
-        self.assertIn("would run: ssh box 'rr record'", err.getvalue())
-        driver.exec.assert_not_called()
+    def test_a_dry_run_asks_the_workspace_nothing_and_prints_the_recording(self):
+        self.w.rr, self.w.paranoid = False, "3"
+        rc, line, cmd = self.run_("--dry-run", "--rr", "--", "x.js")
+        self.assertEqual((rc, cmd, self.probes()), (0, None, []))
+        self.assertRegex(line, r"^would run: env .* exec rr record \S+/bin/jsc --validateOptions=1 x.js'$")
 
 
 class TestRefusals(RrTest):
     def test_a_macos_target_is_refused_naming_why(self):
-        for mod, argv in ((RUN, ["--rr"]), (RUN, ["--replay"]), (GUI, ["--rr"])):
-            with self.subTest(argv=argv):
-                err = self.refused(mod, _driver(os_name="macos"), argv, preset="mac-release")
-                self.assertIn("rr records Linux processes only", err)
+        with mock.patch("os.uname", uname("Darwin", "arm64")):
+            w = self.world("vm")
+            for argv in (["run", "--rr"], ["run", "--replay"], ["gui", "--rr"]):
+                self.assertEqual(self.typed(*argv, w=w), (1, "error: rr records Linux processes only: it replays from ptrace "
+                                                             "and the CPU's perf counters,", None), argv)
 
     def test_a_container_on_an_apple_silicon_mac_is_refused_and_one_on_an_arm_server_is_not(self):
-        for sysname, machine, env, refused in (("Darwin", "arm64", {}, True), ("Linux", "aarch64", {"WK_IN_VM": "1"}, True),
-                                               ("Linux", "aarch64", {}, False), ("Darwin", "x86_64", {}, False)):
-            with self.subTest(sysname=sysname, machine=machine, env=env), mock.patch("os.uname", uname(sysname, machine)):
-                driver = _driver()
-                driver.env = env
-                if refused:
-                    self.assertIn("rr does not support Apple Silicon CPUs", self.refused(RUN, driver, ["--rr"]))
-                else:
-                    self.assertIn("exec rr record", self.go(RUN, driver, ["--rr", "--", "x.js"])[0])
+        for host, in_vm, refused in ((("Darwin", "arm64"), "1", True), (("Linux", "aarch64"), "1", True),
+                                     (("Darwin", "x86_64"), "1", False), (("Linux", "aarch64"), None, False)):
+            if in_vm is None:
+                self.w.env.pop("WK_IN_VM")
+            with mock.patch("os.uname", uname(*host)):
+                rc, line, _ = self.run_("--rr", "--", "x.js")
+            self.assertEqual((rc, line.startswith("error: rr does not support Apple Silicon CPUs")), (int(refused), refused), host)
 
     def test_rr_missing_is_refused(self):
-        self.assertIn("rr is not installed in 'ws'", self.refused(RUN, _driver(have_rr=False), ["--rr"]))
+        self.w.rr = False
+        self.assertEqual(self.run_("--rr"), (1, "error: rr is not installed in 'ws'. It is provisioning, not a per-run step:", None))
 
-    def test_closed_perf_events_are_refused_with_the_remedy(self):
-        with mock.patch.object(ldpath, "is_linux", return_value=False):
-            err = self.refused(RUN, _driver(paranoid="2"), ["--rr"])
-        self.assertIn("perf_event_paranoid is 2 in 'ws', and rr needs 1 or less", err)
-        self.assertIn("echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid", err)
+    def test_closed_perf_events_are_refused_with_the_remedy_where_it_applies(self):
+        self.w.paranoid = "2"
+        with mock.patch("os.uname", uname("Darwin", "x86_64")):
+            rc, _, err = self.wk(self.w, "run", "ws", "--rr")
+        self.assertEqual(rc, 1)
+        self.assertIn("error: perf_event_paranoid is 2 in 'ws', and rr needs 1 or less.\n", err)
+        self.assertIn("\n        echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid\n", err)
+        rc, _, err = self.wk(self.w, "run", "ws", "--rr")
+        self.assertIn("The privileged helper that can lower it is not installed on this host.\n    Remedy:  ./setup --stage quiesce", err)
+        self.w.helper, self.w.lowers = True, False
+        rc, _, err = self.wk(self.w, "run", "ws", "--rr")
+        self.assertIn("Asking the quiesce helper ('%s perf-on') did not bring it down --" % PRIV, err)
+
+    def test_a_linux_host_lowers_closed_perf_events_through_the_quiesce_helper_and_records(self):
+        self.w.paranoid, self.w.helper = "2", True
+        rc, _, cmd = self.run_("--rr", "--", "x.js")
+        self.assertEqual((rc, ("act", ("sudo", "-n", PRIV, "perf-on")) in self.w.effects), (0, True))
+        self.assertIn("exec rr record", cmd)
 
     def test_rr_runs_on_its_own(self):
-        for argv in (["--rr", "--lldb"], ["--replay", "--until-crash"], ["--rr", "--replay"]):
-            with self.subTest(argv=argv), mock.patch.dict(os.environ, {"WK_NAME": "ws"}), \
-                    contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused):
-                RUN.parse(as_dispatched("run", argv))
-            self.assertIn("runs on its own", err.getvalue())
-        with mock.patch.dict(os.environ, {"WK_NAME": "ws"}), contextlib.redirect_stderr(io.StringIO()) as err, \
-                self.assertRaises(Refused):
-            GUI.parse(as_dispatched("gui", ["--rr", "--lldb", "ui"]))
-        self.assertIn("pick one", err.getvalue())
+        for argv, drop in ((["--rr", "--lldb"], "--rr runs on its own; drop --lldb"), (["--replay", "--until-crash"], "--replay runs on its own; drop --until-crash"),
+                           (["--rr", "--replay"], "--rr runs on its own; drop --replay")):
+            self.assertEqual(self.typed("run", *argv), (1, "error: " + drop, None))
+        self.assertEqual(self.typed("gui", "--rr", "--lldb", "ui"), (1, "error: --rr records the browser and --lldb debugs it live; pick one", None))
 
 
 if __name__ == "__main__":
