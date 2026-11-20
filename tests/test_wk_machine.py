@@ -405,14 +405,14 @@ class TestFake(MachineTest, LockEffectsConformance, CopyConformance, LogReadConf
 
 
 class TestTartExec(MachineTest, CopyConformance):
-    """tar or cat on both ends of `tart exec -i`, against a tart that runs the guest's half on this host."""
+    """tar or cat on both ends of `tart exec -i`, against a tart that runs the guest's half on this host, under sh for the guest's zsh."""
 
     def setUp(self):
         super().setUp()
         self.real_tmp = tempfile.mkdtemp(prefix="wk-test-tart-copy-")
         self.addCleanup(subprocess.run, ["rm", "-rf", self.real_tmp])
         tart = Path(self.real_tmp) / "tart"
-        tart.write_text('#!/bin/sh\n[ "$1" = exec ] || exit 2; shift\nwhile [ "${1#-}" != "$1" ]; do shift; done\nshift\nexec "$@"\n')
+        tart.write_text('#!/bin/sh\n[ "$1" = exec ] || exit 2; shift\nwhile [ "${1#-}" != "$1" ]; do shift; done\nshift 2\nexec sh "$@"\n')
         tart.chmod(0o755)
         os.makedirs(os.path.join(self.real_tmp, "guest"))
         self.m = machine.Ssh.tart(str(tart), "wk-demo", via=machine.Local())

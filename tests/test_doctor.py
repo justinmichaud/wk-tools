@@ -43,10 +43,11 @@ def boom(*a, **kw):
 
 
 def fake_doctor(macos, env=None, machine=None):
-    e = {"HOME": "/h", "WK_STORE": "/store", "XDG_STATE_HOME": "/h/.local/state", "PATH": os.environ["PATH"],
-         "WK_MACHINES_DIR": NO_REGISTRY}
-    e.update(env or {})
-    return doctor.Doctor(str(REPO), env=e, machine=machine or Fake(), macos=macos)
+    e = dict({"HOME": "/h", "WK_STORE": "/store", "XDG_STATE_HOME": "/h/.local/state", "PATH": os.environ["PATH"],
+              "WK_MACHINES_DIR": NO_REGISTRY}, **(env or {}))
+    doc = doctor.Doctor(str(REPO), env=e, machine=machine or Fake(), macos=macos)
+    doc.container.is_here = lambda: not macos   # the host the test names, not the one it runs on
+    return doc
 
 
 def build_doctor():
@@ -205,7 +206,6 @@ class TestGitConfigFindings(unittest.TestCase):
 
 
 class StubGuests:
-    """A vm place: `states` per guest, and one answer to the git probe."""
 
     def __init__(self, states, blob="", answers=True):
         self.states, self.blob, self.answers, self.asked = states, blob, answers, []
