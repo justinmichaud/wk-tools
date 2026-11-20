@@ -244,18 +244,17 @@ def handover_world(case):
     w.setUp()
     case.addCleanup(w.doCleanups)
     w.env["WK_PLACE"] = "box"
-    w.ran = []
     return w
 
 
 def handover_run(case, w):
-    with mock.patch.object(dispatch, "_registry", w.reg), mock.patch.object(dispatch.os, "execvp", lambda f, a: w.ran.append(a)):
+    with mock.patch.object(dispatch, "_registry", w.reg), case.assertRaises(Refused):   # the hand-over is this process's end
         dispatch.delegate_run(dispatch.delegate_driver("box"), "build", ["a", "jsc-release", "--detach"])
 
 
 def handover_state(w):
     t = w.reg.load("box")
-    return t.records().list(), [e for e in t.here.effects if e[0] != "run" and e != ("mkdir", t.ssh_dir())], [a[-1] for a in w.ran]
+    return t.records().list(), [e for e in t.here.effects if e[0] not in ("run", "exec") and e != ("mkdir", t.ssh_dir())], [e[1][-1] for e in t.here.effects if e[0] == "exec"]
 
 
 def task_row(cls):

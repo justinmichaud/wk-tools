@@ -510,7 +510,7 @@ class Driver:
             seen["st"] = st
             if st == "present":
                 return True
-            if own and st != "creating":
+            if own and (st != "creating" or self.info(ws) == "absent"):   # its environment gone mid-init is no wait
                 return True
             if st == "absent":
                 act.die(no_such_workspace(ws))
@@ -1453,7 +1453,8 @@ class Vm(Driver):
                 act.die("%s failed for '%s' (exit %d); what it said is above" % (" ".join(argv[1:2]), ws, r.rc), r.rc)
         self.machine.mkdir(ws_dir)
         self.machine.write(os.path.join(ws_dir, READY_MARKER), "")
-        self.start(ws)
+        if not act.dry_run():   # a dry run cloned nothing to boot
+            self.start(ws)
 
     def runners(self, v):
         r = self.machine.run(["pgrep", "-f", "tart run .*[[:space:]]%s$" % v])

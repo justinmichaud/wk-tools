@@ -289,9 +289,9 @@ def relayed(child):
 
 
 def exec_flushed(argv):
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os.execvp(argv[0], argv)
+    """This process becomes `argv`, dry run or not: a forward is no effect, and the far wk prints its own plan."""
+    registry().machine._exec(argv, None, None)
+    raise Exit(0)
 
 
 def delegate_driver(place):
