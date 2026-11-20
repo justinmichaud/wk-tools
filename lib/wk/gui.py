@@ -24,11 +24,11 @@ def fullscreen_flag(preset):
     die("'%s' builds no browser to drive -- use a wpe-*, gtk-* or mac-* preset" % preset.name)
 
 
-def session_env(root):
+def session_env(reg):
     """The Linux GPU-session gate and, on a BMC seat, the software-rendering pins."""
-    if not places.session_socket_present(os.environ):
+    if not places.session_socket_present(reg):
         die("no graphical session -- 'wk quiesce session on', or 'wk quiesce session on --bmc' to watch it over the BMC")
-    seat = session.here(root, os.environ)
+    seat = session.here(reg)
     seat.mode_warn()
     if seat.mode() != "bmc":
         return ""
@@ -72,7 +72,7 @@ def main(name, opts, reg):
     if not driver.exec(name, ["test", "-x", browser]).ok:
         die("no MiniBrowser at %s -- wk build %s %s" % (browser, name, preset_name))
 
-    run_env = "" if is_macos() else session_env(ROOT)
+    run_env = "" if is_macos() else session_env(reg)
     extra_q = shlex.join(opts["tail"])
     type_flag = "--" + preset.type.lower()
 

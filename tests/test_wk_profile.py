@@ -13,7 +13,7 @@ from tests.support import REPO, as_dispatched, invocation, load_cmd
 sys.path.insert(0, str(REPO / "lib"))
 from wk import ldpath, profile  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Result  # noqa: E402
+from wk.machine import HAVE, Result  # noqa: E402
 from tests import fakes  # noqa: E402
 
 
@@ -70,8 +70,8 @@ class TestPerfEventParanoidGate(ProfileTest):
 
     def test_high_paranoid_on_linux_without_the_helper_names_setup(self):
         self.ready(2)
-        with mock.patch.object(ldpath, "is_linux", return_value=True), \
-             mock.patch("os.access", return_value=False):
+        self.w.answer(list(HAVE) + [ldpath.PRIV], rc=1)
+        with mock.patch.object(ldpath, "is_linux", return_value=True):
             e, err = self.refused("--preset", "gtk-release", "--profile=samply", "--", "x.js")
         self.assertEqual(e.status, 1)
         self.assertIn("privileged helper", err)
@@ -79,11 +79,10 @@ class TestPerfEventParanoidGate(ProfileTest):
 
     def test_high_paranoid_the_helper_could_not_fix_names_setup_too(self):
         self.ready(2)
-        with mock.patch.object(ldpath, "is_linux", return_value=True), \
-             mock.patch("os.access", return_value=True), \
-             mock.patch.object(ldpath.Local, "act_run") as run:
+        self.w.answer(list(HAVE) + [ldpath.PRIV])
+        with mock.patch.object(ldpath, "is_linux", return_value=True):
             e, err = self.refused("--preset", "gtk-release", "--profile=samply", "--", "x.js")
-        self.assertTrue(run.called)
+        self.assertIn(("act", ("sudo", "-n", ldpath.PRIV, "perf-on")), self.w.effects)
         self.assertEqual(e.status, 1)
         self.assertIn("did not bring it down", err)
 

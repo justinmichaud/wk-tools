@@ -73,8 +73,8 @@ class TestSessionSocket(unittest.TestCase):
         import socket
         tmp = Path(tempfile.mkdtemp(prefix="wk-test-session-socket-"))
         self.addCleanup(lambda: os.system("rm -rf %s" % tmp))
-        env = {"XDG_RUNTIME_DIR": str(tmp)}
-        path = Path(places.session_socket_path(env))
+        env = mock.Mock(machine=Local(), env={"XDG_RUNTIME_DIR": str(tmp)})
+        path = Path(places.session_socket_path(env.env))
         self.assertFalse(places.session_socket_present(env))
         path.parent.mkdir(parents=True)
         path.write_text("")

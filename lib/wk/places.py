@@ -56,11 +56,8 @@ def session_socket_path(env):
     return os.path.join(env.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.getuid(), "wk", "display", "wayland-0")
 
 
-def session_socket_present(env):
-    try:
-        return stat.S_ISSOCK(os.stat(session_socket_path(env)).st_mode)
-    except OSError:
-        return False
+def session_socket_present(reg):
+    return reg.machine.run(["test", "-S", session_socket_path(reg.env)]).ok
 
 
 def zed_cli(machine):

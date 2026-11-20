@@ -231,7 +231,6 @@ class Session:
         return 0
 
 
-def here(root, env):
+def here(reg):
     from wk.clock import Clock
-    from wk.machine import Local
-    return Session(root, Local(), Clock(), env)
+    return Session(reg.root, reg.machine, Clock(), reg.env)

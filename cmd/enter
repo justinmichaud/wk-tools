@@ -18,12 +18,12 @@ COMMAND = Command(name="required", ready=True, tail="rest", group="workspaces", 
     Opt("--own", "run the command as wk's own run, not a shell of yours: nothing it starts can publish")))
 
 
-def session_display_warning(root, env):
-    if not places.session_socket_present(env):
+def session_display_warning(reg):
+    if not places.session_socket_present(reg):
         warn("no benchmark session running; GPU-accelerated tests fall back to software rendering")
         log("  start one with:  wk quiesce session on")
     else:
-        session.here(root, env).mode_warn()
+        session.here(reg).mode_warn()
 
 
 def main(args, inv):
@@ -38,6 +38,6 @@ def main(args, inv):
         argv, cwd = driver.exec_argv(name, cmd, tty=sys.stdin.isatty() and sys.stdout.isatty(), person=not args.flag("--own"))
         return reg.machine.exec(argv, cwd)
     if is_linux():
-        session_display_warning(inv.root, os.environ)
+        session_display_warning(reg)
     argv, cwd = driver.enter_argv(name)
     return reg.machine.exec(argv, cwd)

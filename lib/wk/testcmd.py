@@ -81,7 +81,7 @@ def main(name, opts, reg, clock):
             warn("--gpu has no meaning for an Apple port; ignoring")
     elif opts["gpu"]:
         info("using the real GPU (requires /dev/dri in the workspace)")
-        session.here(ROOT, reg.env).mode_warn()
+        session.here(reg).mode_warn()
     else:
         render_env, render_desc = "LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe WEBKIT_DISABLE_DMABUF_RENDERER=1", "software rendering"
 

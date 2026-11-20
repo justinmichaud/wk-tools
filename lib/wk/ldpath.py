@@ -4,7 +4,7 @@ import os
 import shlex
 
 from wk.act import die, dry_run, info
-from wk.machine import HAVE, Local, is_linux
+from wk.machine import HAVE, is_linux
 from wk.store import Store, in_vm
 from wk.sudo import QUIESCE_PRIV as PRIV
 
@@ -44,9 +44,9 @@ def _paranoid(driver, name):
 def perf_events(driver, name, tool):
     """perf_event_paranoid at 1 or less, which rr, samply and sysprof need; the sysctl is not namespaced, so a container cannot set it."""
     par = _paranoid(driver, name)
-    if par is not None and par > 1 and is_linux() and os.access(PRIV, os.X_OK):
+    if par is not None and par > 1 and is_linux() and driver.here.have(PRIV):
         info("perf_event_paranoid is %d on this host -- asking the quiesce helper to unrestrict it" % par)
-        Local().act_run(["sudo", "-n", PRIV, "perf-on"])
+        driver.here.act_run(["sudo", "-n", PRIV, "perf-on"])
         par = _paranoid(driver, name)
     if par is None or par <= 1:
         return
@@ -57,7 +57,7 @@ def perf_events(driver, name, tool):
             "    key'). On the machine that runs the workspace:\n"
             "        echo 1 | sudo tee /proc/sys/kernel/perf_event_paranoid\n"
             "    On a booted benchmark image it is set already.")
-    if not os.access(PRIV, os.X_OK):
+    if not driver.here.have(PRIV):
         die(head + "    The privileged helper that can lower it is not installed on this host.\n"
             "    Remedy:  ./setup --stage quiesce")
     die(head + "    Asking the quiesce helper ('%s perf-on') did not bring it down --\n"

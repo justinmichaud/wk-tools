@@ -33,7 +33,7 @@ echo PASS
     def test_wk_session_mode_file_overrides_the_marker_file(self):
         from wk import session
         marker = self.tmp / "session-mode"
-        seat = session.here(str(REPO), {"WK_SESSION_MODE_FILE": str(marker)})
+        seat = session.here(mock.Mock(root=str(REPO), machine=Local(), env={"WK_SESSION_MODE_FILE": str(marker)}))
         self.assertEqual("none", seat.mode())
         marker.write_text("gpu\n")
         self.assertEqual("gpu", seat.mode())
