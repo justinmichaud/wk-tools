@@ -1447,15 +1447,12 @@ class Vm(Driver):
         elif why:
             act.die("'%s' predates its own provisioning inputs: %s.\n      %s --rebuild     hours; existing guests are unaffected\n"
                     "  WK_VM_FORCE=1 clones it anyway." % (self.base(), why, guest.BASE_BUILD))
-        running = self.running_vms()
-        if len(running) >= guest.vm_max(self.env):
-            act.warn("%d VM(s) already running on this host; you will have to stop one before starting '%s':\n%s"
-                     % (len(running), ws, "\n".join("      " + n for n in running)))
-        act.info("cloning %s -> %s (APFS copy-on-write)" % (self.base(), v))
         res = Resources(self.machine, self.env, "macos")
         cpus, mem = guest.vm_cpus(self.env), guest.vm_mem_mb(self.env)
         cpus = str(res.envelope_cores() if cpus is None else cpus)
         mem = str(res.envelope_mem_mb() if mem is None else mem)
+        guest.admit(guest.Host(self), v, int(mem))
+        act.info("cloning %s -> %s (APFS copy-on-write)" % (self.base(), v))
         tart = self.tart_or_die()
         for argv in ([tart, "clone", self.base(), v],
                      [tart, "set", v, "--cpu", cpus, "--memory", mem, "--random-mac", "--display", guest.display(self.env), "--display-refit"]):

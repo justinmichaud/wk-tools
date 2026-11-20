@@ -297,7 +297,7 @@ class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
         self.assertEqual(1, rc)
         self.assertIn("2 VM(s) are already running", err)
         self.assertIn("podman machine wk", err)
-        self.assertIn("podman machine stop wk", err)
+        self.assertIn("or every one with 'wk stop'", err)
 
     def test_one_guest_alone_is_let_through(self):
         self.w.state = "running"

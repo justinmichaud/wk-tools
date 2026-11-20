@@ -508,8 +508,8 @@ def admit(host, name, mine):
     if len(running) >= most:
         die("%d VM(s) are already running on this host:\n%s    Virtualization.framework permits %d and refuses the next one "
             "with\n    VZErrorDomain code 6, in that guest's run log and nowhere else. Free a slot\n    with 'wk stop <name>', "
-            "or with 'podman machine stop %s' -- that machine\n    carries the container workspaces, which survive it being down."
-            % (len(running), "".join("      %s\n" % n for n in running), most, vm.podman_machine()))
+            "or every one with 'wk stop' -- the podman machine\n    carries the container workspaces, which survive it being down."
+            % (len(running), "".join("      %s\n" % n for n in running), most))
     memory_budget(host, name, mine)
     host_disk(host)
 
@@ -545,9 +545,9 @@ def memory_budget(host, name, mine):
         + "      %-26s %6d MB   requested\n" % ("macOS VM '%s'" % name, mine) \
         + "      %-26s %6d MB   (%d MB total, %d MB kept for the desktop)\n" % ("host envelope", budget, res.host_mem_mb(),
                                                                                res.reserve_mb())
-    die("not enough memory to start '%s'.\n%s\n      podman machine stop %s\n          free the whole envelope (workspaces "
-        "and their state survive)\n      wk stop <name>\n          free a running guest\n%s\n      WK_VM_SHARE=1, then retry\n"
-        "          proceed anyway" % (name, rows, vm.podman_machine(), advice))
+    die("not enough memory to start '%s'.\n%s\n      wk stop\n          free the whole envelope: every workspace and the podman "
+        "machine stop, nothing on disk is touched\n      wk stop <name>\n          free a running guest\n%s\n      WK_VM_SHARE=1, then retry\n"
+        "          proceed anyway" % (name, rows, advice))
 
 
 def podman_admit(vm):

@@ -843,7 +843,7 @@ class TestVmWrite(VmTest):
             self.addCleanup(p.stop)
 
     def tart_calls(self):
-        return [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == self.tart and e[1][1] != "list"]
+        return [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == self.tart and e[1][1] not in ("list", "get")]
 
     def test_create_clones_the_base_then_sets_the_guest_up_and_marks_it_ready(self):
         ws_dir = self.t.store.ws_dir("new")
@@ -880,12 +880,12 @@ class TestVmWrite(VmTest):
         self.assertIn("WK_VM_FORCE=1 -- 'new' is cloned from a base that", err)
         self.assertEqual(len(self.tart_calls()), 2)
 
-    def test_a_full_host_is_warned_about_with_the_podman_machine_counted(self):
+    def test_a_full_host_is_refused_with_the_podman_machine_counted_before_anything_is_cloned(self):
         self.env["WK_VM_MAX"] = "2"
         self.fake.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "running", "Resources": {"Memory": 8192}}]))
-        _, err = self.stderr_of(lambda: self.reg.load("vm").create("new"))
-        self.assertIn("2 VM(s) already running on this host; you will have to stop one before starting 'new':\n      mac\n      podman machine wk", err)
-        self.assertEqual(len(self.tart_calls()), 2)
+        err = self.refused(lambda: self.reg.load("vm").create("new"))
+        self.assertIn("2 VM(s) are already running on this host:\n      mac\n      podman machine wk", err)
+        self.assertEqual(self.tart_calls(), [])
 
     def test_destroy_refuses_the_golden_base(self):
         err = self.refused(lambda: self.t.destroy("base"))
