@@ -298,13 +298,10 @@ class TestTwoSyncs(test_sync.Flow):
         self.assertEqual((self.sync("--mirror")[0], self.w.steps), (0, ["mirror"]))
 
 
-class TestBaseRefreshDuringABuild(test_vm_base.BaseTest):
+class TestBaseRefreshDuringABuild(test_vm_base.BaseFlow):
     def test_one_lock_per_resource_base_refresh(self):
         """`--refresh` while the base is being built waits on the guest-base lock, then refuses naming the builder."""
-        self.w.state = "stopped"
-        base = self.base()
-        hold(self.w, base.vm.store, "guest-base")
+        self.w.vms["wk-base"] = "stopped"
+        hold(self.w, self.w.driver.store, "guest-base")
         rc, err = self.build("--refresh")
-        self.assertEqual(1, rc)
-        self.assertIn(str(HOLDER_PID), err)
-        self.assertEqual([], self.tart_acts())
+        self.assertEqual((rc, str(HOLDER_PID) in err, self.tart_did()), (1, True, []), err)

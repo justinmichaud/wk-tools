@@ -258,8 +258,8 @@ def vmbase_run(case, w):
 
 
 def vmbase_state(w):
-    marker = w.files.get(os.path.join(w.env["WK_VM_STORE"], "vm", "base.ready"), "")
-    return w.state, w.disk, [l for l in marker.splitlines() if not l.startswith("finished=")]
+    state, disk, marker = w.base_state()
+    return state, disk, [l for l in marker.splitlines() if not l.startswith("finished=")]
 
 
 def key_row(make, verb, minted=False, effects=80):
@@ -359,7 +359,7 @@ ROWS = {
     "sysimage write": Row(write.WriteTest, lambda c: write.World(), write_run, write.World.state, effects=80,
                           dry="wk sysimage write --dry-run prints the order it would write in rather than running its steps against the recorder"),
     # A dry base build boots no guest, and the rest of the build is what the booted guest answers.
-    "sysimage build vm base": Row(vmbase.BaseTest, lambda c: vmbase.BaseWorld(c.tmp), vmbase_run, vmbase_state, effects=80, dry=False),
+    "sysimage build vm base": Row(vmbase.BaseFlow, lambda c: c.make_world(), vmbase_run, vmbase_state, effects=80, dry=False),
     "key setup": key_row(lambda c: c.keyed_fleet(), lambda k: k.setup(), effects=120),
     "key deploy": key_row(lambda c: c.keyed_fleet(), lambda k: k.deploy()),
     "key ensure": key_row(lambda c: key.KeyWorld(c.tmp), lambda k: k.ensure(), minted=True),

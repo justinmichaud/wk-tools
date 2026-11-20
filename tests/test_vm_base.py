@@ -1,80 +1,58 @@
-"""The golden macOS base, `wk sysimage build macos-guest-base`, against a fake host whose tart keeps one VM's state."""
-import contextlib
+"""The golden macOS base, `wk sysimage build macos-guest-base`, typed into a Mac whose tart holds no base yet."""
 import importlib.util
 import io
 import json
 import os
 import platform
-import shutil
 import subprocess
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
-from tests.fakes import BenchHere, FlowTest
-from tests.support import REPO, live_selected, load_cmd
+from tests.fakes import FlowTest, Result
+from tests.support import REPO, live_selected
+from tests.test_doctor_wall import report
+from tests.test_guest import GuestStart, Mac
+from tests.test_places_flows import BASE_IMAGE, Guests, sealed_inputs
+from tests.test_wk_workspace import Flow, said
 
-sys.path.insert(0, str(REPO / "lib"))
-from wk import act, decl, dispatch, guest, places, tools  # noqa: E402
-from wk.act import Refused  # noqa: E402
-from tests.fakes import FakeClock  # noqa: E402
-from wk.machine import Local, Result  # noqa: E402
-from wk.store import Store  # noqa: E402
-from wk.sysimage import cli, guestbase  # noqa: E402
-
-TART = "/t/tart"
-IP = "192.168.64.7"
+BASE = "macos-guest-base"
+SHA = "a" * 40
 CLEAR = "Notification Center:21:1280x800@0,0;Terminal:0:863x499@40,51;"
 PANE = "Setup Assistant:0:800x600;Terminal:0:863x499;"
+PATH = os.environ["PATH"]
 
 
-class BaseWorld(BenchHere):
-    """One Mac: tart holding at most `wk-base` (in `state`), and a guest behind tart exec that says what `sa` and `screen` say."""
+def here(argv, input=None, **env):
+    """`argv` run for real on this host's PATH: a world's own PATH holds only its fakes."""
+    cp = subprocess.run(argv, input=input, capture_output=True, text=True, env=dict(env, PATH=PATH))
+    return Result(cp.returncode, cp.stdout, cp.stderr)
 
-    def __init__(self, base):
-        super().__init__()
-        base = str(base)
-        self.env = {"HOME": base + "/home", "WK_STORE": base + "/store", "WK_VM_STORE": base + "/vmstore",
-                    "XDG_STATE_HOME": base + "/state", "WK_MACHINES_DIR": base + "/registry", "PATH": os.environ["PATH"]}
-        self.state, self.disk, self.cached, self.sa, self.screen, self.prov_rc = "absent", 140, True, ["0"], CLEAR, "0"
-        self.guest_cmds, self.dirty, self.agent_down = [], False, False
-        self.react([TART, "list"], self._list)
-        self.react([TART, "get"], lambda a, f: Result(0, json.dumps({"CPU": 4, "Memory": 8192, "Disk": f.disk})))
-        self.react([TART, "clone"], lambda a, f: f._to("stopped", disk=140))
-        self.react([TART, "delete"], lambda a, f: f._to("absent"))
-        self.react([TART, "stop"], lambda a, f: f._to("stopped" if f.state != "absent" else "absent"))
-        self.react([TART, "set"], self._set)
-        self.react([TART, "pull"], lambda a, f: f._cache())
-        self.answer([TART, "ip"], out=IP + "\n")
-        self.answer([TART, "prune"])
-        self.answer(["sysctl", "-n", "hw.ncpu"], out="10\n")
-        self.answer(["sysctl", "-n", "hw.memsize"], out="34359738368\n")
-        self.answer(["podman", "machine", "inspect"], rc=125)
-        self.answer(["df", "-Pk", "/"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/d 1 1 524288000 1% /\n")
-        self.answer(["pgrep"], rc=1)
-        self.answer(["find"])
-        self.answer(["chmod"])
+
+class Unbuilt(Guests):
+    """A Mac with tart and the base image pulled but no base; booted, the base's guest agent answers (`agent_down` it
+    does not), Setup Assistant's count is `sa` read in turn, provisioning exits `prov_rc` and its screen reads `screen`.
+    This tree is committed at SHA unless `dirty`."""
+
+    def __init__(self, tmp, kinds=None):
+        super().__init__(tmp, kinds)
+        del self.vms["wk-base"], self.files[self.base_ready]
+        self.disk, self.sa, self.screen, self.prov_rc, self.agent_down, self.dirty = 140, ["0"], CLEAR, "0", False, False
+        self.guest_cmds = []
+        t = self.tart
+        self.react([t, "get"], lambda a, f: Result(0, json.dumps({"CPU": 4, "Memory": 8192, "Disk": f.disk})))
+        self.react([t, "clone"], lambda a, f: (f.vms.__setitem__(a[3], "stopped"), setattr(f, "disk", 140), Result(0))[2])
+        self.react([t, "stop"], lambda a, f: (a[-1] in f.vms and f.vms.__setitem__(a[-1], "stopped"), Result(0))[1])
+        self.react([t, "set"], self._set)
+        self.react([t, "pull"], lambda a, f: (f.pulled.append(a[-1]), Result(0))[1])
+        self.answer([t, "prune"])
+        self.react([t, "exec"], self._guest)
         self.answer(["du", "-sh"], out="162G\t/x\n")
-        self.react(["git", "-C"], lambda a, f: Result(0, " M wk\n" if f.dirty and "status" in a else ""))
+        self.react(["git", "-C", str(REPO), "rev-parse", "--git-dir"], lambda a, f: Result(0, ".git\n"))
+        self.react(["git", "-C", str(REPO), "status"], lambda a, f: Result(0, " M wk\n" if f.dirty else ""))
+        self.answer(["git", "-C", str(REPO), "bundle"])
+        self.react(["bash", "-c"], lambda a, f: Result(0) if a[2].startswith("set -o pipefail") else here(a))
         self.react(["ssh-keygen"], self._keygen)
-        self.react([TART, "exec"], self._guest)
-
-    def _to(self, state, disk=None):
-        self.state = state
-        if disk is not None:
-            self.disk = disk
-        return Result(0)
-
-    def _cache(self):
-        self.cached = True
-        return Result(0)
-
-    def _list(self, argv, _):
-        if "oci" in argv:
-            return Result(0, json.dumps([{"Name": guestbase.IMAGE}] if self.cached else []))
-        vms = [] if self.state == "absent" else [{"Name": "wk-base", "Source": "local", "State": self.state}]
-        return Result(0, json.dumps(vms))
 
     def _set(self, argv, _):
         if "--disk-size" in argv:
@@ -83,336 +61,291 @@ class BaseWorld(BenchHere):
 
     def _keygen(self, argv, _):
         key = argv[argv.index("-f") + 1]
-        self._set_file(key, "PRIVATE\n")
-        self._set_file(key + ".pub", "ssh-ed25519 AAAA wk-vm\n")
+        self.files[key], self.files[key + ".pub"] = "PRIVATE\n", "ssh-ed25519 AAAA wk-vm\n"
         return Result(0)
-
-    def spawn(self, argv, log):
-        pid = super().spawn(argv, log)
-        if pid and "run" in argv:
-            self.state = "running"
-        return pid
 
     def _guest(self, argv, _):
         cmd = argv[-1]
         self.guest_cmds.append(cmd)
         if cmd == "date -u +%s":
-            return Result(0, "1700000000\n")
+            return Result(0, "%d\n" % self.clock.now())
         if cmd == "true" and self.agent_down:
             return Result(255, "", "no guest agent\n")
         if "Setup Assistant.app" in cmd:
             return Result(0, (self.sa.pop(0) if len(self.sa) > 1 else self.sa[0]) + "\n")
-        if guestbase.PRC in cmd and cmd.startswith("sh -c") and "cat" in cmd and "nohup" not in cmd:
+        if "/tmp/wk-base-provision.rc" in cmd and cmd.startswith("sh -c") and "cat" in cmd and "nohup" not in cmd:
             return Result(0, self.prov_rc + "\n")
         if "wc -c" in cmd:
             return Result(0, "12\n")
-        if cmd.startswith("cat ") and guestbase.PLOG in cmd:
+        if cmd.startswith("cat /tmp/wk-base-provision.log"):
             return Result(0, "==> base provisioning complete\n")
         if cmd == "bash -s":
             return Result(0, "windows=%s\n" % self.screen)
+        if cmd.endswith(SHA):
+            return Result(0, SHA + "\n")
         return Result(0)
 
-
-class BaseTest(FlowTest):
-    def setUp(self):
-        super().setUp()
-        for p in (mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True),
-                  mock.patch.object(places.Vm, "tart", lambda s: TART),
-                  mock.patch.object(tools, "push", lambda *a: True)):
-            p.start()
-            self.addCleanup(p.stop)
-        self.w = BaseWorld(self.tmp)
-        self.clock = FakeClock()
-
-    def base(self):
-        vm = places.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
-        return guestbase.Base(vm, self.clock)
-
-    def build(self, *rest, answers=None):
-        """(exit or Refused status, stderr); `answers` are the replies to each prompt, in order."""
-        prompts, replies = [], list(answers or [])
-
-        def confirm(prompt, stdin=None):
-            prompts.append(prompt)
-            ok = replies.pop(0) if replies else False
-            if ok:
-                os.environ["WK_CONFIRMED"] = "1"
-            return ok
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), mock.patch.object(act, "confirm", confirm):
-            try:
-                rc = self.base().build(list(rest))
-            except Refused as e:
-                rc = e.status
-        self.prompts = prompts
-        return rc, err.getvalue()
-
-    def marker(self):
-        return self.w.files.get(os.path.join(self.w.env["WK_VM_STORE"], "vm", "base.ready"), "")
-
-    def tart_acts(self):
-        return [e[1][1:3] for e in self.w.effects if e[0] == "run" and e[1][0] == TART and e[1][1] not in ("list", "get", "ip")]
+    def base_state(self):
+        return self.vms.get("wk-base", "absent"), self.disk, self.files.get(self.base_ready, "")
 
 
-class TestTheBaseIsBuiltOnce(BaseTest):
-    def test_from_nothing_it_is_pulled_cloned_grown_provisioned_detached_rebooted_and_sealed_with_its_inputs(self):
-        self.w.cached = False
+class BaseFlow(Flow):
+    world_class = Unbuilt
+
+    def make_world(self, **kw):
+        return super().make_world(kinds={"fakebox": "vm", "vm": "vm"}, **kw)
+
+    def build(self, *argv, w=None):
+        return self.typed("sysimage", "build", BASE, *argv, w=w)
+
+    def tart_did(self):
+        return [e[1][1:3] for e in self.w.effects if e[0] == "act" and e[1][0] == self.w.tart and e[1][1] != "exec"]
+
+
+class Terminal(io.StringIO):
+    """A person at a terminal, answering each prompt with the next line."""
+
+    def isatty(self):
+        return True
+
+
+class TestTheBaseIsBuiltOnce(BaseFlow):
+    def test_from_nothing_it_is_pulled_cloned_grown_provisioned_rebooted_and_sealed_with_its_inputs_once(self):
+        self.w.pulled = []
         rc, err = self.build()
-        self.assertEqual(0, rc, err)
-        self.assertEqual(("stopped", 320), (self.w.state, self.w.disk))
+        self.assertEqual((rc, said(err)), (0, "==> golden base 'wk-base' is ready"), err)
+        self.assertEqual(self.tart_did(), [("pull", BASE_IMAGE), ("clone", BASE_IMAGE), ("set", "wk-base"), ("set", "wk-base"),
+                                           ("set", "wk-base"), ("stop", "wk-base"), ("stop", "wk-base")])
         self.assertEqual([a[1] for a in self.w.streamed], ["pull", "clone"], "the tens-of-GB pull and the clone stream to the log")
-        self.assertEqual([e[1] for e in self.w.effects if e[0] == "spawn"], [(TART, "run", "--no-graphics", "wk-base")] * 2)
+        self.assertEqual([e[1] for e in self.w.effects if e[0] == "spawn"], [(self.w.tart, "run", "--no-graphics", "wk-base")] * 2)
         (started,) = [c for c in self.w.guest_cmds if "nohup" in c]
-        self.assertIn("WK_MOUNT_MIRROR=%s" % places.GUEST_MOUNT_MIRROR, started)
-        self.assertTrue([c for c in self.w.guest_cmds if "wc -c" in c], "nothing polled the detached log")
+        self.assertIn("WK_MOUNT_MIRROR=/usr/local/libexec/wk-mount-mirror", started)
         self.assertIn("ssh-ed25519 AAAA wk-vm", [c for c in self.w.guest_cmds if "authorized_keys" in c][0])
-        self.assertIn("inputs=%s\nfinished=" % guestbase.inputs_hash(str(REPO), self.w.env), self.marker())
-        self.assertNotIn("password", self.marker().lower())
-        self.w.effects = []
-        self.assertEqual((self.build()[0], self.tart_acts()), (0, []), "a sealed base is left alone")
+        state, disk, marker = self.w.base_state()
+        self.assertEqual((state, disk, marker.split("finished=")[0]), ("stopped", 320, "image=%s\ninputs=%s\n" % (BASE_IMAGE, sealed_inputs())))
+        rc, err = self.build()
+        self.assertEqual((rc, self.tart_did(), self.w.base_state()[2]), (0, [], marker), "a sealed base is left alone")
 
     def test_a_base_that_never_finished_is_rubble_and_is_made_again(self):
-        self.w.state = "stopped"
+        self.w.vms["wk-base"] = "stopped"
         rc, err = self.build()
-        self.assertEqual(0, rc, err)
-        self.assertIn("never finished", err)
-        self.assertEqual([("stop", "wk-base"), ("delete", "wk-base")], self.tart_acts()[:2])
+        self.assertEqual((rc, err.splitlines()[0], self.tart_did()[:3]),
+                         (0, "warning: 'wk-base' exists but was never finished -- destroying it and starting again",
+                          [("stop", "wk-base"), ("delete", "wk-base"), ("clone", BASE_IMAGE)]))
 
     def test_each_failure_is_refused_unsealed_naming_what_is_next(self):
-        for name, edit, said in (("agent", lambda w: setattr(w, "agent_down", True), "tart guest agent in 'wk-base' never answered"),
-                                 ("provisioning", lambda w: setattr(w, "prov_rc", "3"), "base provisioning failed (rc=3)"),
-                                 ("pane back", lambda w: setattr(w, "sa", ["0", "0", "1"]), "came back at 'wk-base''s next login"),
-                                 ("pane", lambda w: setattr(w, "screen", PANE), "nothing wk put there: Setup Assistant:0:800x600\n"),
-                                 ("unreadable", lambda w: setattr(w, "screen", "?"), "could not ask 'wk-base' what is on its screen")):
+        for name, edit, line in (
+                ("agent", lambda w: setattr(w, "agent_down", True),
+                 "error: the tart guest agent in 'wk-base' never answered (a Cirrus Labs image ships it; a vanilla macOS image does not)."),
+                ("provisioning", lambda w: setattr(w, "prov_rc", "3"), "error: base provisioning failed (rc=3). What it printed is in "
+                 "/vmstore/vm/base-provision.log; a re-run:  wk sysimage build macos-guest-base --refresh"),
+                ("pane back", lambda w: setattr(w, "sa", ["0", "0", "1"]), "error: Setup Assistant came back at 'wk-base''s next login. "
+                 "The base is running at 192.168.64.9: answer it at its own window,"),
+                ("pane", lambda w: setattr(w, "screen", PANE), "error: on the base's screen, and nothing wk put there: Setup Assistant:0:800x600"),
+                ("unreadable", lambda w: setattr(w, "screen", "?"),
+                 "error: could not ask 'wk-base' what is on its screen, and a base is not sealed unread.")):
             with self.subTest(name):
-                self.w = BaseWorld(self.tmp)
+                self.w = self.make_world()
                 edit(self.w)
                 rc, err = self.build()
-                self.assertEqual((rc, self.marker()), (1, ""))
-                self.assertIn(said, err)
+                self.assertEqual((rc, self.w.rel(said(err)), self.w.base_state()[2]), (1, line, ""))
 
     def test_setup_assistant_is_driven_off_before_the_reboot_that_judges_it(self):
         self.w.sa = ["1", "0"]
-        self.assertEqual(self.build()[0], 0)
-        self.assertIn("/usr/bin/python3 -", self.w.guest_cmds)
+        rc, err = self.build()
+        self.assertEqual((rc, [c for c in self.w.guest_cmds if c.startswith("/usr/bin/python3")]), (0, ["/usr/bin/python3 -"]), err)
 
     def test_a_dry_run_clones_nothing_and_boots_nothing(self):
-        os.environ["WK_DRY_RUN"] = "1"
-        rc, err = self.build()
-        self.assertEqual(0, rc, err)
-        self.assertEqual(("absent", {}, []), (self.w.state, {p: t for p, t in self.w.files.items() if "/locks/" not in p},
-                                              [e for e in self.w.effects if e[0] == "spawn"]))
-        self.assertIn("would run: %s clone %s wk-base" % (TART, guestbase.IMAGE), err)
+        before = (dict(self.w.files), dict(self.w.vms))
+        rc, err = self.build("--dry-run")
+        self.assertIn("would run: %s clone %s wk-base" % (self.w.tart, BASE_IMAGE), err.splitlines())
+        self.assertEqual((rc, (self.w.files, self.w.vms), [e for e in self.w.effects if e[0] == "spawn"]), (0, before, []))
 
 
-class TestItsStalenessIsRecomputed(BaseTest):
-    def test_a_base_matches_until_an_input_moves_and_each_finding_names_its_remedy(self):
-        self.assertIn("no golden base VM 'wk-base'", self.base().findings())
-        self.w.state = "stopped"
-        self.assertEqual(("provisioned before this record existed", True), (self.base().stale(), "--refresh" in self.base().findings()))
-        self.w.state = "absent"
+class TestItsStalenessIsRecomputed(BaseFlow):
+    def base_row(self):
+        self.w.env["WK_NAME"] = "ws"
+        _, _, err = self.wk(self.w, "doctor", "ws")
+        return [r for r in report(err) if "base" in r][0]
+
+    def test_doctor_reads_the_base_absent_unfinished_current_then_stale_each_with_its_remedy(self):
+        self.w.make("ws")
+        self.w.vms["wk-ws"] = "stopped"
+        self.assertEqual(self.base_row(), "-- no golden base VM 'wk-base' to clone a guest from -> wk sysimage build macos-guest-base   (hours)")
+        self.w.vms["wk-base"] = "stopped"
+        self.assertEqual(self.base_row(), "-- 'wk-base' exists but provisioning never finished in it -> wk sysimage build macos-guest-base --refresh")
+        del self.w.vms["wk-base"]
         self.build()
-        self.assertEqual("", self.base().stale())
-        self.assertIn("golden base 'wk-base' matches its provisioning inputs", self.base().findings())
+        self.assertEqual(self.base_row(), "ok golden base 'wk-base' matches its provisioning inputs")
         self.w.env["WK_VM_IMAGE"] = "ghcr.io/x@sha256:0"
-        self.assertIn("WK_VM_IMAGE", self.base().stale())
-        self.assertIn("--rebuild", self.base().findings())
-        root = os.path.join(self.tmp, "tree")
-        for rel in guestbase.INPUTS:
-            os.makedirs(os.path.dirname(os.path.join(root, rel)), exist_ok=True)
-            shutil.copy(REPO / rel, os.path.join(root, rel))
-        before = guestbase.inputs_hash(root, self.w.env)
-        with open(os.path.join(root, "vm", "desktop.sh"), "a") as f:
-            f.write("\n# one more line\n")
-        self.assertNotEqual(before, guestbase.inputs_hash(root, self.w.env))
+        self.assertEqual(self.base_row(), "-- 'wk-base' predates its own provisioning inputs: vm/provision-base.sh, vm/desktop.sh, "
+                         "vm/mount-mirror.sh, bench/mac-pyobjc.sh, WK_VM_IMAGE or WK_VM_USER has changed since it was built -> "
+                         "wk sysimage build macos-guest-base --rebuild   (hours; existing guests are unaffected)")
 
 
-class TestTheDestructiveModes(BaseTest):
-    def test_a_dirty_tree_or_a_declined_question_changes_nothing(self):
+class TestTheDestructiveModes(BaseFlow):
+    def test_a_dirty_tree_is_refused_before_the_question_and_a_clean_one_deletes_and_rebuilds(self):
         self.build()
-        self.w.dirty, self.w.effects = True, []
-        rc, err = self.build("--rebuild", answers=[True])
-        self.assertIn("Nothing has been deleted", err)
-        self.assertEqual((rc, self.prompts, self.tart_acts()), (1, [], []), "the prompt came before the check it would waste")
+        self.w.dirty = True
+        rc, err = self.build("--rebuild")
+        self.assertEqual((rc, said(err), "declining" in err, self.tart_did()),
+                         (1, "error: the golden base is given a commit, so it cannot be built from this tree:", False, []))
         self.w.dirty = False
+        rc, err = self.build("--rebuild", "--yes")
+        self.assertEqual((rc, self.tart_did()[:3]), (0, [("stop", "wk-base"), ("delete", "wk-base"), ("clone", BASE_IMAGE)]), err)
+
+    def test_a_declined_question_changes_nothing(self):
+        self.build()
         for mode in ("--rebuild", "--rm"):
-            self.assertEqual((self.build(mode, answers=[False])[0], self.tart_acts(), self.w.state), (1, [], "stopped"))
+            rc, err = self.build(mode)
+            self.assertEqual((rc, said(err).split(" --")[0], self.tart_did(), self.w.base_state()[0]), (1, "error: aborted", [], "stopped"))
 
-    def test_vm_base_rm_asks_twice(self):
+    def test_rm_asks_for_the_base_then_separately_for_the_pulled_image(self):
         self.build()
-        self.w._set_file(os.path.join(self.w.env["HOME"], ".tart", "cache", "OCIs", "x"), "")
-        self.w.dirs.add(os.path.join(self.w.env["HOME"], ".tart", "cache"))
-        rc, err = self.build("--rm", answers=[True, False])
-        self.assertEqual(0, rc, err)
-        self.assertEqual([("rebuilding it is hours" in self.prompts[0]), ("re-downloadable" in self.prompts[1])], [True, True])
-        self.assertEqual(("absent", ""), (self.w.state, self.marker()))
-        self.assertNotIn(("prune", "--space-budget"), self.tart_acts())
+        cache = os.path.join(self.w.env["HOME"], ".tart", "cache")
+        self.w.files[cache + "/OCIs/x"] = ""
+        self.w.dirs.add(cache)
+        with mock.patch("sys.stdin", Terminal("y\nn\n")):
+            rc, err = self.build("--rm")
+        asked = [l.split("? ")[0] for l in err.splitlines() if "[y/N]" in l]
+        self.assertEqual((rc, self.w.base_state(), self.tart_did()), (0, ("absent", 320, ""), [("stop", "wk-base"), ("delete", "wk-base")]), err)
+        self.assertEqual(asked, ["delete the golden base VM 'wk-base' (162G)", "also drop the pulled image cache (162G)"])
         self.build()
-        self.build("--rm", answers=[True, True])
-        self.assertIn(("prune", "--space-budget"), self.tart_acts())
+        rc, err = self.build("--rm", "--yes")
+        self.assertEqual(self.tart_did()[-1], ("prune", "--space-budget"))
 
-    def test_nothing_to_erase_or_refresh_two_modes_or_no_mac_is_refused(self):
-        self.assertEqual(1, self.build("--rm")[0])
-        self.assertIn("no golden base yet", self.build("--refresh")[1])
-        self.assertIn("one of them", self.build("--rm", "--rebuild")[1])
-        with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=False):
-            self.assertIn("needs a macOS host", self.build()[1])
+    def test_nothing_to_erase_nothing_to_refresh_or_two_modes_is_refused(self):
+        for argv, line in ((["--rm", "--yes"], "error: no golden base 'wk-base' on this machine -- nothing to erase"),
+                           (["--refresh"], "error: no golden base yet -- run 'wk sysimage build macos-guest-base'"),
+                           (["--rm", "--rebuild"], "error: usage: wk sysimage build macos-guest-base [--refresh|--rebuild|--rm] [--dry-run] -- one of them")):
+            rc, err = self.build(*argv)
+            self.assertEqual((rc, said(err), self.tart_did()), (1, line, []), argv)
 
 
-class TestTheBuilderConforms(BaseTest):
-    def out(self, fn, *a):
-        with contextlib.redirect_stdout(io.StringIO()) as buf:
-            rc = fn(*a)
-        return rc, buf.getvalue()
+class TestOffAMac(FlowTest):
+    def test_the_base_needs_a_macos_host(self):
+        with mock.patch("os.uname", return_value=os.uname_result(("Darwin", "mac", "25.0", "", "arm64"))):
+            w = Unbuilt(self.tmp, kinds={"fakebox": "vm", "vm": "vm"})
+        with mock.patch("os.uname", return_value=os.uname_result(("Linux", "box", "6.1", "", "x86_64"))):
+            rc, _, err = self.wk(w, "sysimage", "build", BASE)
+        self.assertEqual((rc, said(err), w.mutations()), (1, "error: a macOS guest needs a macOS host (Virtualization.framework)", []))
 
-    def test_sysimage_builders_conform_guest(self):
-        """`unit sysimage.builders_conform[guest]`: built through `wk sysimage build`, found by path, holds and ls once sealed."""
-        seen, s = [], cli.Sysimage(places.Registry(str(REPO), env=self.w.env, machine=self.w), self.clock)
-        with mock.patch.object(guestbase.Base, "build", lambda b, rest: seen.append((b.name, rest)) or 0):
-            self.assertEqual(0, s.build(guest.BASE_PRESET, ["--refresh"]))
-        self.assertEqual(([("wk-base", ["--refresh"])], cli.where(decl.parse("sysimage", load_cmd("sysimage").COMMAND, ["build", guest.BASE_PRESET, "--rm"])[1], mock.Mock(env=self.w.env))), (seen, "host"))
-        self.assertEqual((self.out(s.path, guest.BASE_PRESET, None), self.out(s.holds, guest.BASE_PRESET, None, None, None, None, False)[1]),
-                         ((1, ""), "no\n"))
-        self.assertNotIn(guest.BASE_PRESET, self.out(lambda: s.ls(False))[1])
+
+class TestTheBuilderConforms(BaseFlow):
+    def test_path_holds_and_ls_find_the_base_once_it_is_sealed(self):
+        """`unit sysimage.builders_conform[guest]`."""
+        before = [self.wk(self.w, "sysimage", verb, BASE)[:2] for verb in ("path", "holds")]
+        self.assertEqual((before, self.wk(self.w, "sysimage", "ls")[1]), ([(1, ""), (0, "no\n")], ""))
         self.build()
-        self.assertEqual(self.out(s.path, guest.BASE_PRESET, None), (0, self.base().marker() + "\n"))
-        line = next(l for l in self.out(lambda: s.ls(False))[1].splitlines() if l.startswith(guest.BASE_PRESET))
-        self.assertEqual(line.split()[:4], [guest.BASE_PRESET, "-", "guest", "ready"])
+        after = [self.wk(self.w, "sysimage", verb, BASE)[:2] for verb in ("path", "holds")]
+        self.assertEqual(after, [(0, self.w.base_ready + "\n"), (0, "yes\n")])
+        rc, out, _ = self.wk(self.w, "sysimage", "ls")
+        self.assertEqual([l.split() for l in out.splitlines()[1:]], [[BASE, "-", "guest", "ready", "-", "-"], [self.w.base_ready]])
 
 
-class TestAGuestIsAdmittedOnlyWhereItFits(BaseTest):
-    def admit(self, mine=8192):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            try:
-                guest.admit(guest.Host(self.base().vm, self.clock), "wk-demo", mine)
-                return 0, err.getvalue()
-            except Refused as e:
-                return e.status, err.getvalue()
-
-    def test_a_running_podman_machine_is_one_of_the_two_and_is_named(self):
-        self.w.state = "running"
-        self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "running", "Resources": {"Memory": 8192}}]))
-        rc, err = self.admit()
-        self.assertEqual(1, rc)
-        self.assertIn("2 VM(s) are already running", err)
-        self.assertIn("podman machine wk", err)
-        self.assertIn("or every one with 'wk stop'", err)
-
-    def test_one_guest_alone_is_let_through(self):
-        self.w.state = "running"
-        self.assertEqual(0, self.admit()[0])
-
-    def test_an_idle_podman_machine_is_stopped_and_a_busy_one_is_not(self):
-        state = ["podman", "machine", "inspect", "wk"]
-        self.w.answer(state, out=json.dumps([{"State": "running", "Resources": {"Memory": 16384}}]))
-        self.w.answer(["podman", "machine", "ssh"], out="c1\nc2\nc3\n")
-        rc, err = self.admit(mine=12000)
-        self.assertEqual(1, rc)
-        self.assertNotIn(("run", ("podman", "machine", "stop", "wk")), self.w.effects)
-        self.assertIn("not enough memory", err)
-        self.w.answer(["podman", "machine", "ssh"], rc=255)
-        self.assertEqual(1, self.admit(mine=12000)[0], "an unreadable answer is busy")
-        self.w.answer(["podman", "machine", "ssh"], out="")
-        self.w.react(["podman", "machine", "stop"], lambda a, f: (f.answer(state, out=json.dumps([{"State": "stopped"}])), Result(0))[1])
-        rc, err = self.admit(mine=12000)
-        self.assertEqual(0, rc, err)
-        self.assertIn("stopping the idle podman machine", err)
-
-    def test_a_host_nearly_out_of_disk_is_refused(self):
-        self.w.answer(["df", "-Pk", "/"], out="F\n/dev/d 1 1 10485760 1% /\n")
-        rc, err = self.admit()
-        self.assertEqual(1, rc)
-        self.assertIn("only 10 GB free on the host", err)
+class TestTheBaseFitsBesideThePodmanMachine(BaseFlow):
+    def test_an_idle_podman_machine_is_stopped_for_it_and_a_busy_or_unreadable_one_refuses_it(self):
+        pod = ["podman", "machine", "inspect", "wk"]
+        self.w.answer(pod, out=json.dumps([{"State": "running", "Resources": {"Memory": 16384}}]))
+        for ps in (Result(0, "c1\nc2\n"), Result(255)):
+            self.w.answer(["podman", "machine", "ssh"], ps.rc, ps.out)
+            rc, err = self.build()
+            self.assertEqual((rc, said(err), [e for e in self.w.effects if e[0] == "act" and e[1][0] == "podman"]),
+                             (1, "error: not enough memory to start 'wk-base'.", []))
+        self.w.answer(["podman", "machine", "ssh"])
+        self.w.react(["podman", "machine", "stop"], lambda a, f: (f.answer(pod, out=json.dumps([{"State": "stopped"}])), Result(0))[1])
+        rc, err = self.build()
+        self.assertEqual((rc, [e[1] for e in self.w.effects if e[0] == "act" and e[1][0] == "podman"]),
+                         (0, [("podman", "machine", "stop", "wk")]), err)
+        self.assertIn("==> stopping the idle podman machine to free 16384MB for 'wk-base'", err.splitlines())
 
 
-class TestThePodmanMachineIsNotStartedBesideAGuest(BaseTest):
-    def start(self, pod_mb):
-        self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "stopped", "Resources": {"Memory": pod_mb}}]))
-        self.w.answer(["podman", "machine", "start"])
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err), mock.patch.dict(os.environ, self.w.env):
-            try:
-                dispatch.start_podman_machine(self.w, "build", True)
-                return 0, err.getvalue()
-            except Refused as e:
-                return e.status, err.getvalue()
+class Podman(Guests):
+    """Guests with podman installed: its machine `wk` is answered per test."""
 
-    def started(self):
-        return [e for e in self.w.effects if e[0] in ("run", "run_tty") and e[1][:3] == ("podman", "machine", "start")]
+    def __init__(self, tmp, kinds=None):
+        super().__init__(tmp, kinds)
+        (self.tmp / "bin" / "podman").write_text("")
+        (self.tmp / "bin" / "podman").chmod(0o755)
+        self.answer([self.tart, "get"], out='{"CPU": 4, "Memory": 8192}')
 
+    def machine_is(self, mb):
+        self.answer(["podman", "machine", "inspect", "wk"], out=json.dumps([{"State": "stopped", "Resources": {"Memory": mb}}]))
+
+
+class ThePodmanMachine(Flow):
+    world_class = Podman
+
+    def make_world(self, **kw):
+        return super().make_world(kinds={"fakebox": "vm", "container": "container"}, **kw)
+
+    def setUp(self):
+        super().setUp()
+        self.w.make("g")
+
+    def start(self, mb, **env):
+        self.w.machine_is(mb)
+        self.w.env.update(env)
+        rc, err = self.typed("start")
+        return rc, err, [e[1] for e in self.w.effects if e[0] == "act" and e[1][:3] == ("podman", "machine", "start")]
+
+
+class TestThePodmanMachineIsNotStartedBesideAGuest(ThePodmanMachine):
     def test_a_host_too_small_for_both_refuses_and_starts_nothing(self):
-        self.w.state = "running"
-        rc, err = self.start(16384)
-        self.assertEqual(1, rc)
-        self.assertIn("not starting the podman machine 'wk' (16384MB): 8192MB of macOS guests are running", err)
-        self.assertIn("wk stop <name>", err)
-        self.assertEqual([], self.started())
+        rc, err, started = self.start(16384)
+        self.assertEqual((rc, said(err), started), (1, "error: not starting the podman machine 'wk' (16384MB): 8192MB of macOS guests "
+                                                       "are running, and the", []))
 
     def test_one_that_fits_beside_the_guest_or_with_no_guest_running_is_started(self):
-        self.w.state = "running"
-        self.assertEqual(0, self.start(8192)[0])
-        self.assertEqual(1, len(self.started()))
-        self.w.state = "stopped"
-        self.assertEqual(0, self.start(65536)[0])
-        self.assertEqual(2, len(self.started()))
-
-    def test_wk_start_asks_the_same_rule(self):
-        start = load_cmd("start")
-        self.w.state = "running"
-        self.w.answer(["podman", "machine", "inspect"], out=json.dumps([{"State": "stopped", "Resources": {"Memory": 16384}}]))
-        reg = mock.Mock(machine=self.w)
-        reg.load.side_effect = lambda n: mock.Mock(machine_state=lambda: "stopped") if n == "container" else self.base().vm
-        with mock.patch.object(start.Store, "macos_host", True), mock.patch.dict(os.environ, self.w.env), \
-                contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertRaises(Refused, start.start_everything, reg)
-        self.assertIn("not starting the podman machine", err.getvalue())
-        self.assertEqual([], self.started())
+        self.assertEqual(self.start(8192)[::2], (0, [("podman", "machine", "start", "wk")]))
+        self.w.vms["wk-g"] = "stopped"
+        self.assertEqual(self.start(65536)[::2], (0, [("podman", "machine", "start", "wk")]))
 
     def test_wk_vm_share_starts_it_anyway_and_says_so(self):
-        self.w.state = "running"
-        self.w.env["WK_VM_SHARE"] = "1"
-        rc, err = self.start(16384)
-        self.assertEqual(0, rc, err)
-        self.assertIn("starting it because WK_VM_SHARE is set", err)
-        self.assertEqual(1, len(self.started()))
+        rc, err, started = self.start(16384, WK_VM_SHARE="1")
+        self.assertEqual((rc, err.splitlines()[0], started), (0, "warning: the podman machine 'wk' (16384MB) on top of 8192MB of running "
+                                                                  "guests exceeds the 20480MB envelope -- starting it because WK_VM_SHARE is set",
+                                                              [("podman", "machine", "start", "wk")]))
 
 
-# The guest as a directory here: /Users/admin and the mirror share are rewritten to a scratch guest, and the
-# command runs with HOME there, so the real git runs.
-class LocalGuest(Local):
-    def __init__(self, home):
-        self.home = home
+class GuestHome(Mac):
+    """A Mac whose guest's checkout step runs for real in the directory `guest`, its home, with /Users/admin and the mirror
+    share mapped into it."""
+
+    def __init__(self, tmp, kinds=None):
+        super().__init__(tmp, kinds)
+        self.home = str(self.tmp / "guest")
+        self.env["WK_MIRROR_BRANCHES"] = "main"
+        self.react([self.tart, "exec"], self._checkout)
 
     def _map(self, text):
-        return text.replace(os.path.dirname(places.guest_mirror()), self.home + "/share").replace("/Users/admin", self.home)
+        return text.replace("/Volumes/wk-mirror/mirror", self.home + "/share").replace("/Users/admin", self.home)
 
-    def run(self, argv, input=None, timeout=None):
-        env = dict(os.environ, HOME=self.home)
-        cp = subprocess.run([self._map(a) for a in argv], input=self._map(input or ""), capture_output=True, text=True,
-                            env=env, timeout=timeout)
-        return Result(cp.returncode, cp.stdout, cp.stderr)
+    def _checkout(self, argv, f):
+        if not argv[-1].startswith("env WK_SRC="):
+            return self._guest(argv, f)
+        return here(["sh", "-c", self._map(argv[-1])], self._map(self.last_input), HOME=self.home)
 
 
-FAKE_GIT_WEBKIT = '''#!/bin/sh
+FAKE_GIT_WEBKIT = """#!/bin/sh
 echo "$*" >> "$HOME/git-webkit.calls"
 case "$1" in
     setup)         [ "$2" = --defaults ] || exit 2; git config webkitscmpy.setup true ;;
     install-hooks) ;;
     *)             exit 2 ;;
 esac
-'''
+"""
 
 
-class TestTheCheckoutIsMadeAtFirstStart(unittest.TestCase):
+class TestTheCheckoutIsMadeAtFirstStart(GuestStart):
+    world_class = GuestHome
+
     def setUp(self):
-        self.tmp = tempfile.mkdtemp(prefix="wk-test-checkout-")
-        self.addCleanup(shutil.rmtree, self.tmp, True)
-        self.guest = os.path.join(self.tmp, "guest")
-        os.makedirs(os.path.join(self.guest, "share"))
-        self.mirror = os.path.join(self.guest, "share", "WebKit.git")
-        src = os.path.join(self.tmp, "seed")
+        super().setUp()
+        self.mirror = os.path.join(self.w.home, "share", "WebKit.git")
+        src = os.path.join(self.w.tmp, "seed")
         os.makedirs(os.path.join(src, "Tools", "Scripts"))
+        os.makedirs(os.path.dirname(self.mirror))
         gw = os.path.join(src, "Tools", "Scripts", "git-webkit")
         with open(gw, "w") as f:
             f.write(FAKE_GIT_WEBKIT)
@@ -421,54 +354,35 @@ class TestTheCheckoutIsMadeAtFirstStart(unittest.TestCase):
         for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "."], ["git", "commit", "-q", "-m", "seed"]):
             subprocess.run(cmd, cwd=src, env=env, check=True)
         subprocess.run(["git", "clone", "-q", "--bare", src, self.mirror], check=True)
-        p = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
-        p.start()
-        self.addCleanup(p.stop)
-
-    def start(self):
-        env = {"HOME": self.tmp + "/home", "WK_VM_STORE": self.tmp + "/vmstore", "WK_STORE": self.tmp + "/store",
-               "XDG_STATE_HOME": self.tmp + "/state", "WK_MACHINES_DIR": self.tmp + "/registry", "PATH": os.environ["PATH"],
-               "WK_MIRROR_BRANCHES": "main"}
-        vm = places.Registry(str(REPO), env=env, machine=Local()).load("vm")
-        g = guest.Guest(guest.Host(vm, FakeClock()), "demo", LocalGuest(self.guest))
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            ok = g.write_checkout()
-        return ok, err.getvalue()
 
     def config(self, key):
-        return subprocess.run(["git", "-C", os.path.join(self.guest, "WebKit"), "config", "--get-all", key],
-                              capture_output=True, text=True).stdout.split()
+        return here(["git", "-C", os.path.join(self.w.home, "WebKit"), "config", "--get-all", key], HOME=self.w.home).out.split()
 
     def test_the_first_start_clones_wires_and_sets_up(self):
-        ok, err = self.start()
-        self.assertTrue(ok, err)
-        self.assertEqual(["true"], self.config("webkitscmpy.setup"))
-        self.assertEqual(["https://github.com/WebKit/WebKit.git"], self.config("remote.origin.url"))
-        with open(os.path.join(self.guest, ".gitconfig")) as f:
+        rc, err = self.start()
+        self.assertEqual((rc, self.lines(err, "==> ws's WebKit checkout made")), (0, ["==> ws's WebKit checkout made from its mirror in 0s"]), err)
+        self.assertEqual((self.config("webkitscmpy.setup"), self.config("remote.origin.url")), (["true"], ["https://github.com/WebKit/WebKit.git"]))
+        with open(os.path.join(self.w.home, ".gitconfig")) as f:
             self.assertIn("dotfiles/gitconfig", f.read(), "the identity include precedes the setup that reads it")
-        self.assertTrue(os.path.exists(os.path.join(self.guest, "WebKit", ".git", "objects", "info", "alternates")),
+        self.assertTrue(os.path.exists(os.path.join(self.w.home, "WebKit", ".git", "objects", "info", "alternates")),
                         "the clone copied the history rather than sharing the mirror's")
 
     def test_the_next_start_finds_it_done(self):
         self.start()
-        ok, err = self.start()
-        self.assertTrue(ok, err)
-        self.assertNotIn("made from its mirror", err)
-        with open(os.path.join(self.guest, "git-webkit.calls")) as f:
+        rc, err = self.start()
+        with open(os.path.join(self.w.home, "git-webkit.calls")) as f:
             calls = f.read().splitlines()
-        self.assertEqual(["setup --defaults"], [c for c in calls if c.startswith("setup")])
+        self.assertEqual((rc, self.lines(err, "==> ws's WebKit checkout made"), [c for c in calls if c.startswith("setup")]), (0, [], ["setup --defaults"]))
 
     def test_no_mirror_is_a_failure_that_names_both_remedies(self):
-        shutil.rmtree(self.mirror)
-        ok, err = self.start()
-        self.assertFalse(ok)
-        self.assertIn("checkout=no-mirror", err)
-        self.assertIn("wk start", err)
-        self.assertIn("wk sync", err)
-        self.assertFalse(os.path.exists(os.path.join(self.guest, "WebKit")))
+        subprocess.run(["rm", "-rf", self.mirror], check=True)
+        rc, err = self.start()
+        self.assertEqual(self.lines(err, "warning: ws's checkout"), ["warning: ws's checkout is not wired and set up (above); 'wk sync ws --fix' once it is up"])
+        self.assertIn("      'wk stop <name>', then 'wk start <name>' -- or the host has no mirror yet: wk sync", err.splitlines())
+        self.assertFalse(os.path.exists(os.path.join(self.w.home, "WebKit")))
 
 
+# Not reachable from the command line: the picker inside the guest-side unblocker, and the live tier's look at this Mac's own base.
 @unittest.skipUnless(platform.system() == "Darwin", "the unblocker imports pyobjc's ApplicationServices, a macOS framework")
 class TestSetupAssistantIsDrivenByIdentifier(unittest.TestCase):
     def pick(self, pairs):
@@ -499,6 +413,9 @@ class TestTheLiveBase(unittest.TestCase):
     def test_vm_base_matches_pin(self):
         if not live_selected() or sys.platform != "darwin":
             self.skipTest("live tier not selected, or not a macOS host")
+        sys.path.insert(0, str(REPO / "lib"))
+        from wk import places
+        from wk.sysimage import guestbase
         vm = places.Registry(str(REPO)).load("vm")
         if not vm.tart():
             self.skipTest("tart is not installed here")
