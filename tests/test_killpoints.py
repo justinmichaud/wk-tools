@@ -22,7 +22,7 @@ from tests import test_wk_sudo as sudo
 from tests import test_rm_final_state as rmfs, test_repo_workspace as repo, test_sync as sync, test_wk_build as build
 from tests import test_wk_test as wktest, test_wk_workspace as ws
 from tests import test_wk_places
-from tests.support import REPO, as_dispatched, invocation
+from tests.support import REPO
 from wk import dispatch, guest as wkguest, places, pr  # noqa: E402 -- tests.support put lib on the path
 from wk.act import Refused  # noqa: E402
 from wk.bench import record as brecord  # noqa: E402
@@ -74,8 +74,7 @@ def sync_row(scope, **kw):
 
 
 def wk_test(case, w):
-    os.environ["WK_NAME"] = "ws"
-    quiet(wktest.CMD.main, as_dispatched("test", [], os.environ), invocation(w.reg, w.clock))
+    quiet(case.wk, w, "test", "ws")
 
 
 def bench_row(kind, preset):
