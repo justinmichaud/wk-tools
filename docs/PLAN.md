@@ -1383,6 +1383,24 @@ Decisions are asked as questions, and their answers are recorded under "Decision
   subtest's relative sd, or the suite row's run-to-run sd, and is a noisier A named too?
 - The fork's `swift-ubuntu2604` branch is not proposed upstream; the tree's layer (`container/sdk/Containerfile`) stands in until an
   upstream image carries it. Open the pull request on Igalia/webkit-container-sdk?
+- The cut by deduplication alone reaches about 1% of a row (measured 2026-11-20: places -14, workspace -25, secrets -17, guest -66,
+  `cmd/*` -7 lines from four inventories); the rest of each budget is scope or one of these, each a visible change:
+  - Every workspace image under the tree's layer (the armhf image, a `WK_SDK_IMAGE`, the buildroot and yocto host images), so
+    `container/firstrun.sh` installs nothing with apt and its install-if-absent branches go?
+  - One "which branch" for a container: `Container.branch` reads `.git/HEAD` from the store so a stopped container still answers,
+    `Driver.branch` asks git. Asking git everywhere shows `-` for a stopped container.
+  - One wording for "already exists" and "broken" across `REFUSALS`, `Container.create`, `Vm.create`, `Remote.create` and
+    `Driver.broken_words` (four texts today), and for a busy workspace (`Build.refuse` prints `stop it: K`, `task_lines`
+    `stop it:  K`)?
+  - The dispatcher owns "one of these at a time", numeric options and short aliases (`decl.Opt`), replacing eight hand-written
+    checks in `cmd/*`; each refusal's wording becomes the dispatcher's one.
+  - `python3 -m wk.tailnet check` and `WK_TS_API_SECRET_FILE` have no caller but a test; `wk key check` verifies that credential.
+  - The per-invocation memos (`Container._machine_state`, `Remote._probed`, `Remote._has_wk`, `Peer._rows`, `Peer._routes`,
+    `Vm._vm_store`) are stored copies of a recomputable fact; without them a listing repeats ssh and podman round trips.
+  - The multi-line explanations `wk gui --lldb`, `wk run --until-crash --lldb` and `wk test --lldb` print before they start
+    (about 25 lines of `log`): keep, or move to `-h`?
+- podman on this Mac is 5.4.0, driving the pinned machine-os 5.8; the official installer (sudo) moves the client, and
+  `store.MACHINE_IMAGE` moves with it.
 - Is the JIT-dumped samply run the warmup round, labelled no measurement, or a measured leg (`JSC_useJITDump=1` has been
   seen to crash the WebKitGTK UI process, lib/wk/profile.py)?
 - Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
