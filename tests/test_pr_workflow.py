@@ -1,196 +1,211 @@
-"""`wk pr` / `wk new --pr`: the spec parser and the mirror fetches underneath
-them (lib/wk/pr.py's parse_spec, sync.fetch_into_mirror and fetch_pull_into_mirror)."""
+"""`wk pr` typed into a world: a PR head checked out into workspace `ws`, its branch rebased onto origin/main, and opened
+as a pull request -- pushed by the workspace as a person's own run, or by this machine for a build box."""
 import asyncio
 import contextlib
 import importlib.util
 import io
+import json
 import os
+import shlex
 import shutil
 import ssl
 import subprocess
 import tempfile
-import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests import fakes
-from tests.support import REPO, load_cmd, rand_suffix, stub_path
-
-CMD_PR_MODULE = load_cmd("pr")
-
-from wk import act, decl, dispatch, git, places, pr, sync  # noqa: E402  -- needs CMD_PR_MODULE's sys.path.insert above
+from tests import test_wk_workspace as ws
+from tests.fakes import Fake, FlowTest, Result
+from tests.support import REPO
+from tests.test_wk_workspace import said
+from wk import pr, sync  # noqa: E402 -- the bench-head fetches at the bottom only
 from wk.clock import Clock  # noqa: E402
 from wk.lock import Lock  # noqa: E402
-from wk.machine import Local, Result  # noqa: E402
-from tests.fakes import Fake, WsDriver  # noqa: E402
+from wk.machine import Local  # noqa: E402
 from wk.store import Store  # noqa: E402
 
-
-def _git(*args, cwd, check=True):
-    return subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=check
-    )
-
-
-def _make_repo(dir_, branch, filename="f.txt"):
-    """A minimal real git repo with one commit on <branch>. Returns its HEAD sha."""
-    dir_.mkdir(parents=True, exist_ok=True)
-    _git("init", "-q", "-b", branch, cwd=dir_)
-    (dir_ / filename).write_text(f"{rand_suffix()}\n")
-    _git("add", ".", cwd=dir_)
-    _git("-c", "user.email=t@example.com", "-c", "user.name=Test",
-         "commit", "-q", "-m", "init", cwd=dir_)
-    return _git("rev-parse", "HEAD", cwd=dir_).stdout.strip()
+SRC, BOX_SRC = "/src/WebKit", ws.FAR_ROOT + "/ws/ws/WebKit"
+PERSON = "/opt/wk-tools/container/bin/wk-person"
+URLS = {"origin": "https://github.com/WebKit/WebKit.git", "wpe": "https://github.com/WebPlatformForEmbedded/WPEWebKit.git",
+        "fork": "https://github.com/me/WebKit.git", "forkwpe": "https://github.com/me/WPEWebKit.git"}
+ALICE = "https://github.com/alice/WebKit"
+HEAD, MAIN, OLD, NEW = "b" * 40, "c" * 40, "d" * 40, "e" * 40
+BOX_REF = "refs/wk/push/fakebox/eng/x"
+FORK_SSH = "git@github.com:justinmichaud/WebKit.git"
+GH = '#!/bin/sh\n[ "$1 $2" = "api user" ] && [ -e "$0.dead" ] && exit 1\nexit 0\n'
 
 
-class GitWorld(fakes.World):
-    def __init__(self):
-        super().__init__(name="host")
-        self.local = {}            # branch -> sha
-        self.remotes = {}          # name -> url
-        self.remote_refs = {}      # (remote, branch) -> sha
-        self.fetch_shas = {}       # src_ref (or "origin/main") -> sha a fetch brings in
-        self.head = None
-        self.dirty = 0
-        self.upstream = {}         # branch -> {"remote": r, "merge": ref}
-        self.pushed = set()        # (fork, branch)
-        self.driver = RecordingDriver(self)
-        self.react(["exec", "ws", "test", "-d"], lambda a, f: Result(0 if a[4] in f.dirs else 1))
-        self.react(["exec", "ws", "git", "-C"], lambda a, f: f.git(a[5:]))
+class World(ws.World):
+    """`ws` on place fakebox -- a container here, a build box (`remote`) or a peer workstation (`peer`) -- whose
+    checkout answers git from `branches`, `head` (None: detached), `dirty`, `config` and `refs`, each change landing
+    as a ("git", ...) effect; a git verb named in `fails` fails saying so ("mirror": this machine's mirror fetch).
+    GitHub answers ls-remote and a fetch from `github` ({(url, ref): sha}) and takes pushes into `pushed`; this
+    machine's mirror takes a box's branch into `mirror_refs`; `gh` is a stub whose `api user` fails once `dead_token()`."""
 
-    def _resolve(self, ref):
-        if ref.startswith("refs/remotes/"):
-            _, _, remote, branch = ref.split("/", 3)
-            return self.remote_refs.get((remote, branch), "")
-        return ref
+    def __init__(self, tmp, kind="container"):
+        super().__init__(tmp, kinds={"fakebox": kind})
+        if kind != "container":
+            del self.env["WK_IN_VM"]
+        store = self.env["WK_STORE"]
+        self.env.update(WK_STORE_DEFAULT=store, WK_HOST_SECRETS=os.path.join(store, "secrets"))
+        self.key = os.path.join(store, "push-keys", "build_key_fork")
+        self.files[self.key] = "KEY\n"
+        self.gh_path = self.tmp / "gh-bin" / "gh"
+        self.gh_path.parent.mkdir()
+        self.gh_path.write_text(GH)
+        self.gh_path.chmod(0o755)
+        self.env["PATH"] = "%s:%s" % (self.gh_path.parent, os.environ["PATH"])
+        self.src, self.mirror = BOX_SRC if kind == "remote" else SRC, os.path.join(store, "git", "WebKit.git")
+        self.branches, self.head, self.dirty, self.refs, self.fails, self.main = {"main": MAIN}, "main", 0, {}, {}, MAIN
+        self.config = {"remote.%s.url" % n: u for n, u in URLS.items()}
+        self.github, self.pushed, self.mirror_refs, self.mounted, self.said = {}, set(), set(), {self.mirror}, ""
+        self.react(["git", "ls-remote"], lambda a, f: Result(0, "%s\t%s\n" % (f.github[a[2], a[3]], a[3]) if (a[2], a[3]) in f.github else ""))
+        self.react(["git", "init"], lambda a, f: (f.dirs.add(a[-1]), Result(0))[1])
+        self.make()
+        self.effects = []
 
-    def _fetch(self, sub):
-        self.effect(("fetch",) + tuple(sub))
-        last = sub[-1]
-        if last == "origin" or last.startswith("+refs/heads/*:refs/remotes/"):
-            self.remote_refs[("origin", "main")] = self.fetch_shas["origin/main"]
+    def _peer(self):
+        self._remote()
+
+    def dead_token(self):
+        Path(str(self.gh_path) + ".dead").write_text("")
+
+    def _in_ws(self, argv, f):
+        rest = list(argv[2:])
+        rest = rest[rest[:1] == [PERSON]:]
+        return self.in_checkout(rest) if rest[:1] in (["git"], ["test"]) else super()._in_ws(argv, f)
+
+    def _ssh(self, argv, f):
+        words = shlex.split(argv[-1])
+        text = words[2] if words[:2] == ["sh", "-c"] else argv[-1]
+        if "/wk ls --json" in text:
+            return Result(0, json.dumps({"workspaces": [{"name": "ws", "state": "running"}]}))
+        if "/wk zed ws --route" in text:
+            return Result(0, "user=u\nsrc=%s\nproxy=p\n" % SRC)
+        if "test -x " in text:
             return Result(0)
-        src_ref, _, dest = last.partition(":")
-        _, _, remote, branch = dest.split("/", 3)
-        self.remote_refs[(remote, branch)] = self.fetch_shas[src_ref]
+        if text.startswith("cd ") and " && " in text:
+            return self.in_checkout(shlex.split(text.split(" && ", 1)[1]))
+        return super()._ssh(argv, f)
+
+    def _git(self, argv, f):
+        if not argv[2].endswith("/WebKit.git"):
+            return super()._git(argv, f)
+        if "fetch" in argv:
+            if "mirror" in self.fails:
+                return Result(1, "", self.fails["mirror"] + "\n")
+            self.mirror_refs.add(argv[-1].split(":")[1])
+        elif "update-ref" in argv:
+            self.mirror_refs.discard(argv[-1])
+        elif "push" in argv:
+            self.pushed.add((argv[-2], argv[-1].split(":")[1]))
         return Result(0)
 
-    def git(self, sub):
-        if sub[:2] == ["status", "--porcelain"]:
-            return Result(0, "M x\n" * self.dirty)
-        if sub[:3] == ["rev-parse", "--verify", "--quiet"]:
-            b = sub[3][len("refs/heads/"):]
-            sha = self.local.get(b, "")
+    def in_checkout(self, argv):
+        if argv[:2] == ["test", "-d"]:
+            return Result(0 if argv[2] in self.mounted else 1)
+        assert argv[:3] == ["git", "-C", self.src], argv
+        sub, c = argv[3:], self.config
+        verb = sub[0]
+        if verb in self.fails:
+            return Result(1, "", self.fails[verb] + "\n")
+        if verb == "status":
+            return Result(0, " M f\n" * self.dirty)
+        if verb == "symbolic-ref":
+            return Result(0, self.head + "\n") if self.head else Result(128)
+        if verb in ("rev-parse", "show-ref"):
+            sha = self.branches.get(sub[-1][len("refs/heads/"):], "")
             return Result(0, sha + "\n") if sha else Result(1)
-        if sub[:2] == ["config", "--get-regexp"]:
-            lines = ["remote.%s.url %s" % (n, u) for n, u in self.remotes.items()]
-            return Result(0, "\n".join(lines))
-        if sub[:2] == ["remote", "add"]:
-            _, name, url = sub[1:]
-            self.effect(("remote-add", name))
-            self.remotes[name] = url
-            return Result(0)
-        if sub[:2] == ["remote", "set-url"]:
-            _, name, url = sub[1:]
-            self.effect(("remote-set-url", name))
-            self.remotes[name] = url
-            return Result(0)
-        if sub[0] == "fetch":
-            return self._fetch(sub)
-        if sub[:2] == ["rev-list", "--count"]:
+        if verb == "rev-list":
             return Result(0, "0\n")
-        if sub[:3] == ["show-ref", "--verify", "--quiet"]:
-            b = sub[3][len("refs/heads/"):]
-            return Result(0) if b in self.local else Result(1)
-        if sub[:2] == ["checkout", "--quiet"] and len(sub) > 2 and sub[2] == "-b":
-            branch, start = sub[3], sub[4]
-            self.effect(("checkout-b", branch))
-            self.local[branch] = self._resolve(start)
-            self.head = branch
-            return Result(0)
-        if sub[:2] == ["checkout", "--quiet"]:
-            branch = sub[2]
-            self.effect(("checkout", branch))
-            self.head = branch
-            return Result(0)
-        if sub[:3] == ["reset", "--hard", "--quiet"]:
-            start = sub[3]
-            self.effect(("reset", self.head))
-            self.local[self.head] = self._resolve(start)
-            return Result(0)
-        if sub[:3] == ["branch", "--quiet", "--unset-upstream"]:
-            branch = sub[3]
-            self.effect(("unset-upstream", branch))
-            self.upstream.pop(branch, None)
-            return Result(0)
-        if sub[0] == "config" and sub[1].startswith("branch."):
-            key, value = sub[1], sub[2]
-            branch, field = key.split(".")[1], key.rsplit(".", 1)[1]
-            self.effect(("config", key))
-            self.upstream.setdefault(branch, {})[field] = value
-            return Result(0)
-        if sub[:2] == ["config", "--get-all"] and sub[2].endswith(".fetch"):
+        if verb == "--no-pager":
+            return Result(0, "abc1234 a message\n")
+        if sub[:2] == ["config", "--get-regexp"]:
+            return Result(0, "".join("%s %s\n" % kv for kv in sorted(c.items()) if kv[0].startswith("remote.")))
+        if sub[:2] == ["config", "--get"]:
+            return Result(0, c[sub[2]] + "\n") if sub[2] in c else Result(1)
+        if sub[:2] == ["config", "--get-all"]:   # the fetch refspec `git remote add` writes
             name = sub[2][len("remote."):-len(".fetch")]
-            return Result(0, "+refs/heads/*:refs/remotes/%s/*\n" % name) if name in self.remotes else Result(1)
-        if sub[0] == "push":
-            fork, branch = sub[1], sub[2]
-            self.effect(("push", fork, branch))
-            self.pushed.add((fork, branch))
-            self.remote_refs[(fork, branch)] = self.local.get(branch, "")
-            return Result(0)
-        if sub[0] == "rebase":
-            remote, branch = sub[1].split("/", 1)
-            sha = self.remote_refs.get((remote, branch))
-            self.effect(("rebase", self.head))
-            self.local[self.head] = sha
-            return Result(0)
-        if sub[:2] == ["--no-pager", "log"]:
-            return Result(0, "abc1234 message\n")
-        raise AssertionError("GitWorld: unhandled git subcommand: %r" % (sub,))
+            return Result(0, "+refs/heads/*:refs/remotes/%s/*\n" % name) if "remote.%s.url" % name in c else Result(1)
+        self.effect(("git",) + tuple(sub))
+        if verb == "config":
+            c[sub[1]] = sub[2]
+        elif verb == "remote":
+            c["remote.%s.url" % sub[2]] = sub[3]
+        elif verb == "fetch":
+            src, _, dest = sub[-1].partition(":")
+            mirrored = not dest or dest.endswith("/*")
+            self.refs["refs/remotes/origin/main" if mirrored else dest] = self.main if mirrored else self.github[sub[-2], src]
+        elif verb == "checkout":
+            self.head = sub[-2] if "-b" in sub else sub[-1]
+            if "-b" in sub:
+                self.branches[self.head] = self.refs[sub[-1]]
+        elif verb == "reset":
+            self.branches[self.head] = self.refs[sub[-1]]
+        elif verb == "branch":
+            for k in ("remote", "merge"):
+                c.pop("branch.%s.%s" % (sub[-1], k), None)
+        elif verb == "push":
+            self.pushed.add((sub[1], sub[2]))
+        elif verb == "rebase":
+            self.branches[self.head] = self.refs["refs/remotes/" + sub[1]]
+        return Result(0)
+
+    def changed(self):
+        return [e[1:] for e in self.effects if e[0] == "git"]
+
+    def checkout_state(self):
+        return sorted(self.config.items()), sorted(self.branches.items()), self.head
+
+    def opened(self):
+        return sorted(self.pushed), any(e[0] == "exec" for e in self.effects)
+
+    def box_state(self):
+        return sorted(self.mirror_refs), sorted(self.pushed)
+
+    def gh(self):
+        return [list(e[1]) for e in self.effects if e[0] == "exec"]
+
+    def here_ran(self, word):
+        return [list(e[1]) for e in self.effects if e[0] == "act" and word in e[1]]
 
 
-class RecordingDriver(WsDriver):
-    """Workspace `ws` on a GitWorld, its mutations kept in order: act_exec prints under a dry run rather than reaching
-    the machine's act_run, so the driver records it."""
-
-    def __init__(self, world):
-        super().__init__("ws", REPO, {}, world)
-        self.mutations = []
-
-    def act_exec(self, ws, argv, person=False):
-        self.mutations.append(tuple(argv) + (("as a person",) if person else ()))
-        return super().act_exec(ws, argv, person=person)
-
-
-OPENS = ("WebKit/WebKit", "alice:eng/x", "fork", "eng/x")
-
-
-def checkout_world():
-    w = GitWorld()
-    for url, out in (("https://github.com/alice/WebKit.git", "b" * 40 + "\trefs/heads/eng/x\n"), ("https://github.com/alice/WPEWebKit.git", "")):
-        w.answer(["git", "ls-remote", git.direct_url(url), "refs/heads/eng/x"], out=out)
-    w.fetch_shas = {"refs/heads/eng/x": "b" * 40}
+def fork_branch(tmp):
+    """alice's eng/x is on her WebKit fork and in no other repository."""
+    w = World(tmp)
+    w.github[ALICE, "refs/heads/eng/x"] = HEAD
     return w
 
 
-def checkout_state(w):
-    return (dict(w.remotes), dict(w.local), w.head, {b: dict(v) for b, v in w.upstream.items()})
-
-
-def rebase_world():
-    w = GitWorld()
-    w.local, w.head, w.fetch_shas = {"eng/y": "d" * 40}, "eng/y", {"origin/main": "c" * 40}
+def on_branch(tmp, kind="container", tracks="origin"):
+    """`ws` clean on eng/x, tracking `tracks`: a branch `wk pr open` opens."""
+    w = World(tmp, kind)
+    w.branches["eng/x"], w.head, w.config["branch.eng/x.remote"] = OLD, "eng/x", tracks
     return w
 
 
-def open_once(driver):
-    with mock.patch.object(pr, "pr_open_target", return_value=OPENS):
-        pr.pr_open(driver, "ws", False, False)
+def behind(tmp):
+    """`ws` on eng/y, and origin/main has moved on to NEW."""
+    w = World(tmp)
+    w.branches["eng/y"], w.head, w.main = OLD, "eng/y", NEW
+    return w
+
+
+def run(case, w, *argv):
+    """`wk pr <argv>` once, as a kill-point row runs it: what it said is kept on the world."""
+    w.said = case.wk(w, "pr", *argv)[2]
+
+
+def plan(w):
+    """What a run changed in the checkout (a dry run: printed it would) and here, in order; an ssh connection's directory is no change."""
+    return ([w.rel(shlex.join(("git", "-C", w.src) + e)) for e in w.changed()]
+            + [w.rel(l[len("would run in ws: "):]) for l in w.said.splitlines() if l.startswith("would run in ws: ")]
+            + [m for m in w.mutations() if w.mutates(m)])
 
 
 class BoxKeys:
-    """Secrets as `push_from_here` reads it: one fork, and where its private half is."""
+    """Secrets as tests/test_push_service.py's box push reads them: one fork, and where its private half is."""
 
     def forks(self):
         return [("fork", "alice/WebKit", "")]
@@ -199,328 +214,186 @@ class BoxKeys:
         return "/s/push-keys/build_key_%s" % fork
 
 
-MIRROR = "/h/mirror"
-BOX_REF = "refs/wk/push/box/eng/x"
+class PrTest(ws.Flow):
+    """No tests of its own: the kill-point rows run `wk pr` in its worlds."""
+    world_class = World
+
+    def pr(self, *argv, w=None):
+        return self.typed("pr", *argv, w=w)
 
 
-def box_world():
-    w = fakes.World()
-    w.refs, w.pushed = set(), set()
-    w.answer(["git", "init"], 0)
-    w.answer(["git", "-C", MIRROR, "config"], 0)
-    w.files["/s/push-keys/build_key_fork"] = "KEY\n"
+class TestPrCheckout(PrTest):
+    def test_a_forks_branch_is_fetched_by_url_into_a_remote_it_adds_and_checked_out_tracking_it(self):
+        w = fork_branch(self.tmp)
+        rc, err = self.pr("ws", "alice:eng/x", w=w)
+        self.assertEqual((rc, w.changed()), (0, [("remote", "add", "alice", ALICE + ".git"), ("remote", "set-url", "alice", ALICE + ".git"),
+                                                 ("fetch", "--quiet", "--no-prune", ALICE, "refs/heads/eng/x:refs/remotes/alice/eng/x"),
+                                                 ("checkout", "--quiet", "-b", "eng/x", "refs/remotes/alice/eng/x"),
+                                                 ("config", "branch.eng/x.remote", "alice"), ("config", "branch.eng/x.merge", "refs/heads/eng/x")]))
+        self.assertEqual((w.head, w.branches["eng/x"]), ("eng/x", HEAD))
+        self.assertIn("==> 'ws' is on eng/x (WebKit, from alice)", err.splitlines())
 
-    def git_in_mirror(argv, fake):
-        if "fetch" in argv:
-            fake.refs.add(argv[-1].split(":", 1)[1])
-        elif "update-ref" in argv:
-            fake.refs.discard(argv[-1])
-        elif "push" in argv:
-            fake.pushed.add(argv[-1])
-        return Result(0)
-    w.react(["git", "-C", MIRROR], git_in_mirror)
-    return w
+    def test_a_pull_request_is_checked_out_as_pr_n_tracking_nothing(self):
+        for spec, url, branch in (("1234", URLS["origin"], "pr/1234"), ("wpe:1234", URLS["wpe"], "pr/wpe-1234")):
+            w = self.make_world()
+            w.github[url[:-4], "refs/pull/1234/head"] = HEAD
+            rc, err = self.pr("ws", spec, w=w)
+            tracking = "refs/remotes/%s/%s" % (spec.split(":")[0] if ":" in spec else "origin", branch)
+            self.assertEqual((rc, w.changed()), (0, [("fetch", "--quiet", "--no-prune", url[:-4], "refs/pull/1234/head:" + tracking),
+                                                     ("checkout", "--quiet", "-b", branch, tracking), ("branch", "--quiet", "--unset-upstream", branch)]))
 
+    def test_each_spelling_asks_github_where_it_says(self):
+        for spec, asked in (("alice:eng/frame-fix", [(ALICE, "refs/heads/eng/frame-fix"), ("https://github.com/alice/WPEWebKit", "refs/heads/eng/frame-fix")]),
+                            ("1234", [("https://github.com/WebKit/WebKit", "refs/pull/1234/head")]),
+                            ("wpe:5678", [("https://github.com/WebPlatformForEmbedded/WPEWebKit", "refs/pull/5678/head")]),
+                            ("wpe:somebranch", [("https://github.com/wpe/WebKit", "refs/heads/somebranch"),
+                                                ("https://github.com/wpe/WPEWebKit", "refs/heads/somebranch")])):
+            rc, err = self.pr("ws", spec)
+            self.assertEqual((rc, [tuple(e[1][2:]) for e in self.w.effects if e[1][:2] == ("git", "ls-remote")], self.w.changed()), (1, asked, []), spec)
 
-def box_push(w, keys=None):
-    """`wk pr open` pushing from a build box through its own mirror."""
-    driver = types.SimpleNamespace(here=w, env={"HOME": "/h"}, name="box", ssh_host=lambda _: "box")
-    keys = keys or BoxKeys()
-
-    @contextlib.contextmanager
-    def held(resource):
-        w.effects.append(("hold", resource))
-        yield
-        w.effects.append(("release", resource))
-    with mock.patch.object(pr, "Store", lambda env: mock.Mock(mirror_dir=lambda: MIRROR)), \
-            mock.patch.object(pr, "Lock", lambda *a: mock.Mock(held=held)), \
-            mock.patch.object(pr.secrets, "Secrets", lambda *a: keys), \
-            mock.patch.object(sync, "in_vm", lambda env: False), \
-            contextlib.redirect_stderr(io.StringIO()):
-        pr.push_from_here(driver, "/src", "fork", "eng/x")
-
-
-def box_state(w):
-    return (set(w.refs), set(w.pushed))
+    def test_a_spec_that_is_none_of_them_is_refused_before_github_is_asked(self):
+        for spec, line in (("not-a-spec", "error: 'not-a-spec' is not a PR spec: <user>:<branch>, a pull request number, or wpe:<number>"),
+                           ("1234x", "error: '1234x' is not a pull request number (digits only)"),
+                           ("wpe:12x", "error: 'wpe:12x' is not a pull request number (digits only)"),
+                           (":b", "error: expected <user>:<branch>, got ':b'")):
+            rc, err = self.pr("ws", spec)
+            self.assertEqual((rc, said(err), [e for e in self.w.effects if "ls-remote" in e[1]]), (1, line, []), spec)
 
 
-class TestPrOpenFromABox(unittest.TestCase):
-    def test_the_push_leaves_the_branch_on_the_fork_and_no_temporary_ref(self):
-        w = box_world()
-        box_push(w)
-        self.assertEqual(box_state(w), (set(), {"%s:refs/heads/eng/x" % BOX_REF}))
+class TestPrRebase(PrTest):
+    def setUp(self):
+        super().setUp()
+        self.w = behind(self.tmp)
+
+    def test_it_fetches_from_the_mirror_when_the_workspace_has_it_and_from_origin_when_not(self):
+        for there in (True, False):
+            w = behind(self.tmp)
+            source = [w.mirror, "+refs/heads/*:refs/remotes/origin/*"] if there else ["origin"]
+            w.mounted = w.mounted if there else set()
+            rc, err = self.pr("rebase", "ws", w=w)
+            self.assertEqual((rc, said(err), w.changed()), (0, "  abc1234 a message", [("fetch", "--prune", "--quiet", *source), ("rebase", "origin/main")]))
+            self.assertEqual(w.branches["eng/y"], NEW)
+
+    def test_a_failed_fetch_never_rebases(self):
+        self.w.fails["fetch"] = "network unreachable"
+        rc, err = self.pr("rebase", "ws")
+        self.assertEqual((rc, said(err), self.w.changed(), self.w.branches["eng/y"]),
+                         (1, "  in the workspace:  git status; git rebase --continue   (or --abort)", [], OLD))
+        self.assertIn("warning: the rebase stopped -- almost always a conflict, and the sequencer holds where.", err.splitlines())
+
+    def test_a_conflict_is_shown_before_the_remedy(self):
+        self.w.fails["rebase"] = "CONFLICT (content): Merge conflict in a.cpp"
+        rc, err = self.pr("rebase", "ws")
+        lines = err.splitlines()
+        self.assertEqual((rc, self.w.branches["eng/y"]), (1, OLD))
+        self.assertLess(lines.index("CONFLICT (content): Merge conflict in a.cpp"), lines.index("  in the workspace:  git status; git rebase --continue   (or --abort)"))
+
+
+class TestPrOpen(PrTest):
+    def test_the_branch_is_pushed_as_a_persons_own_run_then_this_process_becomes_gh_pr_create(self):
+        w = on_branch(self.tmp)
+        rc, err = self.pr("open", "ws", "--draft", w=w)
+        self.assertEqual((rc, w.changed()), (0, [("push", "fork", "eng/x"), ("config", "branch.eng/x.remote", "fork"),
+                                                 ("config", "branch.eng/x.merge", "refs/heads/eng/x")]))
+        self.assertEqual(w.gh(), [["gh", "pr", "create", "--repo", "WebKit/WebKit", "--head", "me:eng/x", "--fill", "--draft"]])
+        self.assertIn([PERSON, "git", "-C", SRC, "push", "fork", "eng/x"],
+                      [list(e[1][e[1].index(PERSON):]) for e in w.effects if e[0] == "run" and PERSON in e[1]])
+
+    def test_the_project_is_the_one_the_branch_tracks_whether_upstream_or_its_fork(self):
+        for tracks, fork, base in (("origin", "fork", "WebKit/WebKit"), ("fork", "fork", "WebKit/WebKit"),
+                                   ("wpe", "forkwpe", "WebPlatformForEmbedded/WPEWebKit"), ("forkwpe", "forkwpe", "WebPlatformForEmbedded/WPEWebKit")):
+            w = on_branch(self.tmp, tracks=tracks)
+            rc, err = self.pr("open", "ws", w=w)
+            self.assertEqual((rc, w.changed()[0], w.gh()[0][4:7]), (0, ("push", fork, "eng/x"), [base, "--head", "me:eng/x"]), tracks)
+
+    def test_what_cannot_be_opened_is_refused_by_name_before_any_push(self):
+        main, detached, dirty, loose = (on_branch(self.tmp) for _ in range(4))
+        main.head, detached.head, dirty.dirty = "main", None, 1
+        del loose.config["branch.eng/x.remote"]
+        for w, line in ((main, "error: 'wk pr open' cannot open 'main' as a pull request -- create a branch first"),
+                        (detached, "error: 'wk pr open' needs a branch checked out, not a detached HEAD"),
+                        (dirty, "error: the tree has uncommitted changes -- commit or stash them: git -C /src/WebKit status"),
+                        (loose, "error: 'eng/x' has no upstream, so 'wk pr open' cannot tell which project it belongs to -- "
+                                "track one first: git branch -u origin/main (WebKit) or wpe/main (WPEWebKit)")):
+            rc, err = self.pr("open", "ws", w=w)
+            self.assertEqual((rc, said(err), w.changed(), w.gh()), (1, line, [], []))
+
+    def test_a_peer_workstation_pushes_its_own_branch(self):
+        w = on_branch(self.tmp, "peer")
+        rc, err = self.pr("open", "ws", w=w)
+        self.assertEqual((rc, w.changed()[0], w.here_ran("push"), len(w.gh())), (0, ("push", "fork", "eng/x"), [], 1))
+
+    def test_a_dry_run_of_each_verb_prints_its_plan_and_changes_nothing(self):
+        w = on_branch(self.tmp)
+        rc, err = self.pr("open", "ws", "--dry-run", w=w)
+        self.assertEqual((rc, w.changed(), w.gh(), sorted(w.pushed)), (0, [], [], []))
+        self.assertEqual(err.splitlines()[-1], "would run: gh pr create --repo WebKit/WebKit --head me:eng/x --fill")
+        self.assertIn("would run in ws: git -C /src/WebKit push fork eng/x", err.splitlines())
+        w.github[URLS["origin"][:-4], "refs/pull/42/head"] = HEAD
+        for argv in (("ws", "42"), ("rebase", "ws")):
+            rc, err = self.pr(*argv, "--dry-run", w=w)
+            self.assertEqual((rc, w.changed(), w.branches), (0, [], {"main": MAIN, "eng/x": OLD}), argv)
+
+    def test_a_gh_whose_token_the_api_refuses_is_refused_naming_gh_auth_login(self):
+        w = on_branch(self.tmp)
+        w.dead_token()
+        rc, err = self.pr("open", "ws", w=w)
+        self.assertEqual((rc, w.changed(), w.gh()), (1, [], []))
+        self.assertIn("    gh-auth    gh cannot reach the GitHub API (not logged in, or the token expired): gh auth login", err.splitlines())
+
+
+class TestPrOpenFromABox(PrTest):
+    """A build box's branch is fetched over ssh into this machine's mirror and pushed from here: no key reaches a box."""
+
+    def setUp(self):
+        super().setUp()
+        self.w = on_branch(self.tmp, "remote")
+
+    def test_the_branch_lands_on_the_fork_and_no_temporary_ref_is_left(self):
+        rc, err = self.pr("open", "ws")
+        self.assertEqual((rc, self.w.box_state(), self.w.changed()[0][0], len(self.w.gh())),
+                         (0, ([], [(FORK_SSH, "refs/heads/eng/x")]), "config", 1))
+        self.assertEqual(self.w.here_ran("fetch")[0][-2:], ["box.example:" + BOX_SRC, "+refs/heads/eng/x:" + BOX_REF])
+
+    def test_the_first_push_makes_the_mirror_and_the_next_fetches_into_it(self):
+        self.pr("open", "ws")
+        made = [a[:4] for a in self.w.here_ran("init")] + [a[3:] for a in self.w.here_ran("gc.auto")]
+        self.assertEqual(made, [["git", "init", "--bare", "-q"], ["config", "gc.auto", "0"]])
+        self.pr("open", "ws")
+        self.assertEqual((self.w.here_ran("init"), len(self.w.here_ran("fetch"))), ([], 1))
 
     def test_the_temporary_ref_is_locked_from_its_fetch_until_its_delete(self):
         """`wk gc` keeps a ref whose lock is held, so it cannot delete one between this fetch and this push."""
-        w = box_world()
-        box_push(w)
-        locks = [i for i, e in enumerate(w.effects) if e == ("hold", pr.push_lock(BOX_REF)) or e == ("release", pr.push_lock(BOX_REF))]
-        work = [i for i, e in enumerate(w.effects) if e[0] == "run"]
-        self.assertEqual(2, len(locks))
-        self.assertTrue(locks[0] < min(work) and max(work) < locks[1], w.effects)
+        self.pr("open", "ws")
+        lock = [i for i, e in enumerate(self.w.effects) if e[0] in ("symlink", "remove") and "push-ref-fakebox%eng%x@" in e[1]]
+        work = [i for i, e in enumerate(self.w.effects) if e[0] == "act" and ("fetch" in e[1] or "update-ref" in e[1])]
+        self.assertEqual((len(lock), lock[0] < work[0], work[-1] < lock[-1]), (2, True, True), self.w.effects)
 
-    def test_the_push_uses_the_forks_private_key_and_no_agent(self):
-        w = box_world()
-        box_push(w)
-        (argv,) = [e[1] for e in w.effects if e[0] == "run" and "push" in e[1]]
-        ssh = next(a for a in argv if a.startswith("core.sshCommand=")).split("=", 1)[1]
-        self.assertIn("-i /s/push-keys/build_key_fork", ssh)
-        self.assertIn("IdentityAgent=none", ssh)
-        self.assertNotIn(".pub", ssh)
-        self.assertIn("git@github.com:alice/WebKit.git", argv)
+    def test_the_push_uses_the_forks_deploy_key_and_no_agent(self):
+        self.pr("open", "ws")
+        (argv,) = self.w.here_ran("push")
+        ssh = shlex.split(next(a for a in argv if a.startswith("core.sshCommand=")).split("=", 1)[1])
+        self.assertEqual((ssh[ssh.index("-i") + 1], "IdentityAgent=none" in ssh, argv[-2:]),
+                         (self.w.key, True, [FORK_SSH, BOX_REF + ":refs/heads/eng/x"]))
 
-    def test_a_machine_with_no_key_refuses_naming_the_remedy_before_any_effect(self):
-        w = box_world()
-        w.files.clear()
-        with self.assertRaises(act.Refused), mock.patch.object(pr, "die", side_effect=act.Refused(1)) as die:
-            box_push(w)
-        self.assertIn("wk key deploy", die.call_args[0][0])
-        self.assertEqual((set(), set()), box_state(w))
+    def test_a_machine_with_no_key_refuses_naming_wk_key_deploy_before_any_effect(self):
+        del self.w.files[self.w.key]
+        rc, err = self.pr("open", "ws")
+        self.assertEqual((rc, said(err), self.w.here_ran("git"), self.w.box_state()),
+                         (1, "error: 'wk pr open' pushes 'eng/x' from here with the deploy key 'fork', and this machine holds none.", [], ([], [])))
+        self.assertEqual(err.splitlines()[-1], "    wk key deploy")
 
+    def test_a_fetch_that_fails_is_refused_naming_the_branch_and_nothing_is_pushed(self):
+        self.w.fails["mirror"] = "box.example: connection refused"
+        rc, err = self.pr("open", "ws")
+        self.assertEqual((rc, said(err), self.w.box_state()),
+                         (1, "error: could not fetch refs/heads/eng/x from box.example:%s into the mirror" % BOX_SRC, ([], [])))
 
-class TestPrDryRunEqualsWetRun(unittest.TestCase):
-    def test_a_dry_open_pushes_nothing_and_prints_the_pull_request(self):
-        with mock.patch("os.execvp") as execvp, \
-                mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(io.StringIO()) as err:
-            w = GitWorld()
-            with self.assertRaises(SystemExit):
-                open_once(RecordingDriver(w))
-        execvp.assert_not_called()
-        self.assertEqual(set(), w.pushed)
-        self.assertIn("would run in ws: git -C /src/WebKit push fork eng/x", err.getvalue())
-        self.assertIn("would run: gh pr create --repo WebKit/WebKit --head alice:eng/x --fill", err.getvalue())
-
-    def test_every_form_declares_its_dry_run(self):
-        for args in (["some-workspace", "42"], ["rebase", "some-workspace"], ["open", "some-workspace"]):
-            self.assertTrue(decl.parse("pr", CMD_PR_MODULE.COMMAND, args)[0].dryrun, args)
-
-
-class TestPrParseSpec(unittest.TestCase):
-    def test_the_three_spellings(self):
-        for spec, want in (("alice:eng/frame-fix", ["user", "alice", "eng/frame-fix", "", ""]),
-                           ("1234", ["pull", "", "", "origin", "1234"]),
-                           ("wpe:5678", ["pull", "", "", "wpe", "5678"]),
-                           ("wpe:somebranch", ["user", "wpe", "somebranch", "", ""])):
-            got = pr.parse_spec(spec)
-            self.assertEqual([got[k] for k in ("kind", "user", "branch", "remote", "n")], want, spec)
-
-    def test_a_bad_spec_is_refused(self):
-        for spec, why in (("not-a-spec", "not a PR spec"), ("1234x", "not a pull request number"),
-                          ("wpe:12x", "not a pull request number"), (":b", "expected <user>:<branch>")):
-            with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-                pr.parse_spec(spec)
-            self.assertIn(why, err.getvalue(), spec)
-
-
-def scratch_store(tmp):
-    return Store({"WK_STORE": str(tmp / "store"), "WK_LOCK_DIR": str(tmp / "locks"),
-                  "XDG_STATE_HOME": str(tmp / "state"), "WK_IN_VM": "", "HOME": str(tmp)})
-
-
-class ScratchTest(fakes.FlowTest):
-    def setUp(self):
-        super().setUp()
-        self.store = scratch_store(self.tmp)
-
-
-class TestMirrorFetch(ScratchTest):
-    def setUp(self):
-        super().setUp()
-        self.here = Local()
-
-    def fetch(self, fn, *args):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            fn(self.here, self.store, Lock(self.store, self.here, Clock()), *args)
-        return err.getvalue()
-
-    def mirror_rev(self, ref):
-        return _git("rev-parse", ref, cwd=self.store.mirror_dir()).stdout.strip()
-
-    def test_a_fork_branch_lands_under_pr_and_the_second_fetch_is_a_no_op(self):
-        fork = self.tmp / "fork"
-        sha = _make_repo(fork, "eng-test")
-        err = self.fetch(sync.fetch_into_mirror, str(fork), "refs/heads/eng-test", "refs/remotes/pr/alice/WebKit/eng-test")
-        self.assertIn("creating bare mirror", err)
-        self.assertEqual(self.mirror_rev("refs/remotes/pr/alice/WebKit/eng-test"), sha)
-        self.assertEqual(_git("config", "gc.auto", cwd=self.store.mirror_dir()).stdout.strip(), "0")
-        before = _git("count-objects", "-v", cwd=self.store.mirror_dir()).stdout
-        self.assertNotIn("creating bare mirror",
-                         self.fetch(sync.fetch_into_mirror, str(fork), "refs/heads/eng-test", "refs/remotes/pr/alice/WebKit/eng-test"))
-        self.assertEqual(_git("count-objects", "-v", cwd=self.store.mirror_dir()).stdout, before)
-
-    def test_a_pull_request_lands_as_refs_pull_n_head(self):
-        origin = self.tmp / "origin"
-        sha = _make_repo(origin, "main")
-        _git("update-ref", "refs/pull/7/head", sha, cwd=origin)
-        self.fetch(sync.fetch_pull_into_mirror, "origin", "7", (("origin", str(origin)),))
-        self.assertEqual(self.mirror_rev("refs/remotes/pr/" + pr.pull_refname("origin", "7")), sha)
-
-    def test_an_unknown_remote_is_refused_by_name(self):
-        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-            sync.fetch_pull_into_mirror(self.here, self.store, None, "nosuchremote", "1")
-        self.assertIn("no such upstream remote", err.getvalue())
-
-    def test_a_failed_fetch_is_a_refusal_naming_the_ref(self):
-        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-            sync.fetch_into_mirror(self.here, self.store, Lock(self.store, self.here, Clock()),
-                            str(self.tmp / "nowhere"), "refs/heads/x", "refs/remotes/pr/x")
-        self.assertIn("could not fetch refs/heads/x", err.getvalue())
-
-
-class TestMirrorFetchIsARecorderUnderADryRun(ScratchTest):
-    def setUp(self):
-        super().setUp()
-        self.here = Fake("here")
-        p = mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"})
-        p.start()
-        self.addCleanup(p.stop)
-
-    def test_fetch_into_mirror_runs_no_git_under_a_dry_run(self):
-        with contextlib.redirect_stderr(io.StringIO()):
-            sync.fetch_into_mirror(self.here, self.store, Lock(self.store, self.here, Clock()),
-                            "https://example/x.git", "refs/heads/b", "refs/remotes/pr/b")
-        self.assertEqual([e for e in self.here.effects if e[0] == "run"], [])
-
-    def test_resolved_or_planned_answers_from_the_mirror_already_there(self):
-        mirror = self.store.mirror_dir()
-        self.here.dirs.add(mirror)
-        sha = "c" * 40
-        self.here.answer(["git", "-C", mirror, "rev-parse", "--verify", "--quiet", "refs/x^{commit}"], out=sha + "\n")
-        called = []
-        got = pr.resolved_or_planned(self.here, mirror, "refs/x", "x", lambda: called.append(1))
-        self.assertEqual((got, called), (sha, []))
-
-    def test_resolved_or_planned_plans_a_fetch_it_has_not_made_yet(self):
-        mirror = self.store.mirror_dir()
-        self.here.dirs.add(mirror)
-        self.here.answer(["git", "-C", mirror, "rev-parse", "--verify", "--quiet"], rc=1)
-        called = []
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            got = pr.resolved_or_planned(self.here, mirror, "refs/x", "x from y", lambda: called.append(1))
-        self.assertEqual((got, called), (pr.PLANNED_COMMIT, []))
-        self.assertIn("would fetch x from y into the mirror", err.getvalue())
-
-
-class TestPrOpenTarget(ScratchTest):
-    def _checkout(self, project, remote, fork_remote, branch, tracks_fork):
-        upstream = self.tmp / f"{project}-{rand_suffix()}" / project
-        _make_repo(upstream, branch if tracks_fork else "main")
-        work = self.tmp / f"work-{rand_suffix()}"
-        work.mkdir()
-        _git("init", "-q", "-b", "main", cwd=work)
-        source = fork_remote if tracks_fork else remote
-        _git("remote", "add", source, str(upstream), cwd=work)
-        _git("fetch", "-q", source, cwd=work)
-        _git("checkout", "-q", "-b", branch, f"{source}/{branch if tracks_fork else 'main'}", cwd=work)
-        url = f"https://github.com/testuser/{project}.git"
-        _git("remote", "set-url" if tracks_fork else "add", fork_remote, url, cwd=work)
-        return work
-
-    def test_which_project_a_branch_opens_against(self):
-        for project, remote, fork, base in (("WebKit", "origin", "fork", "WebKit/WebKit"),
-                                            ("WPEWebKit", "wpe", "forkwpe", "WebPlatformForEmbedded/WPEWebKit")):
-            for tracks_fork in (False, True):
-                with self.subTest(project=project, tracks_fork=tracks_fork):
-                    work = self._checkout(project, remote, fork, "eng/x", tracks_fork)
-                    self.assertEqual(pr.pr_open_target(work), (base, "testuser:eng/x", fork, "eng/x"))
-
-    def test_what_cannot_be_opened_is_refused_by_name(self):
-        main = self.tmp / "on-main"
-        main.mkdir()
-        _git("init", "-q", "-b", "main", cwd=main)
-        detached = self.tmp / "detached"
-        _make_repo(detached, "main")
-        _git("checkout", "-q", "--detach", "HEAD", cwd=detached)
-        dirty = self._checkout("WebKit", "origin", "fork", "eng/dirty", False)
-        (dirty / "untracked.txt").write_text("scratch\n")
-        loose = self.tmp / "no-upstream"
-        _make_repo(loose, "main")
-        _git("checkout", "-q", "-b", "eng/untracked", cwd=loose)
-        for work, why in ((main, "cannot open 'main'"), (detached, "detached HEAD"),
-                          (dirty, "uncommitted changes"), (loose, "no upstream")):
-            with self.assertRaises(act.Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-                pr.pr_open_target(work)
-            self.assertIn(why, err.getvalue())
-
-
-def rebase_place(mirror, responses):
-    """Workspace `myws` whose commands answer `responses` in turn."""
-    fake, queue = Fake(), list(responses)
-    fake.react(["exec", "myws"], lambda a, f: queue.pop(0))
-    return WsDriver("ws", str(REPO), {}, fake, kind=places.Driver.kind, mirror=mirror)
-
-
-def calls(driver):
-    return [list(e[1][2:]) for e in driver.machine.effects if e[0] == "run" and e[1][:2] == ("exec", "myws")]
-
-
-class TestPrRebase(unittest.TestCase):
-    def _run(self, mirror, responses):
-        driver = rebase_place(mirror, responses)
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            rc = pr.pr_rebase(driver, "myws")
-        return rc, calls(driver), err.getvalue()
-
-    def test_it_fetches_from_the_mirror_only_when_it_is_there(self):
-        ok = [Result(0), Result(0), Result(0, "abc1234 c\n")]   # fetch, rebase, log
-        for mirror, there, source in (("/m.git", [Result(0)], "/m.git"), ("", [], "origin"), ("/m.git", [Result(1)], "origin")):
-            rc, calls, _ = self._run(mirror, there + ok)
-            self.assertEqual(rc, 0)
-            self.assertIn(source, calls[len(there)])
-            self.assertEqual(calls[len(there) + 1], ["git", "-C", "/src/WebKit", "rebase", "origin/main"])
-
-    def test_a_failed_fetch_never_rebases(self):
-        rc, calls, err = self._run("", [Result(1, "", "network unreachable\n")])
-        self.assertEqual(rc, 1)
-        self.assertEqual(len(calls), 1, "the rebase must not run over an unfetched checkout")
-        self.assertIn("the rebase stopped", err)
-
-    def test_a_rebase_conflict_is_reported_not_swallowed(self):
-        rc, calls, err = self._run("", [
-            Result(0),                       # fetch ok
-            Result(1, "", "CONFLICT\n"),      # rebase stops
-        ])
-        self.assertEqual(rc, 1)
-        self.assertEqual(len(calls), 2, "nothing past the failed rebase runs")
-        self.assertIn("CONFLICT\n", err)
-        self.assertLess(err.index("CONFLICT"), err.index("the rebase stopped"))
-        self.assertIn("git rebase --continue", err)
-
-
-class TestPrOpen(unittest.TestCase):
-    """It pushes from where the key is, then ends as gh: the process becomes `gh pr create`, so a PR gh did not create
-    is not a success."""
-
-    def _open(self, peer=None):
-        driver = rebase_place("", [Result(0)] * 4)   # the push, the fork's refspec, the two tracking writes
-        if peer is not None:
-            driver.kind, driver.is_here, driver.peer = "remote", lambda: False, peer
-        with mock.patch.object(pr, "pr_open_target", return_value=("WebKit/WebKit", "me:b", "fork", "b")), \
-                mock.patch.object(pr, "push_from_here", return_value=Result(0)) as from_here, \
-                contextlib.redirect_stderr(io.StringIO()):
-            pr.pr_open(driver, "myws", draft=False, web=False)
-        return driver, from_here.called, calls(driver)
-
-    def test_a_build_box_pushes_from_here_and_a_peer_its_own(self):
-        track = [["git", "-C", "/src/WebKit", "config", "--get-all", "remote.fork.fetch"]] + pr.track("/src/WebKit", "fork", "b", "refs/heads/b")
-        self.assertEqual(self._open(peer=False)[1:], (True, track))
-        self.assertEqual(self._open(peer=True)[1:], (False, [["git", "-C", "/src/WebKit", "push", "fork", "b"]] + track))
-
-
-class TestPrOpenRefusals(unittest.TestCase):
-    def test_refuses_when_the_stored_token_is_dead(self):
-        """`wk pr open` needs gh-auth, which a gh whose token the API refuses does not meet."""
-        table = decl.parse("pr", CMD_PR_MODULE.COMMAND, ["open", "some-workspace"])[0]
-        with stub_path({
-            "gh": '#!/bin/sh\ncase "$1 $2" in\n'
-                  '"auth status") exit 0 ;;\n'
-                  '"api user") echo \'{"message":"Requires authentication"}\'; exit 1 ;;\n'
-                  'esac\nexit 0\n',
-        }) as binp, mock.patch.dict(os.environ, {"PATH": f"{binp}:{os.environ['PATH']}"}), \
-                contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-            dispatch.check_needs("pr", table)
-        self.assertIn("gh auth login", err.getvalue())
+    def test_a_dry_run_fetches_and_pushes_nothing(self):
+        rc, err = self.pr("open", "ws", "--dry-run")
+        self.assertEqual((rc, self.w.box_state(), [e for e in self.w.effects if e[0] == "run" and "git" in e[1]]), (0, ([], []), []))
+        self.assertIn("would run: git -C %s fetch --quiet box.example:%s +refs/heads/eng/x:%s" % (self.w.here_ran("fetch")[0][2], BOX_SRC, BOX_REF),
+                      err.splitlines())
 
 
 class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
@@ -609,3 +482,40 @@ class TestGitWebkitPrThroughTheInjector(unittest.TestCase):
         self.assertIn(b"200 OK", got)
         self.assertIn(b"GET /user HTTP/1.1", head)
         self.assertIn(b"Accept: application/vnd.github.v3+json", head)
+
+
+class TestTheMirrorFetchesOfABenchHead(FlowTest):
+    """Not reachable from `wk pr`: `wk bench ab <spec>` fetches a pull request's head into the mirror
+    (lib/wk/bench/change.py), and its dry run plans that fetch; these move to that command's conversion."""
+
+    def setUp(self):
+        super().setUp()
+        self.store = Store({"WK_STORE": str(self.tmp / "store"), "WK_LOCK_DIR": str(self.tmp / "locks"),
+                            "XDG_STATE_HOME": str(self.tmp / "state"), "WK_IN_VM": "", "HOME": str(self.tmp)})
+
+    def test_a_pull_request_lands_as_refs_remotes_pr_remote_n(self):
+        origin = self.tmp / "origin"
+        origin.mkdir()
+        git = lambda *a: subprocess.run(["git", "-C", str(origin)] + list(a), capture_output=True, text=True, check=True).stdout.strip()  # noqa: E731
+        git("init", "-q", "-b", "main")
+        git("-c", "user.email=t@example.com", "-c", "user.name=Test", "commit", "-q", "--allow-empty", "-m", "init")
+        sha = git("rev-parse", "HEAD")
+        git("update-ref", "refs/pull/7/head", sha)
+        with contextlib.redirect_stderr(io.StringIO()):
+            sync.fetch_pull_into_mirror(Local(), self.store, Lock(self.store, Local(), Clock()), "origin", "7", (("origin", str(origin)),))
+        got = subprocess.run(["git", "-C", self.store.mirror_dir(), "rev-parse", "refs/remotes/pr/origin/7"], capture_output=True, text=True)
+        self.assertEqual(got.stdout.strip(), sha)
+
+    def test_an_unknown_remote_is_refused_by_name(self):
+        """No spec parses to a remote outside origin and wpe, so no command line reaches this refusal."""
+        err = self.refused(lambda: sync.fetch_pull_into_mirror(Fake(), self.store, None, "nosuchremote", "1"))
+        self.assertIn("no such upstream remote", err)
+
+    def test_a_dry_run_reads_a_head_the_mirror_has_and_plans_the_fetch_of_one_it_lacks(self):
+        here, mirror, fetched = Fake("here"), self.store.mirror_dir(), []
+        here.dirs.add(mirror)
+        here.answer(["git", "-C", mirror, "rev-parse", "--verify", "--quiet", "refs/x^{commit}"], out="c" * 40 + "\n")
+        here.answer(["git", "-C", mirror, "rev-parse", "--verify", "--quiet"], rc=1)
+        self.dry_run()
+        got, err = self.stderr(lambda: [pr.resolved_or_planned(here, mirror, ref, "x from y", lambda: fetched.append(1)) for ref in ("refs/x", "refs/y")])
+        self.assertEqual((got, fetched, err), (["c" * 40, pr.PLANNED_COMMIT], [], "would fetch x from y into the mirror\n"))

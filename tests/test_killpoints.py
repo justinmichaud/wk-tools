@@ -23,7 +23,7 @@ from tests import test_rm_final_state as rmfs, test_repo_workspace as repo, test
 from tests import test_wk_test as wktest, test_wk_workspace as ws
 from tests import test_wk_places
 from tests.support import REPO
-from wk import dispatch, guest as wkguest, places, pr  # noqa: E402 -- tests.support put lib on the path
+from wk import dispatch, guest as wkguest, places  # noqa: E402 -- tests.support put lib on the path
 from wk.act import Refused  # noqa: E402
 from wk.bench import record as brecord  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -228,17 +228,6 @@ def gc_run(case, w):
     quiet(w.gc().run, ("--purge-builds",))
 
 
-def pr_mutations(w):
-    return w.driver.mutations
-
-
-def pr_open(case, w):
-    try:
-        quiet(prw.open_once, w.driver)
-    except SystemExit:   # a dry open prints the pull request it would open and ends there
-        pass
-
-
 def handover_world(case):
     w = test_wk_places.RemoteTest()
     w.setUp()
@@ -353,12 +342,12 @@ ROWS = {
     "machine setup board": Row(machine.MachineTest, lambda c: c.world(conf=machine.BOARD), lambda c, w: quiet(w.machines().setup, "box"),
                                machine.World.state, machine_mutations),
     "gc": Row(gc.GcTest, lambda c: gc.rubble_world(c.tmp), gc_run, gc.World.state, gc_mutations),
-    "pr checkout": Row(unittest.TestCase, lambda c: prw.checkout_world(),
-                       lambda c, w: quiet(pr.checkout, w.driver, w, "ws", "alice:eng/x"), prw.checkout_state, pr_mutations),
-    "pr rebase": Row(unittest.TestCase, lambda c: prw.rebase_world(), lambda c, w: quiet(pr.pr_rebase, w.driver, "ws"),
-                     lambda w: dict(w.local), pr_mutations),
-    "pr open": Row(unittest.TestCase, lambda c: prw.GitWorld(), pr_open, lambda w: (set(w.pushed), any(e[0] == "exec" for e in w.effects)), pr_mutations),
-    "pr open from a box": Row(unittest.TestCase, lambda c: prw.box_world(), lambda c, w: prw.box_push(w), prw.box_state),
+    "pr checkout": Row(prw.PrTest, lambda c: prw.fork_branch(c.tmp), lambda c, w: prw.run(c, w, "ws", "alice:eng/x"),
+                       prw.World.checkout_state, prw.plan),
+    "pr rebase": Row(prw.PrTest, lambda c: prw.behind(c.tmp), lambda c, w: prw.run(c, w, "rebase", "ws"), lambda w: dict(w.branches), prw.plan),
+    "pr open": Row(prw.PrTest, lambda c: prw.on_branch(c.tmp), lambda c, w: prw.run(c, w, "open", "ws"), prw.World.opened, prw.plan),
+    "pr open from a box": Row(prw.PrTest, lambda c: prw.on_branch(c.tmp, "remote"), lambda c, w: prw.run(c, w, "open", "ws"),
+                              prw.World.box_state, prw.plan),
     "quiesce on": Row(quiesce.QuiesceTest, lambda c: quiesce.World(bench=True), lambda c, w: c.quiet_run(w.q().on), lambda w: w.state()),
     "quiesce off": Row(quiesce.QuiesceTest, lambda c: c.quiesced(quiesce.World, bench=True), lambda c, w: c.quiet_run(w.q().off),
                        lambda w: w.state()),
