@@ -418,13 +418,6 @@ class TestContainerWrite(DriversTest):
         flags = argv[argv.index("--additional-flags") + 1].split()
         return list(zip(flags[0::2], flags[1::2]))
 
-    def test_create_refuses_without_a_base_or_over_a_container_and_makes_nothing(self):
-        err = self.refused(lambda: self.t.create("new", "main-9"))
-        self.assertIn("snapshot main-9 not found; run 'wk sync' first", err)
-        err = self.refused(lambda: self.t.create("a", self.base))
-        self.assertIn("workspace 'a' already exists", err)
-        self.assertEqual([e for e in self.fake.effects if e[0] != "run"], [])
-
     def test_the_mirrors_parent_under_the_container_home_is_made_as_the_user(self):
         env = dict(self.env, WK_STORE="/home/%s/.local/share/wk" % self.t.user())
         t = places.Registry(REPO, env=env, machine=self.fake).load("container")
@@ -495,9 +488,7 @@ class TestVmWrite(VmTest):
         self.stderr_of(lambda: self.reg.load("vm").create("new"))
         self.assertEqual(self.tart_calls()[1][3:], ("--cpu", "4", "--memory", "8192", "--random-mac", "--display", "1920x1080", "--display-refit"))
 
-    def test_create_refuses_an_existing_guest_and_a_base_that_did_not_build(self):
-        err = self.refused(lambda: self.t.create("mac"))
-        self.assertIn("workspace 'mac' already exists", err)
+    def test_create_refuses_a_base_that_did_not_build(self):
         self.base_ensure.side_effect = Refused(3)
         with self.assertRaises(Refused) as cm:
             self.t.create("new")

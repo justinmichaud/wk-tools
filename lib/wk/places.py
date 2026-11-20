@@ -1026,10 +1026,6 @@ class Container(Driver):
 
     def create(self, ws, base=None, arch="native", repo=None):
         ws_dir, repo = self.store.ws_dir(ws), repo or repos.default()
-        if repo.snapshot and not self.machine.isdir(self.store.snapshot_tree(base)):
-            act.die("snapshot %s not found; run 'wk sync' first" % base)
-        if self.exists(ws):
-            act.die("workspace '%s' already exists" % ws)
         image = self.sdk_image() or arch_image(arch) or self.layered("%s:%s" % (project.get("SDK_IMAGE"), self.sdk_tag()), SDK_LAYER, "wk-sdk")
         for d in (ws_dir, "home", "ccache") + (("changes", "overlay-work", "build") if repo.snapshot else (repo.checkout,)):
             self.machine.mkdir(d if d == ws_dir else os.path.join(ws_dir, d))
@@ -1433,8 +1429,6 @@ class Vm(Driver):
 
     def create(self, ws, base=None, arch="native", repo=None):
         v, ws_dir = self.vm(ws), self.store.ws_dir(ws)
-        if self.vm_state(ws) != "absent":
-            act.die("workspace '%s' already exists" % ws)
         from wk.sysimage import guestbase
         base = guestbase.Base(self)
         with base.host.lock().held("guest-base"):
