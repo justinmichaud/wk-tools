@@ -264,7 +264,7 @@ def sdk_row(container):
     if newest == tag:
         return ok("SDK image %s, pulled %s, is upstream's newest" % (tag, local.get("created") or "?"))
     if newest:
-        return miss("SDK image %s is behind upstream's %s" % (tag, newest), "WK_SDK_IMAGE=%s:%s wk new ..." % (project.get("SDK_IMAGE"), newest))
+        return miss("SDK image %s is behind upstream's %s" % (tag, newest), "a newer SDK_PIN (lib/wk/project.json): the fork's wk branch on upstream's %s" % newest)
     return unk("SDK image %s: the registry %s" % (tag, "did not answer within %ss" % FLEET_SECONDS if tags is None else "lists no tag like it"),
                "wk doctor, again")
 

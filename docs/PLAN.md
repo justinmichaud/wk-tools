@@ -1404,6 +1404,8 @@ Decisions are asked as questions, and their answers are recorded under "Decision
   subtest's relative sd, or the suite row's run-to-run sd, and is a noisier A named too?
 - The fork's `swift-ubuntu2604` branch is not proposed upstream; the tree's layer (`container/sdk/Containerfile`) stands in until an
   upstream image carries it. Open the pull request on Igalia/webkit-container-sdk?
+- Upstream published SDK image 2.55-v4 (read 2026-11-20; it still ships Swift 6.3.2 built for 24.04, so the layer is still
+  needed). Rebase the fork's `wk` branch onto it and move `SDK_PIN`?
 - The cut by deduplication alone reaches about 1% of a row (measured 2026-11-20: places -14, workspace -25, secrets -17, guest -66,
   `cmd/*` -7 lines from four inventories); the rest of each budget is scope or one of these, each a visible change:
   - Every workspace image under the tree's layer (the armhf image, a `WK_SDK_IMAGE`, the buildroot and yocto host images), so
