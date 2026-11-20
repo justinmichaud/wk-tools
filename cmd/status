@@ -69,11 +69,11 @@ def main(args, inv):
             return show_log(args, inv.reg)
         if args.value("--holds") is not None:
             return holders(inv.reg, args.value("--holds"))
-        name = store.ws_name() or None
-        waited = None
+        name, waited = store.ws_name() or None, None
         if args.flag("--wait"):
             waited = wait(lambda: Walk(inv.root, name=name).worst_only(), int(args.value("--timeout") or 0), inv.clock, name, info, warn)
-        walk = Walk(inv.root, name=name)
+        # After a wait each look is a Registry of its own: a driver answers one invocation's questions once.
+        walk = Walk(inv.root, name=name, clock=inv.clock, reg=None if args.flag("--wait") else inv.reg)
         if args.flag("--records"):
             for r in walk.records(markers=False):
                 print(json.dumps(r, separators=(",", ":")))

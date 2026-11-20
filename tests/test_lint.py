@@ -1468,7 +1468,7 @@ def ssh_config_forwards_no_agent():
 LIB_NAMED = re.compile(r"^\s*(?:from wk\b|import wk\b)|patch(?:\.object)?\(\s*[\"']?wk\.", re.M)
 
 
-SHAPED = ["tests/test_%s.py" % m for m in ("enter", "ls_halves", "rr", "run_until_crash", "scp", "wk_gui", "wk_run", "wk_test")]   # the modules step 7.13 has landed; each one that lands is added
+SHAPED = ["tests/test_%s.py" % m for m in ("enter", "ls_halves", "places_flows", "rr", "run_until_crash", "scp", "wk_gui", "wk_run", "wk_test")]   # the modules step 7.13 has landed; each one that lands is added
 
 
 @rule(owed_because="most unit modules import or patch a lib module today; lands module by module (PLAN step 7.13)")
