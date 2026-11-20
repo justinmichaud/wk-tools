@@ -1,70 +1,69 @@
-"""lib/wk/guest.py against a fake host: start and stop, the guests' daemons under launchd, the forwards, the
-credentials and the injector's CA a guest is given, its clock set from the host, and a build machine's provisioning hash."""
+"""A macOS guest's life on a Mac: `wk start` booting and converging it, `wk stop`, the host's daemons for guests and the
+credentials they serve, typed into a world of guests whose agent answers. At the bottom: the fixtures the kill-point row
+and the driver conformance share, what no command line reaches on the world's clock, the live tier, and real bytes."""
 import contextlib
 import io
 import json
 import os
 import plistlib
+import re
 import shlex
 import shutil
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import Fake, FakeClock
+from tests.fakes import Fake, FakeClock, Result, bench_lib
 from tests.support import REPO, WkTest, guest_step, live_selected, owed, stub_path
+from tests.test_doctor_wall import HEALTHY, Walled, report
+from tests.test_places_flows import GuestFlow, Guests
 from tests.test_shell_path import BUILD_DIR, _run_install_fn, compile_commands_dir
 from tests.test_wk_places import DriverConformance
 from tests.test_wk_secrets import SECRETFILE, SecretsTest, World, quiet
+from tests.test_wk_workspace import said
 
-sys.path.insert(0, str(REPO / "lib"))
-from wk import agents, daemons, doctor, guest, places, tools, wall  # noqa: E402
-from wk.act import Refused  # noqa: E402
-from wk.machine import Local, Result  # noqa: E402
-from wk.machine_cmd import deps  # noqa: E402
-from wk.store import GUEST_BROKER_SOCKET, Store  # noqa: E402
-
-
-TART = "/fake/tart"
-IP = "192.168.2.5"
 ADDR = "192.168.2.1"
-INSTALL_AGENTS = guest.Guest.install_agents   # GuestTest records the step; TestTheSteps runs it
-BASH_STEPS = [s[0] for s in guest.STEPS if s[0] in ("write_shell_rc", "write_lldbinit", "write_checkout", "install_agents",
-                                                    "write_claude_config", "settle_desktop", "report_desktop")]
-
-
 SERVES = {"com.wk.proxy": "WK_PROXY_TCP", "com.wk.push": "WK_PUSH_SOCKET", "com.wk.github-inject": "WK_INJECT_SOCK"}
+HELD = ("read-github-pat", "push-github-pat", "push-bugzilla-api-key")
 
 
-class GuestWorld(World):
-    """One host with one guest, `wk-demo`, in `state`; `bridge` is whether this host has its guest-bridge address yet;
-    launchd as the `loaded` labels and the `serving` sockets."""
+class Mac(Guests):
+    """Guests booted filtered, podman beside tart. The Softnet bridge has `bridge` once a guest runs; launchd keeps the
+    `loaded` labels and the `serving` sockets (setup's injector among them); the push service listens. The guest agent
+    answers each command (kept with its stdin in `asked`) from `guest_said` by prefix, its clock `skew` seconds behind
+    this host's; a forward's far socket exists once its ssh is spawned; a pid in `dying` is alive for one more look."""
 
-    def __init__(self, base):
-        super().__init__(base)
-        self.env.update({"WK_VM_STORE": base + "/vmstore", "WK_LOCK_DIR": base + "/locks", "PATH": os.environ.get("PATH", "")})
-        self.state, self.bridge, self.ssh_rc, self.bench, self.guest_sock = "running", True, 0, False, False
-        self.guest_cmds, self.loaded, self.serving, self.listened = [], set(), set(), []
-        self.react([TART, "list"], lambda a, f: Result(0, json.dumps([{"Name": "wk-demo", "State": f.state, "Source": "local"},
-                                                                      {"Name": "wk-base", "State": "stopped", "Source": "local"}])))
-        self.answer([TART, "ip"], out=IP + "\n")
-        self.answer([TART, "get"], out='{"CPU": 4, "Memory": 8192}')
-        self.answer([TART, "stop"])
-        self.react([TART, "exec"], self._guest)
-        self.react(["ifconfig"], lambda a, f: Result(0, "\tinet %s netmask 0xffffff00\n" % ADDR if f.bridge else "\tinet 10.0.0.2\n"))
+    def __init__(self, tmp, kinds=None):
+        super().__init__(tmp, kinds)
+        (self.tmp / "bin" / "podman").write_text("")
+        (self.tmp / "bin" / "podman").chmod(0o755)
+        del self.env["WK_VM_UNFILTERED"]
+        self.vmdir = self.env["WK_VM_STORE"] + "/vm"
+        self.loaded, self.serving, self.sockets, self.asked, self.dying = set(), {self.vmdir + "/github-inject.sock"}, set(), [], set()
+        self.bridge, self.bench, self.skew, self.listens, self.last_input, self.guest_said = ADDR, False, 0, True, "", {}
+        self.answer([self.tart, "get"], out='{"CPU": 4, "Memory": 8192}')
+        self.react(["ifconfig"], lambda a, f: Result(0, "\tinet 10.0.0.2 netmask 0xffffff00\n" + (
+            "\tinet %s netmask 0xffffff00\n" % f.bridge if [s for n, s in f.vms.items() if n != "wk-base" and s == "running"] else "")))
         self.answer(["test", "-x"])
-        self.answer(["hostname", "-s"], out="host\n")
         self.answer(["sh", "-c", 'printf %s "$HOME"'], out=self.env["HOME"])
+        self.react(["sh", "-c"], lambda a, f: World._sh(f, a, f))
+        self.react(["python3", SECRETFILE, "read"], lambda a, f: Result(0, f.files.get(a[3], "")))
         self.react(["python3", SECRETFILE, "present"], lambda a, f: Result(0 if f.files.get(a[3]) else 1))
-        self.react(["python3", "-c", daemons.SOCKET_ANSWERS], lambda a, f: Result(0 if a[-1] in f.serving else 1))
-        self.react(["/usr/bin/python3", "-c", guest.PUSH_LISTEN], lambda a, f: f.listened.append(a[-1]) or Result(0))
+        self.react(["python3", "-c"], lambda a, f: Result(0 if a[-1] in f.serving else 1))
+        self.react(["/usr/bin/python3", "-c"], lambda a, f: Result(0 if f.listens else 1))
+        self.react(["bash", "-c"], lambda a, f: bench_lib(tuple(a)))
         self.react(["launchctl", "print"], lambda a, f: Result(0 if a[-1].rsplit("/", 1)[1] in f.loaded else 113))
         self.react(["launchctl", "bootout"], lambda a, f: f.loaded.discard(a[-1].rsplit("/", 1)[1]) or Result(0))
         self.react(["launchctl", "bootstrap"], lambda a, f: f._launch(plistlib.loads(f.files[a[-1]].encode()), "RunAtLoad"))
         self.react(["launchctl", "kickstart"], lambda a, f: f._launch(f.agent(a[-1].rsplit("/", 1)[1]), "Label"))
+        self.react([self.tart, "exec"], self._guest)
+
+    def _path(self, rest):
+        return shlex.split(rest)[0]
 
     def agent(self, label):
         return plistlib.loads(self.files[self.env["HOME"] + "/Library/LaunchAgents/%s.plist" % label].encode())
@@ -75,14 +74,469 @@ class GuestWorld(World):
             self.serving.add(doc["EnvironmentVariables"].get(SERVES.get(doc["Label"])))
         return Result(0)
 
-    def _guest(self, argv, _):
+    def run(self, argv, input=None, timeout=None, stream=False):
+        self.last_input = input or ""
+        return super().run(argv, input=input, timeout=timeout, stream=stream)
+
+    def _guest(self, argv, f):
         cmd = argv[-1]
-        self.guest_cmds.append((cmd, self.last_input))
-        if cmd.startswith("test -f /etc/wk-image"):
-            return Result(0 if self.bench else 1)
-        if cmd.startswith("test -S"):
-            return Result(0 if self.guest_sock else 1)
-        return Result(self.ssh_rc)
+        self.asked.append((cmd, self.last_input))
+        if cmd == "date -u +%s":
+            return Result(0, "%d\n" % (time.time() - self.skew))
+        if cmd.startswith("test -S "):
+            return Result(0 if cmd.split()[-1] in self.sockets else 1)
+        said = [r for k, r in self.guest_said.items() if cmd.startswith(k) or k in self.last_input]
+        return said[0] if said else Result(0 if self.bench or not cmd.startswith("test -f /etc/wk-image") else 1)
+
+    def alive(self, pid):
+        if pid in self.dying:
+            self.dying.discard(pid)
+            self.pids.discard(pid)
+            return True
+        return super().alive(pid)
+
+    def spawn(self, argv, log):
+        pid = super().spawn(argv, log)
+        if pid and "-R" in argv:
+            self.sockets.add(argv[argv.index("-R") + 1].split(":")[0])
+        return pid
+
+    def held_by(self, resource, pid):
+        """`resource`'s lock, held by `pid`, which dies after one more look."""
+        self.dying.add(pid)
+        self.pids.add(pid)
+        self.files[self.env["WK_LOCK_DIR"] + "/%s@here.lock" % resource] = "pid=%d tok=beef at=2026-09-24T00:00:00Z cmd=wk start" % pid
+        self.links.add(self.env["WK_LOCK_DIR"] + "/%s@here.lock" % resource)
+
+    def did(self):
+        """What the start asked of tart, the guest, launchd and the push service, and what it wrote, in order: an act's run is
+        its act, and a read of the guest is named as one."""
+        out, last = [], None
+        for e in self.work():
+            if e[0] == "run" and last == ("act", e[1]):
+                continue
+            last = e
+            a = e[1] if e[0] in ("act", "run", "spawn") else ()
+            if e[0] in ("act", "run") and a[:2] == (self.tart, "exec"):
+                said = "write " + shlex.split(a[-1])[-1] if a[-1].startswith("sh -c 'set -e") else a[-1].split("\n")[0][:48]
+                out.append(("guest " if e[0] == "act" else "guest? ") + said)
+            elif e[0] == "act" and a[0] == "/usr/bin/python3":
+                out.append("push service: listen " + a[-1])
+            elif e[0] == "act" and a[0] == "launchctl":
+                out.append("launchctl %s %s" % (a[1], os.path.basename(a[-1])))
+            elif e[0] == "act":
+                out.append(self.rel(" ".join(a[:3] if a[0] != self.tart else a[1:])))
+            elif e[0] == "spawn":
+                out.append("boot " + a[-1] if a[0] == "env" else "ssh -R " + self.rel(a[a.index("-R") + 1]))
+            elif e[0] in ("write", "kill"):
+                out.append("%s %s" % (e[0], self.rel(e[1])))
+        return out
+
+    def pidfile(self, what):
+        return "%s/ws.%s-forward.pid" % (self.vmdir, what)
+
+
+class GuestStart(GuestFlow):
+    world_class = Mac
+
+    def setUp(self):
+        super().setUp()
+        self.w.make("ws")
+
+    def start(self, *argv, cmd="start"):
+        rc, _, err = self.typed(cmd, "ws", *argv)
+        return rc, err
+
+    def stopped(self, **env):
+        self.w.vms["wk-ws"] = "stopped"
+        self.w.env.update(env)
+        return self.start()
+
+    def booted(self):
+        return [e[1] for e in self.w.effects if e[0] == "spawn" and e[1][0] == "env"]
+
+    def asked(self, word):
+        return [c for c, _ in self.w.asked if word in c]
+
+    def launched(self, label):
+        return [d for d in self.w.did() if d.startswith("launchctl") and label in d]
+
+    def lines(self, err, start):
+        return [l for l in err.splitlines() if l.startswith(start)]
+
+
+STEPS = ["guest? test -f /etc/wk-image", "guest? write /Users/admin/.wk-workspace", "guest bash -s /Users/admin/wk-tools",
+         "guest sh -c 'cat > \"$HOME/.lldbinit\"'", "guest sh -c 'mkdir -p \"$HOME/.config/helix\" && cp -R \"",
+         "guest? date -u +%s", "guest env WK_ADDR=192.168.2.1 WK_PORT=3128 bash -s",
+         "guest sh -c 'umask 077 && mkdir -p \"$HOME/$1\" && cat >", "guest git config --global core.sshCommand /Users/admin",
+         "guest git config --global ssh.variant ssh", "guest sh -c 'rm -f \"$HOME/$1\"' sh .wk-agent-token clau",
+         "guest sh -c 'rm -f \"$HOME/$1\"' sh .wk-litellm-key lite", "guest env WK_SRC=/Users/admin/WebKit WK_MIRROR=/Volume",
+         "guest bash -lc 'export WK_AGENTS_CACHE=$HOME/.cache/wk", "guest bash -lc 'export WK_AGENTS_CACHE=$HOME/.cache/wk",
+         "guest bash -lc 'python3 /Users/admin/wk-tools/claude/w", "guest mkdir -p /Users/admin/.claude",
+         "guest ln -sfn /Users/admin/wk-tools/claude/settings.js",
+         "write /home/Library/LaunchAgents/com.wk.push.plist", "launchctl bootstrap com.wk.push.plist", "push service: listen ws",
+         "guest rm -f /Users/admin/.wk-push.sock", "ssh -R /Users/admin/.wk-push.sock:/vmstore/vm/ws.push.sock",
+         "write /vmstore/vm/ws.push-forward.pid", "guest? test -S /Users/admin/.wk-push.sock",
+         "guest rm -f /Users/admin/.wk-broker.sock", "ssh -R /Users/admin/.wk-broker.sock:/state/wk/broker.sock",
+         "write /vmstore/vm/ws.broker-forward.pid", "guest? test -S /Users/admin/.wk-broker.sock",
+         "guest bash -s", "guest? bash -s"]
+PROXY = ["chmod 0700 /home/.config/wk/claude-login", "write /home/Library/LaunchAgents/com.wk.proxy.plist",
+         "launchctl bootstrap com.wk.proxy.plist", "launchctl kickstart com.wk.proxy"]
+ALIAS = ["chmod 0700 /home/.ssh/config.d", "write /home/.ssh/config.d/wk"]
+
+
+class TestAStart(GuestStart):
+    def test_a_running_guest_has_its_proxy_started_then_each_step_converged_in_order_and_is_not_booted(self):
+        rc, err = self.start()
+        self.assertEqual((rc, said(err), self.w.did()), (0, "  zed ssh://wk-ws/Users/admin/WebKit", PROXY + STEPS + ALIAS))
+        self.assertEqual((self.lines(err, "==> ws is up"), err.count("the guest's own window logs in as admin / admin")),
+                         (["==> ws is up at 192.168.64.9 (ssh alias wk-ws)"], 1))
+
+    def test_a_stopped_guest_is_booted_filtered_with_the_mirror_alone_then_its_agent_is_asked_before_any_step(self):
+        rc, err = self.stopped()
+        (run,) = self.booted()
+        self.assertEqual((rc, run[3:], run[1].split(":")[0]), (0, ("run", "--net-softnet", "--net-softnet-block=0.0.0.0/0", "--net-softnet-allow=%s/32" % ADDR,
+                                                                   "--dir=mirror:%s/state/wk/git:ro,tag=wk-mirror" % self.w.tmp, "wk-ws"), "PATH=/usr/local/bin"))
+        self.assertEqual(self.w.did()[:7], ["boot wk-ws"] + PROXY + ["guest? true", STEPS[0]])
+        self.assertNotIn(self.w.vmdir + "/ws.unfiltered", self.w.files)
+
+    def test_an_unfiltered_guest_is_marked_and_gets_no_softnet_proxy_nor_egress_address(self):
+        rc, err = self.stopped(WK_VM_UNFILTERED="1")
+        self.assertEqual((rc, self.lines(err, "warning: WK_VM"), self.booted()[0][4], self.w.did()[:3]),
+                         (0, ["warning: WK_VM_UNFILTERED=1 -- this guest gets the open network, with no egress filter"],
+                          "--dir=mirror:%s/state/wk/git:ro,tag=wk-mirror" % self.w.tmp, ["write /vmstore/vm/ws.unfiltered", "boot wk-ws", "guest? true"]))
+        self.assertEqual(self.asked("WK_ADDR"), ["env WK_ADDR= WK_PORT=3128 bash -s"])
+
+    def test_a_host_running_as_many_vms_as_it_permits_refuses_the_boot(self):
+        self.w.make("mac")
+        rc, err = self.stopped(WK_VM_MAX="1")
+        self.assertEqual((rc, said(err), self.booted()), (1, "error: 1 VM(s) are already running on this host:", []))
+
+    def test_a_guest_that_does_not_fit_beside_the_running_ones_is_refused_unless_shared(self):
+        self.w.make("mac")
+        self.w.answer([self.w.tart, "get", "wk-mac"], out='{"CPU": 4, "Memory": 20480}')
+        rc, err = self.stopped()
+        self.assertEqual((rc, said(err), self.booted()), (1, "error: not enough memory to start 'wk-ws'.", []))
+        rc, err = self.stopped(WK_VM_SHARE="1")
+        self.assertEqual((rc, self.lines(err, "warning: 'wk-ws'"), len(self.booted())), (0, [
+            "warning: 'wk-ws' (8192MB) on top of 0MB podman + 20480MB of running guests exceeds the 20480MB envelope -- continuing because WK_VM_SHARE is set"], 1))
+
+    def test_a_host_short_of_disk_is_refused_naming_the_disk_a_guest_believes_it_has(self):
+        self.w.answer(["df", "-Pk"], out="Filesystem 1024-blocks Used Available Capacity Mounted\n/dev/x 1 1 10485760 1% /\n")
+        rc, err = self.stopped(WK_VM_DISK_GB="100")
+        self.assertEqual((rc, said(err), err.splitlines()[1], self.booted()),
+                         (1, "error: only 10 GB free on the host.", "    A macOS guest believes it has a 100 GB disk, but every byte it writes has to come", []))
+
+    def test_no_softnet_refuses_before_tart_runs(self):
+        self.w.answer(["test", "-x"], rc=1)
+        rc, err = self.stopped()
+        self.assertEqual((rc, said(err), self.booted()), (1, "error: softnet is not installed, so this guest's egress would not be filtered.", []))
+
+    def test_a_guest_that_never_comes_up_names_its_empty_run_log(self):
+        self.w.answer([self.w.tart, "ip"], rc=1)
+        rc, err = self.stopped()
+        self.assertEqual((rc, said(err), self.w.rel(err.splitlines()[-1])),
+                         (1, "error: wk-ws did not come up within 180s. Its run log says:", "    nothing -- /vmstore/vm/ws.run.log is empty"))
+
+    def test_a_failed_step_is_named_and_the_start_goes_on(self):
+        self.w.guest_said["bash -s /Users/admin/wk-tools"] = Result(1)
+        rc, err = self.start()
+        self.assertEqual((rc, self.lines(err, "warning: could not wire"), self.w.did()[-len(ALIAS) - 1]),
+                         (0, ["warning: could not wire ws's shell; 'wk' will not be on PATH in there"], "guest? bash -s"))
+
+    def test_a_desktop_something_covers_refuses_the_start_and_wk_vm_force_hands_it_over(self):
+        self.w.guest_said["printf 'securityagent="] = Result(0, "securityagent=up\nconsole_user=admin\nscreenlock=off\n")
+        rc, err = self.start()
+        lines = err.splitlines()
+        self.assertEqual((rc, said(err), lines[lines.index(said(err)) + 1], self.w.did()[-1]),
+                         (1, "error: 'ws' is not usable: something is in front of its desktop.", "      an authentication sheet (SecurityAgent) is up", "guest? bash -s"))
+        self.w.env["WK_VM_FORCE"] = "1"
+        rc, err = self.start()
+        self.assertEqual((rc, self.lines(err, "warning: WK_VM_FORCE")), (0, ["warning: WK_VM_FORCE=1 -- 'ws' is handed over with this in front of its desktop:"]))
+
+    def test_an_unknown_guest_is_refused_by_name_and_tart_is_asked_nothing_else(self):
+        rc, _, err = self.typed("start", "nope")
+        self.assertEqual((rc, err.splitlines()[0], [e for e in self.w.effects if e[0] != "run"]), (2, "warning: no such workspace: nope -- 'wk ls' lists them", []))
+
+    def test_a_dry_run_names_every_step_and_changes_nothing(self):
+        before = (dict(self.w.files), set(self.w.loaded), set(self.w.serving))
+        rc, err = self.start("--dry-run")
+        self.assertIn("would run on wk-ws: env WK_ADDR=%s WK_PORT=3128 bash -s" % ADDR, err.splitlines())
+        self.assertEqual((rc, (self.w.files, self.w.loaded, self.w.serving)), (0, before))
+
+    def test_a_dry_run_of_a_stopped_guest_ends_at_its_boot(self):
+        self.w.vms["wk-ws"] = "stopped"
+        before = dict(self.w.files)
+        rc, err = self.start("--dry-run")
+        self.assertEqual((rc, [r[-1] for r in self.booted()], self.w.asked, self.w.files), (0, ["wk-ws"], [], before))
+        self.assertEqual([e for e in self.w.effects if e[0] == "run" and e[1][1:2] == ("ip",)], [])
+
+
+class TestOneLockPerGuest(GuestStart):
+    def test_start_and_stop_wait_for_the_guests_lock_and_ask_nothing_under_anothers(self):
+        for cmd in ("start", "stop"):
+            self.w.held_by("guest-ws", 4242)
+            rc, err = self.start(cmd=cmd)
+            taken = next(i for i, e in enumerate(self.w.effects) if e[0] == "rename" and "guest-ws" in e[2])
+            first = next(i for i, e in enumerate(self.w.effects) if e[0] in ("run", "act") and e[1][:2] == (self.w.tart, "exec"))
+            self.assertEqual((rc, err.splitlines()[0], taken < first), (0, "==> waiting for the guest-ws lock (held by pid 4242)", True), cmd)
+
+    def test_a_dead_holder_is_no_holder(self):
+        self.w.files[self.w.env["WK_LOCK_DIR"] + "/guest-ws@here.lock"] = "pid=4243 tok=beef at=2026-09-24T00:00:00Z cmd=wk start"
+        self.w.links.add(self.w.env["WK_LOCK_DIR"] + "/guest-ws@here.lock")
+        rc, err = self.start()
+        self.assertEqual((rc, [l for l in err.splitlines() if "waiting" in l]), (0, []))
+
+
+class TestTheSteps(GuestStart):
+    def test_a_workspace_guest_is_given_its_marker_and_a_bench_image_keeps_none(self):
+        self.start()
+        (marker,) = [i for c, i in self.w.asked if c.endswith(" sh /Users/admin/.wk-workspace")]
+        self.assertIn("name=ws\nplace=vm\nsrc=/Users/admin/WebKit\n", marker)
+        self.w.bench, self.w.asked = True, []
+        self.start()
+        self.assertEqual(self.asked(".wk-workspace"), ["rm -rf /Users/admin/.wk-workspace"])
+
+    def test_the_agents_are_installed_as_every_driver_installs_them(self):
+        self.start()
+        script = (REPO / "container" / "agents.sh").read_text()
+        got = [shlex.split(c) for c in self.asked("WK_AGENTS_CACHE")]
+        self.assertEqual([(a[:2], a[2].split("\n", 1)[1], a[3:]) for a in got], [(["bash", "-lc"], script, ["container/agents.sh", "fetch"]),
+                                                                                (["bash", "-lc"], script, [])])
+        self.assertTrue(got[0][2].startswith("export WK_AGENTS_CACHE=$HOME/.cache/wk/agents WK_CLAUDE_VERSION="))
+        self.assertEqual(self.asked("workspace-config"), ["bash -lc 'python3 /Users/admin/wk-tools/claude/workspace-config.py /Users/admin/WebKit'"])
+
+    def test_a_container_and_a_macos_guest_each_get_their_own_helix_languages(self):
+        """`unit helix.macos_languages`: firstrun gives a container glibc's --malloc-trim and jsc-release's build; a guest, neither."""
+        with tempfile.TemporaryDirectory() as home:
+            _run_install_fn("_install_helix", "x86_64", home, curl="exit 0\n", sudo="exit 0\n", tar='mkdir -p "$3"\n')
+            linux = Path(home, ".config/helix/languages.toml").read_text()
+        self.start()
+        (mac,) = [i for c, i in self.w.asked if 'cat > "$HOME/.config/helix/languages.toml"' in c]
+        args = [tomllib.loads(t)["language-server"]["clangd"]["args"] for t in (linux, mac)]
+        self.assertEqual([(True, "--compile-commands-dir=/src/WebKit/" + BUILD_DIR), (False, "--compile-commands-dir=/Users/admin/WebKit")],
+                         [("--malloc-trim" in a, compile_commands_dir(a)) for a in args])
+
+    def test_a_credential_file_its_reader_refuses_is_not_delivered(self):
+        self.w.answer(["python3", SECRETFILE, "read"], rc=2, err="wk: refusing to read ...\n")
+        rc, err = self.start()
+        self.assertEqual((rc, self.lines(err, "warning: could not write the agent"), self.asked(".wk-litellm-key")),
+                         (0, ["warning: could not write the agent credentials into ws; an agent in there will ask you to log in"], []))
+
+    def test_the_push_forward_listens_for_this_guest_over_the_transport_and_ends_at_the_socket_a_workspace_dials(self):
+        self.start()
+        (fwd,) = [e[1] for e in self.w.effects if e[0] == "spawn" and "/Users/admin/.wk-push.sock:%s/ws.push.sock" % self.w.vmdir in e[1]]
+        self.assertIn("ProxyCommand=%s/container/ssh-transport vm ws" % REPO, fwd)
+        self.assertEqual((self.launched("com.wk.push"), [i for _, i in self.w.asked if "KEY:" in i]), (["launchctl bootstrap com.wk.push.plist"], []))
+
+    def test_no_push_forward_is_made_when_the_service_would_not_listen(self):
+        self.w.listens = False
+        rc, err = self.start()
+        self.assertEqual((rc, self.lines(err, "warning: could not reach the push"), [d for d in self.w.did() if "push.sock" in d]),
+                         (0, ["warning: could not reach the push service from ws; a push from in there is refused"], []))
+
+
+class TestTheClock(GuestStart):
+    def set(self, skew, **env):
+        self.w.skew = skew
+        self.w.env.update(env)
+        rc, err = self.start()
+        return rc, self.lines(err, "==> ws's clock"), [c.rsplit(" ", 1)[0] for c in self.asked("sudo -n date")]
+
+    def test_a_guest_behind_or_ahead_of_this_host_is_set_from_it(self):
+        for skew in (11 * 86400, -3600):
+            rc, said_, sudo = self.set(skew)
+            self.assertEqual((rc, re.sub(r"\d+s", "Ns", said_[0]), sudo), (0, "==> ws's clock was Ns out; set from this host", ["sudo -n date -u"]), skew)
+            self.assertAlmostEqual(int(re.search(r"(\d+)s", said_[0]).group(1)), abs(skew), delta=2)
+            self.w.asked = []
+
+    def test_a_guest_in_time_is_left_alone(self):
+        self.assertEqual(self.set(0), (0, [], []))
+
+    def test_a_guest_that_refuses_the_write_is_named(self):
+        self.w.guest_said["sudo -n date"] = Result(1)
+        self.w.skew = 86400
+        rc, err = self.start()
+        self.assertEqual((rc, self.lines(err, "warning: could not set")), (0, ["warning: could not set ws's clock; TLS in there will fail as CERT_NOT_YET_VALID"]))
+
+    def test_wk_vm_clock_skew_sets_the_tolerance(self):
+        self.assertEqual(self.set(300, WK_VM_CLOCK_SKEW="600")[2], [])
+        self.assertEqual(self.set(300, WK_VM_CLOCK_SKEW="")[2], ["sudo -n date -u"])
+
+
+class TestTheProxy(GuestStart):
+    def proxy(self):
+        return self.w.agent("com.wk.proxy")["EnvironmentVariables"]
+
+    def test_it_is_started_on_demand_once_the_bridge_has_its_address_and_left_alone_while_it_serves(self):
+        self.start()
+        env, home = self.proxy(), self.w.env["HOME"]
+        self.assertEqual((env["WK_PROXY_TCP"], env["WK_INJECT_SOCK"], env["WK_INJECT_READ_SOCK"], env["WK_PUSH_SOCKET"]),
+                         ("%s:3128" % ADDR, self.w.vmdir + "/github-inject.sock", self.w.vmdir + "/github-inject-read.sock", self.w.env["XDG_STATE_HOME"] + "/wk/push.sock"))
+        self.assertEqual((self.w.agent("com.wk.proxy")["RunAtLoad"], self.launched("inject")), (False, []))
+        self.start()
+        self.assertEqual(self.launched("com.wk.proxy"), [])
+
+    def test_its_address_is_read_off_the_live_interface_on_the_guest_subnet_else_it_is_the_subnets_dot_1(self):
+        self.w.env["WK_VM_SUBNET"] = "10.0.0"
+        self.start()
+        self.assertEqual(self.proxy()["WK_PROXY_TCP"], "10.0.0.2:3128")
+        self.w.bridge = "172.16.9.1"
+        self.stopped(WK_VM_SUBNET="172.16.9")
+        self.assertEqual(self.booted()[0][6], "--net-softnet-allow=172.16.9.1/32")
+
+    def test_each_override_reaches_what_it_names(self):
+        self.w.bridge = "203.0.113.9"
+        rc, err = self.stopped(WK_VM_PROXY_ADDR="203.0.113.9", WK_VM_PROXY_PORT="9999", WK_SOFTNET_BIN="/opt/softnet")
+        run = self.booted()[0]
+        self.assertEqual((rc, run[1].split(":")[0], run[6], self.proxy()["WK_PROXY_TCP"], self.asked("WK_ADDR")),
+                         (0, "PATH=/opt", "--net-softnet-allow=203.0.113.9/32", "203.0.113.9:9999", ["env WK_ADDR=203.0.113.9 WK_PORT=9999 bash -s"]))
+        self.assertIn(("run", ("test", "-x", "/opt/softnet")), self.w.effects)
+
+    def test_an_injector_that_does_not_answer_is_named_with_its_setup_stage(self):
+        self.w.serving.clear()
+        rc, err = self.start()
+        self.assertEqual((rc, self.lines(err, "warning: the credential injector"), err.splitlines()[1]),
+                         (0, ["warning: the credential injector is not running on this Mac, so 'git-webkit pr' and Claude in a guest get no"],
+                          "  credential:  ./setup --stage inject"))
+
+    def test_the_push_service_is_kept_by_launchd_and_ensured_once(self):
+        self.start()
+        self.start()
+        env = self.w.agent("com.wk.push")["EnvironmentVariables"]
+        self.assertEqual((self.launched("com.wk.push"), env["WK_PUSH_GUEST_DIR"]), ([], self.w.vmdir))
+
+    def test_a_command_waiting_for_a_running_guest_starts_a_dead_proxy_only(self):
+        self.start()
+        for case, state, serving, starts in (("dead proxy", "running", False, 1), ("live proxy", "running", True, 0), ("stopped guest", "stopped", False, 0)):
+            self.w.vms["wk-ws"] = state
+            self.w.serving.discard("%s:3128" % ADDR) if not serving else self.w.serving.add("%s:3128" % ADDR)
+            self.typed("enter", "ws", "--", "true")
+            self.assertEqual(self.launched("kickstart com.wk.proxy"), ["launchctl kickstart com.wk.proxy"] * starts, case)
+
+
+class TestTheForwards(GuestStart):
+    def forwards(self):
+        return [d for d in self.w.did() if d.startswith("ssh -R")]
+
+    def test_a_second_start_while_they_are_alive_forwards_nothing_again(self):
+        self.start()
+        self.start()
+        self.assertEqual((self.forwards(), int(self.w.files[self.w.pidfile("push")]) in self.w.pids), ([], True))
+
+    def test_a_pidfile_whose_pid_is_gone_is_started_again(self):
+        self.w.files[self.w.pidfile("push")] = "4194304\n"
+        self.start()
+        self.assertEqual(self.forwards(), ["ssh -R /Users/admin/.wk-push.sock:/vmstore/vm/ws.push.sock", "ssh -R /Users/admin/.wk-broker.sock:/state/wk/broker.sock"])
+
+    def test_start_and_stop_take_a_forwards_lock(self):
+        for cmd in ("start", "stop"):
+            self.w.held_by("vm-push-forward-ws", 4242)
+            rc, err = self.start(cmd=cmd)
+            self.assertEqual((rc, self.lines(err, "==> waiting")), (0, ["==> waiting for the vm-push-forward-ws lock (held by pid 4242)"]), cmd)
+
+
+class TestAStop(GuestStart):
+    def test_ends_every_forward_then_syncs_the_guests_disk_before_tart_cuts_its_power(self):
+        self.start()
+        pids = [int(self.w.files[self.w.pidfile(what)]) for what in ("push", "broker")]
+        rc, err = self.start(cmd="stop")
+        self.assertEqual((rc, said(err), self.w.did()), (0, "==> stopped ws", ["kill %d" % pids[0], "kill %d" % pids[1], "guest sync", "stop wk-ws"]))
+        self.assertEqual([self.w.pidfile(what) in self.w.files for what in ("push", "broker")], [False, False])
+
+    def test_a_guest_that_is_not_running_is_said_so_and_tart_is_asked_nothing(self):
+        self.w.vms["wk-ws"] = "stopped"
+        rc, err = self.start(cmd="stop")
+        self.assertEqual((rc, said(err), self.w.did()), (0, "==> ws is not running", []))
+
+
+class TestTheGuestsCredentials(GuestStart):
+    def held(self, pat="ghp-held", bz="bz-held"):
+        held = self.w.env["HOME"] + "/.config/wk/push-keys/"
+        for name, value in (("github-pat", pat), ("bugzilla-api-key", bz)):
+            self.w.files.pop(held + name, None) if value is None else self.w.files.__setitem__(held + name, value + "\nsecond line\n")
+        rc, err = self.start()
+        return rc, err, [self.w.files.get(self.w.vmdir + "/" + f) for f in HELD]
+
+    def test_each_start_writes_every_file_the_injector_reads_private_to_this_user(self):
+        rc, _, got = self.held()
+        self.assertEqual((rc, got), (0, ["ghp-held\n", "ghp-held\n", "bz-held\n"]))
+        self.assertEqual(len([e for e in self.w.effects if e[0] == "act" and e[1][:2] == ("sh", "-c") and e[1][2].startswith("umask 077 && cat > ")]), 3)
+
+    def test_one_withdrawn_here_is_withdrawn_there_at_the_next_start(self):
+        self.held()
+        self.assertEqual(self.held(pat=None, bz=None)[2], [None, None, None])
+
+    def test_a_start_that_finds_the_proxy_up_still_delivers_todays_token(self):
+        self.held(pat="ghp-yesterdays")
+        got = self.held(pat="ghp-todays")[2][0]
+        self.assertEqual((self.launched("proxy"), got), ([], "ghp-todays\n"))
+
+    def test_a_far_side_that_refuses_is_named(self):
+        self.w.react(["sh", "-c"], lambda a, f: Result(1))
+        rc, err, _ = self.held()
+        self.assertEqual(self.w.rel(self.lines(err, "warning: could not converge")[0]),
+                         "warning: could not converge the tokens in /vmstore/vm; a read from a guest answers 401")
+
+
+class WalledMac(Walled, Mac):
+    """A Mac whose guest answers the wall's probes from HEALTHY (tests/test_doctor_wall.py)."""
+
+
+class TestTheWall(GuestStart):
+    world_class = WalledMac
+
+    def test_a_guests_rows_name_each_daemons_remedy(self):
+        self.w.files.pop(self.w.vmdir + "/ws.unfiltered")
+        self.w.said = {**dict(HEALTHY), "https://github.com/ 2": "000", "https://api.github.com/ 2": "000", "rest/version": "000"}
+        self.w.env["WK_NAME"] = "ws"
+        rc, _, err = self.typed("doctor", "ws")
+        self.assertEqual((rc, [r for r in report(err) if "'000'" in r]), (3, [
+            "-- github unreachable through the proxy (got '000') -> wk start ws",
+            "-- api.github.com answered '000' -- the injector is not in the path -> ./setup --stage inject (launchd keeps the injector)",
+            "-- bugs.webkit.org answered '000' -- the injector is not in the path for it -> ./setup --stage inject (launchd keeps the injector)"]))
+
+
+# The fixtures the kill-point row ("start guest", tests/test_killpoints.py) and the driver conformance share: a start
+# whose steps are recorded, not run.
+sys.path.insert(0, str(REPO / "lib"))
+from wk import daemons, doctor, guest, places, tools, wall  # noqa: E402
+from wk.act import Refused  # noqa: E402
+from wk.machine_cmd import deps  # noqa: E402
+from wk.store import GUEST_BROKER_SOCKET, Store  # noqa: E402
+
+TART = "/fake/tart"
+IP = "192.168.2.5"
+BASH_STEPS = [s[0] for s in guest.STEPS if s[0] in ("write_shell_rc", "write_lldbinit", "write_checkout", "install_agents",
+                                                    "write_claude_config", "settle_desktop", "report_desktop")]
+
+
+class GuestWorld(World):
+    """One host with one guest, `wk-demo`, in `state`; `bridge` is whether this host has its guest-bridge address yet;
+    launchd as the `loaded` labels and the `serving` sockets; the guest agent answers `ssh_rc`."""
+
+    def __init__(self, base):
+        super().__init__(base)
+        self.env.update({"WK_VM_STORE": base + "/vmstore", "WK_LOCK_DIR": base + "/locks", "PATH": os.environ.get("PATH", "")})
+        self.state, self.bridge, self.ssh_rc, self.guest_sock, self.loaded, self.serving = "running", True, 0, False, set(), set()
+        self.react([TART, "list"], lambda a, f: Result(0, json.dumps([{"Name": "wk-demo", "State": f.state, "Source": "local"},
+                                                                      {"Name": "wk-base", "State": "stopped", "Source": "local"}])))
+        self.answer([TART, "ip"], out=IP + "\n")
+        self.answer([TART, "get"], out='{"CPU": 4, "Memory": 8192}')
+        self.answer([TART, "stop"])
+        self.react([TART, "exec"], lambda a, f: Result(1 if a[-1].startswith("test -f /etc/wk-image") or a[-1].startswith("test -S") and not f.guest_sock
+                                                       else f.ssh_rc))
+        self.react(["ifconfig"], lambda a, f: Result(0, "\tinet %s netmask 0xffffff00\n" % ADDR if f.bridge else "\tinet 10.0.0.2\n"))
+        self.answer(["test", "-x"])
+        self.answer(["hostname", "-s"], out="host\n")
+        self.answer(["sh", "-c", 'printf %s "$HOME"'], out=self.env["HOME"])
+        self.react(["python3", SECRETFILE, "present"], lambda a, f: Result(0 if f.files.get(a[3]) else 1))
+        self.react(["python3", "-c", daemons.SOCKET_ANSWERS], lambda a, f: Result(0 if a[-1] in f.serving else 1))
+        self.answer(["/usr/bin/python3", "-c", guest.PUSH_LISTEN])
+        self.react(["launchctl", "print"], lambda a, f: Result(0 if a[-1].rsplit("/", 1)[1] in f.loaded else 113))
+        self.react(["launchctl", "bootout"], lambda a, f: f.loaded.discard(a[-1].rsplit("/", 1)[1]) or Result(0))
+        self.react(["launchctl", "bootstrap"], lambda a, f: Mac._launch(f, plistlib.loads(f.files[a[-1]].encode()), "RunAtLoad"))
+        self.react(["launchctl", "kickstart"], lambda a, f: Mac._launch(f, Mac.agent(f, a[-1].rsplit("/", 1)[1]), "Label"))
 
     def spawn(self, argv, log):
         pid = super().spawn(argv, log)
@@ -92,60 +546,29 @@ class GuestWorld(World):
     def spawned(self, word):
         return [e[1] for e in self.effects if e[0] == "spawn" and word in " ".join(e[1])]
 
-    def bootstraps(self, label):
-        return [e for e in self.effects if e[0] == "run" and e[1][:2] == ("launchctl", "bootstrap") and e[1][-1].endswith(label + ".plist")]
-
-    def state_of(self):
-        return dict(self.files), sorted(self.pids), sorted(self.loaded), sorted(self.serving)
-
 
 class GuestTest(SecretsTest):
+    """`guest.start` on GuestWorld with its admission, login note, tools push and bash steps stubbed to succeed."""
+
     def setUp(self):
         super().setUp()
         self.w = GuestWorld(self.tmp)
-        self.steps, self.step_ok, self.admit_rc, self.notes = [], {}, 0, []
-
-        def step(fn):
-            def run(_guest):
-                self.steps.append(fn)
-                return self.step_ok.get(fn, True)
-            return run
-
-        def admit(host, name, mine):
-            if self.admit_rc:
-                raise Refused(self.admit_rc)
-        for obj, name, fn in ((Store, "macos_host", mock.PropertyMock(return_value=True)),
-                              (places.Vm, "tart", lambda s: TART),
-                              (guest, "admit", admit),
-                              (guest, "login_note", lambda env: self.notes.append(1)),
-                              (daemons, "stamp", lambda program: "1"),
-                              (tools, "push", lambda *a: True)) + tuple((guest.Guest, fn, step(fn)) for fn in BASH_STEPS):
-            p = mock.patch.object(obj, name, new_callable=lambda fn=fn: fn) if isinstance(fn, mock.PropertyMock) \
-                else mock.patch.object(obj, name, fn)
+        for p in [mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True),
+                  mock.patch.object(places.Vm, "tart", lambda s: TART), mock.patch.object(guest, "admit", lambda *a: None),
+                  mock.patch.object(guest, "login_note", lambda env: None), mock.patch.object(daemons, "stamp", lambda program: "1"),
+                  mock.patch.object(tools, "push", lambda *a: True)] + [mock.patch.object(guest.Guest, fn, lambda g: True) for fn in BASH_STEPS]:
             p.start()
             self.addCleanup(p.stop)
         self.clock = FakeClock()
         self.vm = places.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
-
-    @property
-    def vmdir(self):
-        return self.w.env["WK_VM_STORE"] + "/vm"
+        self.vmdir = self.w.env["WK_VM_STORE"] + "/vm"
 
     def run_start(self):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
+        with contextlib.redirect_stderr(io.StringIO()) as err:
             try:
-                ip = guest.start(self.vm, "demo", self.clock)
+                return guest.start(self.vm, "demo", self.clock), err.getvalue()
             except Refused:
-                ip = None
-        return ip, err.getvalue()
-
-    def hold(self, resource, pid):
-        """`resource`'s lock, held by `pid` (alive where it is in the fake's process table)."""
-        path = self.vm.store.lock_path(resource)
-        self.w.mkdir_now(os.path.dirname(path))
-        self.w.symlink("pid=%d tok=beef at=2026-09-24T00:00:00Z cmd=wk start" % pid, path)
-        return path
+                return None, err.getvalue()
 
     def host(self):
         return guest.Host(self.vm, self.clock)
@@ -163,207 +586,15 @@ class TestVmConformance(GuestTest, DriverConformance):
         return [r[-1] for r in self.w.spawned(" run ")] == ["wk-demo"]
 
 
-class TestOneLockPerGuest(GuestTest):
-    def test_one_lock_per_resource_guest_start_and_stop(self):
-        self.w.pids.add(4242)
-        self.hold("guest-demo", 4242)
-        ip, err = self.run_start()
-        self.assertIsNone(ip)
-        self.assertIn("waiting for the guest-demo lock (held by pid 4242)", err)
-        self.assertEqual([], self.steps, "a step ran under another start's lock")
-        with self.assertRaises(Refused):
-            quiet(guest.stop, self.vm, "demo", self.clock)
-        self.assertNotIn(("act", (TART, "stop", "wk-demo")), self.w.effects)
 
-    def test_a_dead_holder_is_no_holder(self):
-        self.hold("guest-demo", 4243)
-        ip, err = self.run_start()
-        self.assertEqual(IP, ip, err)
-
-
-class TestBothArms(GuestTest):
-    def test_a_running_guest_is_converged_and_not_booted(self):
-        ip, err = self.run_start()
-        self.assertEqual(IP, ip, err)
-        self.assertEqual([], self.w.spawned(" run "), "a running guest was booted again")
-        self.assertEqual(BASH_STEPS, self.steps)
-        self.assertEqual([1], self.notes, "the login is stated once, on the one exit")
-
-    def test_a_stopped_guest_is_admitted_then_booted_filtered_with_the_mirror_alone(self):
-        self.w.state = "stopped"
-        ip, err = self.run_start()
-        self.assertEqual(IP, ip, err)
-        run = self.w.spawned(" run ")[0]
-        self.assertIn("--net-softnet-block=0.0.0.0/0", run)
-        self.assertIn("--net-softnet-allow=%s/32" % ADDR, run)
-        self.assertEqual(["--dir=mirror:%s:ro,tag=wk-mirror" % os.path.dirname(self.vm.store.mirror_dir())],
-                         [a for a in run if a.startswith("--dir")])
-        self.assertEqual("wk-demo", run[-1])
-        self.assertTrue(run[1].startswith("PATH=/usr/local/bin:"), "tart finds softnet through PATH")
-        self.assertNotIn(self.vmdir + "/demo.unfiltered", self.w.files)
-
-    def test_a_refused_admission_boots_nothing(self):
-        self.w.state, self.admit_rc = "stopped", 1
-        ip, _ = self.run_start()
-        self.assertIsNone(ip)
-        self.assertEqual([], self.w.spawned(" run "))
-
-    def test_an_unfiltered_guest_is_marked_and_gets_no_softnet(self):
-        self.w.state = "stopped"
-        self.w.env["WK_VM_UNFILTERED"] = "1"
-        self.vm = places.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm")
-        ip, err = self.run_start()
-        self.assertEqual(IP, ip, err)
-        self.assertIn("open network", err)
-        self.assertFalse([a for a in self.w.spawned(" run ")[0] if "softnet" in a])
-        self.assertIn(self.vmdir + "/demo.unfiltered", self.w.files)
-        self.assertEqual([], self.w.bootstraps("com.wk.proxy"), "an unfiltered guest needs no proxy")
-
-    def test_no_softnet_refuses_before_tart_runs(self):
-        self.w.state = "stopped"
-        self.w.answer(["test", "-x"], rc=1)
-        ip, err = self.run_start()
-        self.assertIsNone(ip)
-        self.assertIn("softnet is not installed", err)
-        self.assertEqual([], self.w.spawned(" run "))
-
-    def test_a_guest_that_never_comes_up_names_its_run_log(self):
-        self.w.state = "stopped"
-        self.w.answer([TART, "ip"], rc=1)
-        ip, err = self.run_start()
-        self.assertIsNone(ip)
-        self.assertIn("did not come up within 180s", err)
-        self.assertIn("demo.run.log is empty", err)
+class TestNotOnTheWorldsClock(GuestTest):
+    """`wk start` waits on a Clock of its own (guest.start is handed none by Vm.start), so these waits are real seconds."""
 
     def test_a_guest_whose_agent_never_answers_is_refused(self):
         self.w.state, self.w.ssh_rc = "stopped", 255
         ip, err = self.run_start()
         self.assertIsNone(ip)
         self.assertIn("guest agent never answered", err)
-
-    def test_a_failed_step_is_named_and_the_start_goes_on(self):
-        self.step_ok["write_shell_rc"] = False
-        ip, err = self.run_start()
-        self.assertEqual(IP, ip)
-        self.assertIn("could not wire demo's shell", err)
-
-    def test_a_refused_desktop_refuses_the_start(self):
-        self.step_ok["report_desktop"] = False
-        ip, _ = self.run_start()
-        self.assertIsNone(ip)
-
-    def test_an_absent_guest_is_refused(self):
-        self.w.react([TART, "list"], lambda a, f: Result(0, "[]"))
-        ip, err = self.run_start()
-        self.assertIsNone(ip)
-        self.assertIn("no such workspace: demo", err)
-
-    def test_a_dry_run_changes_nothing(self):
-        before = self.w.state_of()
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            ip, err = self.run_start()
-        self.assertEqual(IP, ip, err)
-        self.assertEqual(before, self.w.state_of())
-        self.assertIn("would run on wk-demo: env WK_ADDR=%s" % ADDR, err)
-
-    def test_a_dry_run_of_a_stopped_guest_ends_at_its_boot(self):
-        self.w.state = "stopped"
-        before = self.w.state_of()
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}):
-            ip, err = self.run_start()
-        self.assertEqual("", ip, err)
-        self.assertEqual(before, self.w.state_of())
-        self.assertEqual("wk-demo", self.w.spawned(" run ")[0][-1])
-        self.assertEqual([], [e for e in self.w.effects if e[0] == "run" and e[1][1:2] == ("ip",)])
-        self.assertEqual([], self.steps)
-
-
-class TestTheSteps(GuestTest):
-    def the_guest(self):
-        return guest.Guest(guest.Host(self.vm, self.clock), "demo", self.vm.guest("demo"))
-
-    def test_the_marker_is_written_and_a_bench_image_keeps_none(self):
-        g = self.the_guest()
-        quiet(g.write_marker)
-        self.assertIn("name=demo", "".join(i for c, i in self.w.guest_cmds if ".wk-workspace" in c))
-        self.w.bench, self.w.guest_cmds = True, []
-        quiet(g.write_marker)
-        self.assertTrue([c for c, _ in self.w.guest_cmds if c.startswith("rm -rf") and ".wk-workspace" in c])
-
-    def test_the_agents_are_installed_as_every_driver_installs_them(self):
-        g = self.the_guest()
-        self.assertTrue(quiet(INSTALL_AGENTS, g)[0])
-        cmds = [c for c, _ in self.w.guest_cmds]
-        self.assertIn(shlex.join(["bash", "-lc", "export WK_AGENTS_CACHE=%s WK_CLAUDE_VERSION=%s\n%s" % (agents.HOME_CACHE, agents.CLAUDE_VERSION, agents.script(str(REPO)))]), cmds)
-        self.assertIn(shlex.join(["bash", "-lc", "python3 %s/claude/workspace-config.py %s" % (self.vm.tools("demo"), self.vm.src("demo"))]),
-                      cmds)
-
-    def test_a_container_and_a_macos_guest_each_get_their_own_helix_languages(self):
-        """`unit helix.macos_languages`: firstrun gives a container glibc's --malloc-trim and jsc-release's build; a guest, neither."""
-        with tempfile.TemporaryDirectory() as home:
-            _run_install_fn("_install_helix", "x86_64", home, curl="exit 0\n", sudo="exit 0\n", tar='mkdir -p "$3"\n')
-            tomllib.loads(Path(home, ".config/helix/config.toml").read_text())
-            linux = Path(home, ".config/helix/languages.toml").read_text()
-        self.assertTrue(quiet(self.the_guest().write_helix_config)[0])
-        (mac,) = [i for c, i in self.w.guest_cmds if 'cat > "$HOME/.config/helix/languages.toml"' in c]
-        args = [tomllib.loads(t)["language-server"]["clangd"]["args"] for t in (linux, mac)]
-        self.assertEqual([(True, "--compile-commands-dir=/src/WebKit/" + BUILD_DIR), (False, "--compile-commands-dir=" + self.vm.src("demo"))],
-                         [("--malloc-trim" in a, compile_commands_dir(a)) for a in args])
-
-    def test_a_credential_file_its_reader_refuses_stops_the_delivery(self):
-        self.w.answer(["python3", SECRETFILE, "read"], rc=2, err="wk: refusing to read ...\n")
-        g = self.the_guest()
-        self.assertFalse(quiet(g.write_agent_secrets)[0])
-        self.assertFalse([c for c, _ in self.w.guest_cmds if ".wk-litellm-key" in c])
-
-    def test_the_push_forward_listens_for_this_guest_and_ends_at_the_socket_a_workspace_dials(self):
-        g = self.the_guest()
-        self.assertTrue(quiet(g.push_forward)[0])
-        self.assertEqual(["demo"], self.w.listened)
-        (fwd,) = self.w.spawned(" -N ")
-        self.assertIn("/Users/admin/.wk-push.sock:%s/demo.push.sock" % self.vmdir, fwd)
-        self.assertEqual(1, len(self.w.bootstraps("com.wk.push")))
-        self.assertNotIn("KEY:", "".join(i for _, i in self.w.guest_cmds))
-
-    def test_no_forward_is_made_when_the_service_would_not_listen(self):
-        self.w.react(["/usr/bin/python3", "-c", guest.PUSH_LISTEN], lambda a, f: Result(1))
-        self.assertFalse(quiet(self.the_guest().push_forward)[0])
-        self.assertEqual([], self.w.spawned(" -N "))
-
-
-class TestTheOverrides(GuestTest):
-    def host(self, **env):
-        self.w.env.update(env)
-        return guest.Host(places.Registry(str(REPO), env=self.w.env, machine=self.w).load("vm"), self.clock)
-
-    def test_the_proxy_address_is_read_off_the_live_interface_on_the_guest_subnet(self):
-        self.assertEqual(ADDR, self.host().proxy_addr())
-        self.w.bridge = False
-        self.assertEqual("10.0.0.2", self.host(WK_VM_SUBNET="10.0.0").proxy_addr())
-        self.assertEqual("172.16.9.1", self.host(WK_VM_SUBNET="172.16.9").proxy_addr(), "no address there is its .1")
-
-    def test_each_override_reaches_what_it_names(self):
-        h = self.host(WK_VM_PROXY_ADDR="203.0.113.9", WK_VM_PROXY_PORT="9999", WK_SOFTNET_BIN="/opt/softnet")
-        self.assertEqual("203.0.113.9", h.proxy_addr())
-        self.assertEqual("9999", guest.proxy_port(h.env))
-        self.assertEqual("/opt/softnet", guest.softnet_bin(h.env))
-        self.assertEqual(100, guest.vm_disk_gb({"WK_VM_DISK_GB": "100"}))
-        self.assertEqual([], quiet(self.host(WK_VM_UNFILTERED="1").softnet_flags)[0])
-
-
-class TestTheDaemons(GuestTest):
-    def test_the_proxy_is_started_on_demand_once_the_bridge_has_its_address(self):
-        ok, err = quiet(self.host().start_proxy)
-        self.assertTrue(ok, err)
-        env = self.w.agent("com.wk.proxy")["EnvironmentVariables"]
-        self.assertEqual(("%s:3128" % ADDR, self.vmdir + "/github-inject.sock", self.vmdir + "/github-inject-read.sock",
-                          Store(self.w.env).push_socket()),
-                         (env["WK_PROXY_TCP"], env["WK_INJECT_SOCK"], env["WK_INJECT_READ_SOCK"], env["WK_PUSH_SOCKET"]))
-        self.assertFalse(self.w.agent("com.wk.proxy")["RunAtLoad"], "no bridge, nothing to bind, until a guest starts")
-        self.assertEqual([], self.w.bootstraps("com.wk.github-inject"), "setup installs the injector")
-        self.w.effects.clear()
-        self.assertTrue(quiet(self.host().start_proxy)[0])
-        self.assertEqual([], self.w.bootstraps("com.wk.proxy"), "a serving proxy is left alone")
 
     def test_a_bridge_that_never_gets_its_address_starts_no_proxy(self):
         self.w.bridge = False
@@ -372,16 +603,34 @@ class TestTheDaemons(GuestTest):
         ok, err = quiet(self.host().start_proxy)
         self.assertFalse(ok)
         self.assertIn("never got address", err)
-        self.assertEqual([], self.w.bootstraps("com.wk.proxy"))
+        self.assertEqual([], [e for e in self.w.effects if e[0] == "act" and e[1][:2] == ("launchctl", "bootstrap")])
 
-    def test_an_injector_that_does_not_answer_is_named_with_its_setup_stage(self):
-        ok, err = quiet(self.host().start_inject)
-        self.assertFalse(ok)
-        self.assertIn("./setup --stage inject", err)
-        self.w.serving.add(self.vmdir + "/github-inject.sock")
-        self.assertTrue(quiet(self.host().start_inject)[0])
+    def test_a_forward_whose_guest_end_never_serves_is_stopped(self):
+        h = guest.Host(self.vm, self.clock)
+        spawn = self.w.spawn
+
+        def never_serves(argv, log):
+            pid = spawn(argv, log)
+            self.w.guest_sock = False
+            return pid
+        with mock.patch.object(self.w, "spawn", never_serves):
+            self.assertFalse(quiet(h.forward_start, "demo", self.vm.guest("demo"), "push", "/Users/admin/.wk-push.sock",
+                                   h.path("demo.push.sock"))[0])
+        self.assertEqual(1, len([e for e in self.w.effects if e[0] == "kill"]))
+        self.assertNotIn(h.forward_pidfile("demo", "push"), self.w.files)
+        self.assertGreaterEqual(sum(self.clock.slept), guest.FORWARD_WAIT)
+
+
+class TestNotFromTheCommandLine(GuestTest):
+    def test_an_absent_guest_is_refused_by_the_start_itself(self):
+        """The dispatcher refuses an unknown name before guest.start reads tart."""
+        self.w.react([TART, "list"], lambda a, f: Result(0, "[]"))
+        ip, err = self.run_start()
+        self.assertIsNone(ip)
+        self.assertIn("no such workspace: demo", err)
 
     def test_the_injectors_row_names_its_files_the_login_it_holds_and_the_machine_it_publishes_into(self):
+        """./setup --stage inject renders this row (python3 -m wk.daemons here)."""
         row = self.host().daemons()["github-inject"]
         self.assertEqual((self.vmdir + "/github-inject.sock", self.vmdir + "/claude-inject.sock", self.vmdir + "/github-inject-read.sock",
                           self.vm.store.podman_machine()),
@@ -390,131 +639,11 @@ class TestTheDaemons(GuestTest):
         self.assertEqual((guest.Host(self.vm).secrets.cred_path("claude-login"),) * 2, (row.env["WK_INJECT_CLAUDE_LOGIN"], row.lock))
         self.assertTrue(row.boot)
 
-    def test_the_push_service_is_kept_by_launchd_and_ensured_once(self):
-        h = self.host()
-        self.assertTrue(quiet(h.start_push)[0])
-        self.assertTrue(quiet(h.start_push)[0])
-        self.assertEqual(1, len(self.w.bootstraps("com.wk.push")))
-        env = self.w.agent("com.wk.push")["EnvironmentVariables"]
-        self.assertEqual((self.vmdir, Store(self.w.env).push_socket()), (env["WK_PUSH_GUEST_DIR"], env["WK_PUSH_SOCKET"]))
-
-    def test_waiting_for_a_running_guest_starts_a_dead_proxy_only(self):
-        for case, state, live, starts in (("dead proxy", "running", False, 1), ("live proxy", "running", True, 0),
-                                          ("stopped guest", "stopped", False, 0)):
-            with self.subTest(case):
-                self.setUp()
-                quiet(self.host().start_proxy)
-                self.w.state, self.w.effects = state, []
-                if not live:
-                    self.w.serving.clear()
-                ws_dir = self.vm.store.ws_dir("demo")
-                self.w._set_file(os.path.join(ws_dir, places.READY_MARKER), "")
-                quiet(lambda: self.vm.wait_ready("demo", self.clock))
-                self.assertEqual(starts, len([e for e in self.w.effects if e[0] == "act" and e[1][:2] == ("launchctl", "kickstart")]))
-
-    def test_a_guests_wall_rows_name_each_daemons_remedy(self):
-        w = wall.Wall(str(REPO), self.vm, "demo", self.w)
-        with mock.patch.object(wall.Wall, "inside", lambda self, cmd: "000"):
-            self.assertEqual("wk start demo", w.github()[0][2])
-            for rows in (w.github_read(), w.bugzilla_read()):
-                self.assertIn("./setup --stage inject", rows[0][2], rows)
-
-
-class TestTheForward(GuestTest):
-    def setUp(self):
-        super().setUp()
-        self.h = guest.Host(self.vm, self.clock)
-        self.g = self.vm.guest("demo")
-        self.pidfile = self.h.forward_pidfile("demo", "push")
-        self.far, self.near = "/Users/admin/.wk-push.sock", self.h.path("demo.push.sock")
-
-    def start(self):
-        return quiet(self.h.forward_start, "demo", self.g, "push", self.far, self.near)[0]
-
-    def test_a_second_start_while_one_is_alive_is_a_no_op(self):
-        self.assertTrue(self.start())
-        self.assertTrue(self.start())
-        forwards = self.w.spawned(" -N ")
-        self.assertEqual(1, len(forwards), forwards)
-        self.assertIn("/Users/admin/.wk-push.sock:%s/demo.push.sock" % self.vmdir, forwards[0])
-        self.assertIn("ProxyCommand=%s/container/ssh-transport vm demo" % REPO, forwards[0], "over tart exec, not the network")
-        self.assertIn(int(self.w.files[self.pidfile]), self.w.pids)
-
-    def test_a_forward_whose_guest_end_never_serves_is_stopped(self):
-        spawn = self.w.spawn
-
-        def never_serves(argv, log):
-            pid = spawn(argv, log)
-            self.w.guest_sock = False
-            return pid
-        with mock.patch.object(self.w, "spawn", never_serves):
-            self.assertFalse(self.start())
-        (pid,) = [e[1] for e in self.w.effects if e[0] == "kill"]
-        self.assertNotIn(self.pidfile, self.w.files)
-        self.assertGreaterEqual(sum(self.clock.slept), guest.FORWARD_WAIT)
-
-    def test_a_pidfile_whose_pid_is_gone_is_started_again(self):
-        self.w._set_file(self.pidfile, "4194304\n")
-        self.assertTrue(self.start())
-        self.assertEqual(1, len(self.w.spawned(" -N ")))
-
-    def test_both_ends_take_the_forwards_lock(self):
-        self.w.pids.add(4242)
-        self.hold("vm-push-forward-demo", 4242)
-        for fn in (self.start, lambda: self.h.forward_stop("demo", "push")):
-            with self.assertRaises(Refused):
-                quiet(fn)
-        self.assertEqual([], self.w.spawned(" -N "))
-
-    def test_stopping_a_guest_ends_its_forward_first(self):
-        self.start()
-        pid = int(self.w.files[self.pidfile])
-        quiet(guest.stop, self.vm, "demo", self.clock)
-        kill = self.w.effects.index(("kill", pid, 15))
-        flush = self.w.effects.index(("act", (TART, "exec", "-i", "wk-demo", "/bin/zsh", "-lc", "sync")))
-        self.assertTrue(kill < flush < self.w.effects.index(("act", (TART, "stop", "wk-demo"))))
-        self.assertNotIn(self.pidfile, self.w.files)
-
-    def test_a_start_forwards_the_host_broker_to_the_socket_the_guests_client_dials(self):
-        self.assertTrue(quiet(guest.Guest(self.h, "demo", self.g).broker_forward)[0])
-        (fwd,) = self.w.spawned(" -N ")
-        self.assertIn("/Users/admin/.wk-broker.sock:%s" % Store(self.w.env).runtime_socket(), fwd)
-        self.assertIn(self.h.forward_pidfile("demo", "broker"), self.w.files)
-
-    def test_stopping_a_guest_ends_every_forward(self):
-        self.start()
-        quiet(guest.Guest(self.h, "demo", self.g).broker_forward)
-        quiet(guest.stop, self.vm, "demo", self.clock)
-        for what in guest.FORWARDS:
-            self.assertNotIn(self.h.forward_pidfile("demo", what), self.w.files)
-
-
-class TestTheGuestsCredentials(GuestTest):
-    def creds(self):
-        return [self.w.files.get(self.vmdir + "/" + f) for f in ("read-github-pat", "push-github-pat", "push-bugzilla-api-key")]
-
-    def test_each_start_writes_every_file_the_guests_injector_reads(self):
-        self.w.seed()
-        self.assertTrue(quiet(guest.Host(self.vm, self.clock).credentials_converge)[0])
-        self.assertEqual(["ghp-held\n", "ghp-held\n", "bz-held\n"], self.creds())
-
-    def test_a_credential_withdrawn_here_is_withdrawn_there(self):
-        self.w.seed(bz=None)
-        self.w._set_file(self.vmdir + "/push-bugzilla-api-key", "stale\n")
-        quiet(guest.Host(self.vm, self.clock).credentials_converge)
-        self.assertEqual(["ghp-held\n", "ghp-held\n", None], self.creds())
-
-    def test_a_far_side_that_refuses_is_named(self):
-        self.w.seed()
-        self.w.react(["sh", "-c"], lambda a, f: Result(1))
-        ok, err = quiet(guest.Host(self.vm, self.clock).credentials_converge)
-        self.assertFalse(ok)
-        self.assertIn("could not converge the tokens in %s" % self.vmdir, err)
-
     def test_where_there_are_no_guests_nothing_is_converged(self):
+        """`wk key set` reaches guest.credentials_converge only on a macOS host."""
         with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=False):
             self.assertTrue(guest.credentials_converge(str(REPO), self.w.env, self.w))
-        self.assertEqual([None, None, None], self.creds())
+        self.assertEqual([None] * 3, [self.w.files.get(self.vmdir + "/" + f) for f in HELD])
 
 
 def _a_running_guest():
@@ -643,75 +772,6 @@ class TestTheLiveWayIn(_LiveGuest):
         self.assertTrue(r.ok, r.out + r.err)
 
 
-# Pins `date -u +%s` to FAKE_EPOCH, so the skew is arithmetic rather than two reads of a moving clock.
-FAKE_DATE = """#!/bin/sh
-if [ "$1" = "-u" ] && [ "$2" = "+%s" ]; then echo "$FAKE_EPOCH"; exit 0; fi
-exec /bin/date "$@"
-"""
-
-
-HOST_EPOCH = 1788900000
-
-
-# `printf`, not `echo`: the first argument is `-n`.
-FAKE_SUDO = """#!/bin/sh
-printf '%s\\n' "$*" >> "$SUDO_LOG"
-exit ${SUDO_RC:-0}
-"""
-
-
-class TestGuestClock(WkTest):
-    def _drive(self, skew, sudo_rc=0, tolerance=None):
-        """Set the clock of a guest whose clock is `skew` seconds behind the host's (negative for ahead).
-        Returns (rc=<0|1> and what was said, sudo log text)."""
-        datebin = self.tmp / "date-bin"
-        sudobin = self.tmp / "sudo-bin"
-        for d, name, body in ((datebin, "date", FAKE_DATE),
-                              (sudobin, "sudo", FAKE_SUDO)):
-            d.mkdir(exist_ok=True)
-            (d / name).write_text(body)
-            (d / name).chmod(0o755)
-        log = self.tmp / "sudo.log"
-        log.write_text("")
-        env = {"HOME": str(self.tmp), "WK_VM_STORE": str(self.tmp / "vmstore"), "WK_STORE": str(self.tmp / "store")}
-        if tolerance:
-            env["WK_VM_CLOCK_SKEW"] = tolerance
-        guest_env = {"PATH": "%s:%s:%s" % (datebin, sudobin, os.environ["PATH"]), "FAKE_EPOCH": str(HOST_EPOCH - skew),
-                     "SUDO_LOG": str(log), "SUDO_RC": str(sudo_rc)}
-        err = io.StringIO()
-        with mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True), \
-                mock.patch.dict(os.environ, guest_env), contextlib.redirect_stderr(err):
-            vm = places.Registry(str(REPO), env=env).load("vm")
-            g = guest.Guest(guest.Host(vm, FakeClock(HOST_EPOCH)), "testguest", Local())
-            rc = 0 if g.set_guest_clock() else 1
-        return "rc=%d\n%s" % (rc, err.getvalue()), log.read_text()
-
-    def test_a_guest_behind_or_ahead_of_the_host_is_set_from_it(self):
-        for skew, said in ((11 * 86400, "950400s"), (-3600, "3600s")):
-            with self.subTest(skew=skew):
-                out, sudolog = self._drive(skew)
-                self.assertIn("rc=0", out, out)
-                self.assertIn("clock was", out, out)
-                self.assertIn(said, out, out)
-                self.assertIn("-n date -u ", sudolog, sudolog)
-
-    def test_a_guest_already_in_time_is_left_alone(self):
-        out, sudolog = self._drive(0)
-        self.assertIn("rc=0", out, out)
-        self.assertNotIn("clock was", out, out)
-        self.assertEqual("", sudolog.strip(), sudolog)
-
-    def test_a_guest_that_refuses_the_write_fails(self):
-        out, _ = self._drive(86400, sudo_rc=1)
-        self.assertIn("rc=1", out, out)
-
-    def test_wk_vm_clock_skew_sets_the_tolerance(self):
-        out, sudolog = self._drive(300, tolerance="600")
-        self.assertEqual("", sudolog.strip(), out)
-        out, sudolog = self._drive(300)
-        self.assertIn("-n date -u ", sudolog, out)
-
-
 # `tart`: one running guest called wk-demo, and the guest itself as a directory. `tart exec` hands the guest's
 # command as the last argument for a login shell, and everything it writes it writes under $HOME, so running that command with HOME
 # pointed at a scratch directory exercises the real umask, mkdir, redirect and rm -- not a transcript of them.
@@ -794,77 +854,6 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
         self.assertFalse((home / ".wk-ca-bundle.pem").exists())
 
 
-def _host(case, **env):
-    """A Host over this machine and a scratch vm store, as a macOS host has one."""
-    mac = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
-    mac.start()
-    case.addCleanup(mac.stop)
-    base = {"HOME": str(case.tmp / "home"), "PATH": os.environ["PATH"], "WK_STORE": str(case.tmp / "store"),
-            "WK_HOST_SECRETS": str(case.tmp / "store" / "secrets"), "WK_VM_STORE": str(case.tmp / "vmstore"),
-            "WK_LOCK_DIR": str(case.tmp / "locks"), "XDG_STATE_HOME": str(case.tmp / "state")}
-    base.update(env)
-    return guest.Host(places.Registry(str(REPO), env=base).load("vm"))
-
-
-def _quiet(fn, *args):
-    with contextlib.redirect_stderr(io.StringIO()) as err:
-        result = fn(*args)
-    return result, err.getvalue()
-
-
-class TestTheGuestsInjectorGetsTheStandingCredentials(WkTest):
-    def _start_inject(self, vmstore, pat=None, bz=None):
-        store = self.tmp / "store"
-        held = store / "push-keys"
-        held.mkdir(parents=True, exist_ok=True)
-        (store / "secrets").mkdir(parents=True, exist_ok=True)
-        for name, value in (("github-pat", pat), ("bugzilla-api-key", bz)):
-            if value is None:
-                (held / name).unlink(missing_ok=True)
-            else:
-                (held / name).write_text(value)
-        host = _host(self, WK_VM_STORE=str(vmstore))
-        with mock.patch.object(daemons, "answers", lambda m, sock: True):
-            return _quiet(host.start_inject)
-
-    def files(self, vmstore):
-        return {n: (vmstore / "vm" / n) for n in ("read-github-pat", "push-github-pat", "push-bugzilla-api-key")}
-
-    def test_a_start_writes_them_from_what_this_host_holds(self):
-        _, vmstore = _guest(self.tmp)
-        ok, err = self._start_inject(vmstore, pat="ghp-not-a-real-token\n", bz="bz-not-a-real-key\n")
-        self.assertTrue(ok, err)
-        got = self.files(vmstore)
-        self.assertEqual("ghp-not-a-real-token\n", got["read-github-pat"].read_text())
-        self.assertEqual("ghp-not-a-real-token\n", got["push-github-pat"].read_text())
-        self.assertEqual("bz-not-a-real-key\n", got["push-bugzilla-api-key"].read_text())
-        self.assertEqual([0o600] * 3, [p.stat().st_mode & 0o777 for p in got.values()])
-
-    def test_one_withdrawn_on_this_host_is_gone_at_the_next_start(self):
-        _, vmstore = _guest(self.tmp)
-        self._start_inject(vmstore, pat="ghp-not-a-real-token\n", bz="bz\n")
-        self._start_inject(vmstore, pat=None, bz=None)
-        self.assertEqual([False] * 3, [p.exists() for p in self.files(vmstore).values()])
-
-
-class TestEveryGuestStartConvergesTheCredentials(WkTest):
-    def test_a_start_that_finds_the_proxy_up_still_delivers_the_token(self):
-        _, vmstore = _guest(self.tmp)
-        store = self.tmp / "store"
-        (store / "push-keys").mkdir(parents=True, exist_ok=True)
-        (store / "secrets").mkdir(parents=True, exist_ok=True)
-        (store / "push-keys" / "github-pat").write_text("ghp-todays\n")
-        read_pat = vmstore / "vm" / "read-github-pat"
-        (vmstore / "vm").mkdir(parents=True, exist_ok=True)
-        read_pat.write_text("ghp-yesterdays\n")
-        host = _host(self, WK_VM_PROXY_ADDR="192.0.2.1")
-        with mock.patch.object(host, "ensure", lambda word: True), mock.patch.object(daemons, "answers", lambda m, sock: True), \
-                mock.patch.object(host.clock, "wait_until", lambda *a: True):
-            ok, err = _quiet(host.start_proxy)
-        self.assertTrue(ok, err)
-        self.assertEqual("ghp-todays\n", read_pat.read_text())
-
-
 class TestTheBuildMachineRecord(unittest.TestCase):
     def _stale(self, marker_text):
         far = Fake("box")
@@ -913,3 +902,4 @@ class TestDoctorReportsIt(unittest.TestCase):
         self.assertEqual((old[0], old[2]), (MISS, "wk machine setup old"))
         self.assertEqual(fresh[0], OK)
         self.assertEqual(["old", "fresh"], asked)
+
