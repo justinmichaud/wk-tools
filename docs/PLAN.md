@@ -1370,6 +1370,8 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A fresh container workspace reports itself wired right (the push alias is the push service's to resolve, not the workspace's ssh), and `wk new`'s summary tells a wiring finding from a fetch that failed | 3 | `live sync.fresh_workspace_wired` |
 | A referenced tree path exists: every `/opt/wk-tools/<path>` and `container/bin/<name>` a file names is in `git ls-files`, so an untracked file cannot leave a workspace's entry broken | 1 | `lint.referenced_paths_exist` |
 | The macOS `_remote_probe_cmd`/`_remote_probe_parse` branches hold against a live macOS or BSD remote, not only captured samples | 5 | `live remote.probe_macos_bsd` |
+| `wk ls` stays read-only on a peer whose own wk does not answer: its rows are read from here, `Peer.src` asks for an editor route (`wk zed <ws> --route`), and that generates this machine's zed key and fails the listing with "could not open a route" (seen 2026-11-20 in a world whose peer answered no `has_wk`) | 3 | `unit ls.readonly_on_a_mute_peer` |
+| One command line asks a place a question once: `wk enter`, `wk run` and `wk test` on a container ask `podman inspect … {{.State.Status}}` three times (the dispatcher's existence check, its readiness wait, the command's own `reg.present`), `wk scp` asks `{{.Config.WorkingDir}}` before every probe, and a guest copy asks `tart list` two or three times (read 2026-11-20 from the recorded effects of the flow tests) | 2 | `unit dispatch.asks_once` |
 
 ### Decisions for the user
 

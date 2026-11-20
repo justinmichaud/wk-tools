@@ -350,8 +350,7 @@ class World(Fake):
 
     def __init__(self, tmp=None, name="here", **env):
         super().__init__(name)
-        self.fake, self.clock = self, FakeClock()
-        self.tmp, self.env = None, {}
+        self.fake, self.clock, self.tmp, self.env = self, FakeClock(), None, {}
         if tmp is not None:
             self.tmp = Path(tempfile.mkdtemp(dir=str(tmp)))
             self.env = {"HOME": str(self.tmp / "home"), "WK_STORE": str(self.tmp / "store"),
@@ -417,7 +416,8 @@ class FlowTest(unittest.TestCase):
         """`wk <argv>` typed in world `w`, through the dispatcher: (exit status, stdout, stderr); `w.effects` is what it asked for."""
         os.environ.update(w.env)
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(dispatch, "_registry", w.reg), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+        with mock.patch.object(dispatch, "_registry", w.reg), mock.patch.object(dispatch.clock, "Clock", lambda: w.clock), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 self.assertRaises((act.Refused, SystemExit)) as cm:   # SystemExit: a dry run's end of an exec
             dispatch.main(list(argv))
         return getattr(cm.exception, "status", getattr(cm.exception, "code", None)), out.getvalue(), err.getvalue()

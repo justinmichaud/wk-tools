@@ -19,9 +19,8 @@ class TestZedStripsTheDispatchersVariables(unittest.TestCase):
     def test_without_reading_common_sh(self):
         zed = load_cmd("zed")
         seen = {}
-        with mock.patch.object(zed.Local, "exec", lambda self, argv, env: seen.update(env=env)), \
-                mock.patch.dict(os.environ, {"WK_NAME": "a", "WK_PRESET": "Debug", "KEEP": "1"}):
-            zed.exec_clean(["zed", "url"])
+        with mock.patch.dict(os.environ, {"WK_NAME": "a", "WK_PRESET": "Debug", "KEEP": "1"}):
+            zed.exec_clean(mock.Mock(exec=lambda argv, env: seen.update(env=env)), ["zed", "url"])
         self.assertNotIn("WK_NAME", seen["env"])
         self.assertNotIn("WK_PRESET", seen["env"])
         self.assertEqual("1", seen["env"]["KEEP"])

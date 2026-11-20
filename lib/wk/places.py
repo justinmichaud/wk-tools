@@ -1154,7 +1154,7 @@ class Container(Driver):
             r = self.machine.act_run(self.podman() + ["exec", c, BRIDGE, "/bin/sh", "-c",
                                                         "apt-get update -qq; apt-get install -y -qq --no-install-recommends openssh-server"])
             show(r)
-            if not r.ok or not self.machine.run(self.podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok:
+            if not act.dry_run() and not (r.ok and self.machine.run(self.podman() + ["exec", c, "test", "-x", "/usr/sbin/sshd"]).ok):
                 act.die("could not install openssh-server in '%s'.\n    A refused fetch is 'DENY <host>:<port>' in"
                         " journalctl --user -u wk-proxy; the allowlist is container/proxy/wk-proxy.py." % ws)
         pub = zed_key_pub(self.machine, self.env)

@@ -7,19 +7,17 @@ import os
 from wk import dispatch, guest, places, store
 from wk.act import die, log
 from wk.decl import Command, Opt
-from wk.machine import Local
-from wk.workspace import require_name
 
-COMMAND = Command(name="optional", here=True, outside=True, group="workspaces", opts=(
+COMMAND = Command(name="required", here=True, outside=True, group="workspaces", opts=(
     Opt("--url", "print the ssh:// URL and the `zed` command line for it instead of opening Zed"),
     Opt("--route", "prepare this workspace's sshd for the machine that asked, and print the user, src and proxy a "
         "route of its own needs")))
 
 
-def exec_clean(argv):
+def exec_clean(machine, argv):
     """Zed outlives this command and every terminal it opens inherits its environment,
     so the dispatcher's own variables are stripped first."""
-    Local().exec(argv, env={k: v for k, v in os.environ.items() if k not in dispatch.DISPATCH_VARS})
+    machine.exec(argv, env={k: v for k, v in os.environ.items() if k not in dispatch.DISPATCH_VARS})
 
 
 def main(args, inv):
@@ -27,13 +25,12 @@ def main(args, inv):
 
     zed = None
     if not url_only and not route:
-        zed = places.zed_cli(Local())
+        zed = places.zed_cli(inv.reg.machine)
         if zed is None:
             die("zed is not installed (no 'zed' on PATH, no /Applications/Zed.app)\n"
                 "    https://zed.dev/download -- 'wk doctor' checks for it, or add --url to print\n"
                 "    the route instead and open it from a machine that does have Zed")
 
-    require_name(name)
     driver = inv.reg.driver_of(name)
     if driver.state(name) == "broken":
         die(driver.broken_words(name))
@@ -63,6 +60,6 @@ def main(args, inv):
         print(url)
         log("  zed '%s'" % url)
     else:
-        exec_clean([zed, url])
+        exec_clean(inv.reg.machine, [zed, url])
     return 0
 

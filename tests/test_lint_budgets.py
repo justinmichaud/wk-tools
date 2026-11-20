@@ -43,18 +43,18 @@ ROWS = {
 }
 FIXTURES_BUDGET = 800
 # row: (core interim, tests interim), measured 2026-10-22 after the day's cuts; lowered, never raised.
-INTERIM = {"dispatcher": (773, 932),
+INTERIM = {"dispatcher": (773, 931),
            "machine": (489, 1784),
-           "places": (1771, 3996),
+           "places": (1771, 3951),
            "record": (1242, 2700),
-           "workspace": (2980, 5759),
+           "workspace": (2980, 5739),
            "secrets": (2559, 4683),
            "status": (1704, 2706),
            "bench": (6313, 6785),
            "boot": (1260, 2243),
            "sysimage": (3749, 3060),
            "guest": (2155, 3513),
-           "cmd": (878, 0),
+           "cmd": (875, 0),
            "lint rules": (0, 2072),
            "live bodies": (0, 151),
            "fixtures": (0, 1801)}
