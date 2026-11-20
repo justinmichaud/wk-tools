@@ -158,7 +158,6 @@ class Host:
         return False
 
     def start_push(self):
-        """The push service every guest's push reaches, run here because a guest cannot see a unix socket across the hypervisor."""
         with self.lock().held("vm-daemons"):
             return self.ensure("push")
 
@@ -431,7 +430,6 @@ def unexpected(root, machine, windows):
 
 
 def streamed(g, script):
-    """What `script`, streamed to the guest's bash, printed without the TTY's carriage returns; "" when it failed."""
     r = g.run(["bash", "-s"], input=script)
     return r.out.replace("\r", "") if r.ok else ""
 

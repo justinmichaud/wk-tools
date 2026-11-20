@@ -149,8 +149,7 @@ def main(args, inv):
         return bench.seed(store.ws_name() or args.name, word, bool(store.ws_name()))
     if verb == "run":
         return run(args, reg, Clock())
-    if verb == "deploy":
-        return bench.deploy(store.ws_name(), word, cli.options(args, plans=args.values("--plan"), preset=store.build_preset()))
-    if verb == "ab":
-        return bench.ab(word, cli.options(args, plans=args.values("--plan"), preset=store.build_preset()), args.flag("--kill"))
+    if verb in ("deploy", "ab"):
+        opts = cli.options(args, plans=args.values("--plan"), preset=store.build_preset())
+        return bench.deploy(store.ws_name(), word, opts) if verb == "deploy" else bench.ab(word, opts, args.flag("--kill"))
     return bench.plans()

@@ -41,9 +41,8 @@ except OSError:
 
 class Daemon(collections.namedtuple("Daemon", "word env socket sandbox boot lock argv domain keep",
                                     defaults=(None, (), True, None, None, "user", True))):
-    """`socket`: what answers once it serves, else being loaded is serving; `boot`: RunAtLoad; `keep`: KeepAlive, True, False
-    or {"SuccessfulExit": False}; `lock`: a login whose lock a stop holds; `argv`: the command, else /usr/bin/python3 over the
-    word's program under PROGRAMS, whose stamp the rendering carries; `domain`: `user` (gui/<uid>, systemd --user) or `system`."""
+    """`socket`: what answers once it serves (else being loaded is serving); `boot`: RunAtLoad; `keep`: KeepAlive; `lock`: a login
+    whose lock a stop holds; `argv`: the command, else PROGRAMS[word] under python3, its stamp in the rendering; `domain`: user or system."""
 
     def command(self, root):
         return list(self.argv) if self.argv else ["/usr/bin/python3", os.path.join(root, PROGRAMS[self.word])]

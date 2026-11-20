@@ -88,7 +88,6 @@ def _coregraphics():
 
 
 def _display_services():
-    # macOS ships no brightness CLI; this private framework is the mechanism.
     u32, i32, boolean = ctypes.c_uint32, ctypes.c_int32, ctypes.c_bool
     return _bind(DS_FRAMEWORK, {
         "DisplayServicesGetBrightness": (i32, u32, ctypes.POINTER(ctypes.c_float)),

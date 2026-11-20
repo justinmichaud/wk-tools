@@ -140,10 +140,7 @@ class BuildMachines:
             die("aborted -- nothing was changed")
         far, line = t._far(), tools + "/shell/bashrc"
         for rc in (t.home() + "/" + f for f in RC_FILES):
-            try:
-                text = far.read(rc)
-            except OSError:
-                continue
+            text = far.read_or(rc)
             if line in text:
                 far.write(rc, "".join(l for l in text.splitlines(True) if line not in l and RC_MARK not in l))
                 info("removed the wk-tools line from %s" % rc)
