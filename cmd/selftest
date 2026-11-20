@@ -10,7 +10,7 @@ import sys
 from wk.decl import Command, Opt
 from wk.machine import here
 
-COMMAND = Command(where="local", takes=("[<pattern>]",), needs=("python3",), dryrun=False, group="hosts", opts=(
+COMMAND = Command(where="local", takes=("[<pattern>]",), needs=("python3",), dryrun=False, setup=False, group="hosts", opts=(
     Opt("--lint", "the static rules: one pass over the tree"),
     Opt("--unit", "every test that needs no VM, machine or board"),
     Opt("--live", "the tests that make a real workspace or reach a real machine; each skips by name when its machine "

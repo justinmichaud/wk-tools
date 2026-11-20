@@ -95,8 +95,7 @@ class TestStartAndStopHaveADryRun(unittest.TestCase):
             self.assertIn("would run: podman stop --time 30 wk-a wk-b", self.dry(stop.stop_everything, self.reg, False))
 
     def test_stop_everything_when_the_podman_machine_does_not_answer(self):
-        """`unit stop.hung_vm`: no ./setup first; a listing past WK_SSH_TIMEOUT still stops the machine, or with --keep-vm exits 3."""
-        self.assertFalse(load_cmd("stop").COMMAND.setup)
+        """`unit stop.hung_vm`: a listing past WK_SSH_TIMEOUT still stops the machine, or with --keep-vm exits 3."""
         self.m.answer(["podman", "ps"], rc=124)
         self.reg.load.side_effect = lambda p: mock.Mock(list=list) if p == "vm" else self.ctr
         self.ctr.machine_state = lambda: "running"

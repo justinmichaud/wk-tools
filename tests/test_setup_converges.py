@@ -8,7 +8,7 @@ import sys
 from unittest import mock
 
 from tests import fakes
-from tests.support import REPO
+from tests.support import REPO, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import dispatch, setupstate  # noqa: E402
@@ -117,6 +117,7 @@ class TestTheDispatcherRunsIt(SetupTest):
         self.assertEqual([], self.converge(why=("behind", ""))[0])
 
     def test_a_readonly_command_one_declaring_setup_false_or_one_inside_a_workspace_never_runs_it(self):
+        self.assertEqual([], [c for c in ("selftest", "stop") if load_cmd(c).COMMAND.setup], "these declare setup=False")
         for kw in ({"readonly": True}, {"setup": False}, {"inside": True}):
             with self.subTest(**kw):
                 self.assertEqual(([], ""), self.converge(**kw))
