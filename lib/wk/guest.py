@@ -10,7 +10,7 @@ from wk.act import Refused, debug, die, info, log, warn
 import wk.clock
 from wk.daemons import Daemon
 from wk.lock import Lock
-from wk.store import GUEST_BROKER_SOCKET, GUEST_PUSH_SOCKET, Store, no_such_workspace
+from wk.store import GUEST_BROKER_SOCKET, GUEST_PUSH_SOCKET, Store
 
 SUBNET = "192.168.2"   # Softnet's own network, not vmnet's 192.168.64
 PROXY_PORT = "3128"
@@ -609,8 +609,6 @@ def start(vm, ws, clock=None):
     host = Host(vm, clock)
     with host.lock().held("guest-" + ws):
         state = vm.vm_state(ws)
-        if state == "absent":
-            die(no_such_workspace(ws))
         if state == "running":
             ip = vm.ip(ws)
             if not ip:

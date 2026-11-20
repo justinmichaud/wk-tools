@@ -748,12 +748,6 @@ class TestTheGuestGetsTheInjectorsCa(WkTest):
 
 
 class TestNotReachableFromTheCli(GuestStart):
-    def test_an_absent_guest_is_refused_by_the_start_itself(self):
-        """Registry.present refuses a workspace whose guest tart does not list before guest.start reads tart."""
-        vm = self.w.driver
-        del self.w.vms["wk-ws"]
-        self.assertEqual(said(self.refused(lambda: guest.start(vm, "ws"))), "error: no such workspace: ws -- 'wk ls' lists them")
-
     def test_the_injectors_row_names_its_files_the_login_it_holds_and_the_machine_it_publishes_into(self):
         """./setup --stage inject renders this row (python3 -m wk.daemons here)."""
         host = guest.Host(self.w.driver)
