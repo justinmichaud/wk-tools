@@ -14,7 +14,7 @@ from pathlib import Path
 from wk import act, clock, completion, decl, guest, images, places, presets, project, repos, setupstate
 from wk.act import info, log, warn
 from wk.lock import Lock
-from wk.machine import Local, Ssh, is_macos
+from wk.machine import Ssh, is_macos
 from wk.reach import Reach
 from wk.store import Store, build_preset, dispatch_place, in_vm, no_such_workspace, ws_name
 
@@ -158,7 +158,7 @@ def explain(cmd, module, preview=""):
     if any(o.flag == "--repo" for o in table.opts):
         out += ["", "valid values (--repo):"] + ["  %s%s" % (r, " (the default)" if r == project.get("REPO") else "") for r in repos.names()]
     if table.values:
-        r = Local().run([str(ROOT / "wk"), cmd, table.values])
+        r = registry().machine.run([str(ROOT / "wk"), cmd, table.values])
         out += ["", "valid values (wk %s %s):" % (cmd, table.values)] + ["  " + line for line in (r.out + r.err).splitlines()]
     sys.stdout.write("usage: %s\n  %s\n\n%s%s\n" % (decl.usage(cmd, table), decl.summary(module), preview, "\n".join(out)))
     raise Exit(0)
@@ -241,7 +241,7 @@ def help_doc(topic):
 
 
 def podman_vm():
-    return places.podman_vm(Local(), MACHINE) if shutil.which("podman") else None
+    return places.podman_vm(registry().machine, MACHINE) if shutil.which("podman") else None
 
 
 def start_podman_machine(machine, cmd, terminal):
@@ -270,7 +270,7 @@ def vm_argv(inv, argv):
             warn("the podman machine '%s' is stopped, so its store cannot be read" % MACHINE)
             log("  'wk start' to bring it up -- 'wk %s' will not start it" % inv.cmd)
             raise Exit(0)
-        start_podman_machine(Local(), inv.cmd, tty())
+        start_podman_machine(registry().machine, inv.cmd, tty())
     line = registry().load("container").wk_cmd([inv.cmd, *argv], os.environ)
     if tty() or inv.command.session:   # a session's far end needs a pty: the client's death is then its SIGHUP
         opts, dest = places.podman_vm_route(rec)
@@ -308,7 +308,7 @@ def delegate_run(driver, cmd, args, readonly=False, session=False):
 
 
 def check_needs(cmd, t, machine=None):
-    machine, missing = machine or Local(), []
+    machine, missing = machine or registry().machine, []
     for n in t.needs:
         if n == "gh-auth":
             from wk.doctor import gh_authenticated
@@ -331,7 +331,7 @@ def converge_setup(cmd, t, machine=None):
     """./setup where it is behind; a timeout gives it a session with no terminal, which sudo asks a password on."""
     if t.readonly or not t.setup or in_workspace() or in_vm() or registry().in_remote_host():
         return
-    machine = machine or Local()
+    machine = machine or registry().machine
     why = setupstate.behind(str(ROOT), os.environ, machine)
     if not why:
         return

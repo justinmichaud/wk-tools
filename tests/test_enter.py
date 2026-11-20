@@ -1,17 +1,12 @@
 """`wk enter` -- a shell in a workspace, or one command run there and exited."""
-import contextlib
-import io
 import os
 import shutil
-import sys
 import tempfile
 import unittest
-from unittest import mock
 
-from tests.support import REPO, WkTest, as_dispatched, fake_workspace, invocation, load_cmd, run
-
-sys.path.insert(0, str(REPO / "lib"))
-from wk.act import Refused  # noqa: E402
+from tests.support import WkTest, fake_workspace
+from tests.test_wk_workspace import WorkspaceTest
+from wk import places
 
 
 class TestRunsCommand(WkTest):
@@ -21,15 +16,6 @@ class TestRunsCommand(WkTest):
         self.assertEqual(cp.returncode, 3, cp.stdout)
         self.assertIn("out", cp.stdout)
         self.assertIn("err", cp.stdout)
-
-    def test_a_dry_run_prints_the_command_and_runs_nothing(self):
-        with fake_workspace() as ws:
-            marker = ws.ws_dir / "dry-run-ran"
-            cp = ws.run("enter", "--dry-run", "touch", str(marker))
-            self.assertEqual(cp.returncode, 0, cp.stdout)
-            self.assertIn("would run:", cp.stdout)
-            self.assertIn("touch %s" % marker, cp.stdout)
-            self.assertFalse(marker.exists(), "a dry run ran the command")
 
     def test_zed_is_wk_zed_by_name_rather_than_a_command(self):
         stub = tempfile.mkdtemp(prefix="wk-test-zed-")
@@ -45,37 +31,38 @@ class TestRunsCommand(WkTest):
         self.assertNotIn("should-never-run", cp.stdout)
 
 
-class TestNoTerminalAsksForNone(unittest.TestCase):
-    def setUp(self):
-        self.enter = load_cmd("enter")
-        self.driver = mock.Mock(**{"info.return_value": "present", "exec_argv.return_value": (["true"], None)})
-        self.reg = mock.Mock(**{"present.return_value": self.driver})
-        for p in (mock.patch.dict(os.environ, {"WK_NAME": "ws"}), mock.patch("sys.stdin", io.StringIO(""))):
-            p.start()
-            self.addCleanup(p.stop)
+class TestEnterFlows(WorkspaceTest):
+    """`wk enter ws ...` typed on the machine holding container workspace `ws`."""
 
-    def test_the_command_is_exec_argv_without_a_tty_and_replaces_this_process(self):
-        self.enter.main(as_dispatched("enter", ["git", "status"]), invocation(self.reg))
-        self.driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=True)
-        self.reg.machine.exec.assert_called_once_with(["true"], None)
+    def setUp(self):
+        super().setUp()
+        self.w.make("ws")
+        self.w.effects = []
+
+    def entered(self, *argv):
+        rc, _, err = self.wk(self.w, "enter", *argv)
+        last = self.w.effects[-1] if self.w.effects else (None, ())
+        return rc, err, list(last[1]) if last[0] == "exec" else None
+
+    def test_a_command_replaces_this_process_with_the_sdk_enter_asking_no_tty_as_a_person(self):
+        rc, _, argv = self.entered("ws", "git", "status")
+        self.assertEqual((rc, argv[argv.index("--name"):]), (0, ["--name", "wk-ws", "--no-tty", "--exec", "--", places.BRIDGE,
+                                                                  "/opt/wk-tools/container/bin/wk-person", "git", "status"]))
 
     def test_own_runs_the_command_as_wks_own_not_a_persons_and_takes_no_shell(self):
-        self.enter.main(as_dispatched("enter", ["--own", "--", "git", "status"]), invocation(self.reg))
-        self.driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=False)
-        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            self.enter.main(as_dispatched("enter", ["--own"]), invocation(self.reg))
-        self.assertIn("--own takes a command", err.getvalue())
+        rc, _, argv = self.entered("ws", "--own", "--", "git", "status")
+        self.assertEqual((rc, argv[argv.index("--exec"):]), (0, ["--exec", "--", places.BRIDGE, "git", "status"]))
+        self.assertEqual(self.entered("ws", "--own"), (1, "error: --own takes a command: a shell is always your own\n", None))
 
+    def test_a_dry_run_prints_the_command_and_replaces_nothing(self):
+        rc, err, argv = self.entered("ws", "--dry-run", "touch", "x")
+        self.assertEqual((rc, argv), (0, None))
+        self.assertRegex(err, r"^would run: env .* touch x\n$")
 
-class TestNoSuchWorkspace(WkTest):
-    def test_refuses_by_name_without_landing_anywhere_with_or_without_dash_dash(self):
-        # WK_PLACE=vm: an absent name otherwise resolves to the container place, which a macOS host forwards to podman.
+    def test_no_such_workspace_is_refused_by_name_with_or_without_dash_dash(self):
         for rest in (["true"], ["--", "true"]):
-            with self.subTest(rest=rest):
-                cp = run("enter", "no-such-workspace-abcxyz", *rest, env={"WK_PLACE": "vm"})
-                self.assertNotEqual(cp.returncode, 0)
-                self.assertIn("no such workspace", cp.stdout)
-                self.assertNotIn("--: command not found", cp.stdout)
+            rc, err, argv = self.entered("nope", *rest)
+            self.assertEqual((rc, argv, err.splitlines()[0]), (2, None, "warning: no such workspace: nope -- 'wk ls' lists them"))
 
 
 if __name__ == "__main__":

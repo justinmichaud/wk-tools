@@ -18,7 +18,7 @@ from unittest import mock
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, job, places, record  # noqa: E402
+from wk import act, dispatch, job, places, record  # noqa: E402
 from wk.clock import Clock  # noqa: E402
 from wk.machine import LOGIN, Local, Machine, Planted, Result, matches  # noqa: E402
 
@@ -61,19 +61,9 @@ class Fake(Machine):
     effect after that many raises Killed instead of landing."""
 
     def __init__(self, name="fake"):
-        self.name = name
-        self.files = {}
-        self.dirs = set()
-        self.links = set()
-        self.mtimes = {}
-        self.pids = {os.getpid()}
-        self.answers = []
-        self.effects = []
-        self.next_pid = 1000
-        self.stop_after = None
-        self.applied = 0
-        self.streamed = []
-        self._acting = False
+        self.name, self.files, self.dirs, self.links, self.mtimes, self.pids = name, {}, set(), set(), {}, {os.getpid()}
+        self.answers, self.effects, self.streamed = [], [], []
+        self.next_pid, self.stop_after, self.applied, self._acting = 1000, None, 0, False
 
     def answer(self, prefix, rc=0, out="", err=""):
         self.answers.append((tuple(prefix), Result(rc, out, err)))
@@ -422,6 +412,15 @@ class FlowTest(unittest.TestCase):
 
     def dry_run(self):
         os.environ["WK_DRY_RUN"] = "1"
+
+    def wk(self, w, *argv):
+        """`wk <argv>` typed in world `w`, through the dispatcher: (exit status, stdout, stderr); `w.effects` is what it asked for."""
+        os.environ.update(w.env)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(dispatch, "_registry", w.reg), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                self.assertRaises((act.Refused, SystemExit)) as cm:   # SystemExit: a dry run's end of an exec
+            dispatch.main(list(argv))
+        return getattr(cm.exception, "status", getattr(cm.exception, "code", None)), out.getvalue(), err.getvalue()
 
 
 class FakeProc:

@@ -45,7 +45,7 @@ FIXTURES_BUDGET = 800
 # row: (core interim, tests interim), measured 2026-10-22 after the day's cuts; lowered, never raised.
 INTERIM = {"dispatcher": (773, 932),
            "machine": (489, 1784),
-           "places": (1771, 4009),
+           "places": (1771, 3996),
            "record": (1242, 2700),
            "workspace": (2984, 5759),
            "secrets": (2560, 4683),
@@ -57,7 +57,7 @@ INTERIM = {"dispatcher": (773, 932),
            "cmd": (878, 0),
            "lint rules": (0, 2072),
            "live bodies": (0, 151),
-           "fixtures": (0, 1803)}
+           "fixtures": (0, 1801)}
 
 
 def tracked():

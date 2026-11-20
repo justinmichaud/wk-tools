@@ -192,7 +192,7 @@ class World(fakes.World):
             return self.wkdev_create(argv, f)
         if argv[-1].endswith("print-sdk-version"):
             return Result(0, "2.55-v1-abc\n")
-        return self._exec(["exec", argv[argv.index("--name") + 1][3:]] + list(argv[argv.index("--") + 2:]), f)
+        return self._in_ws(["exec", argv[argv.index("--name") + 1][3:]] + list(argv[argv.index("--") + 2:]), f)
 
     def _find(self, argv, f):
         p = argv[1]
@@ -204,7 +204,7 @@ class World(fakes.World):
                 return r(argv) if callable(r) else r
         return Result(127, "", "no bash answer for: %s" % argv[2][-60:])
 
-    def _exec(self, argv, f):
+    def _in_ws(self, argv, f):
         if argv[2:4] == ["kill", "-0"]:
             return Result(0 if int(argv[4]) in f.pids else 1)
         if "echo yes || echo no" in argv[-1]:
@@ -636,13 +636,13 @@ class TestNewDriver(WorkspaceTest):
 
     def test_an_agent_install_that_fails_fails_the_creation_and_a_rerun_remakes_it(self):
         def failing(argv, f):
-            return Result(1, "claude=failed\n") if "claude.ai/install.sh" in argv[-1] else World._exec(f, argv, f)
-        self.w._exec = failing
+            return Result(1, "claude=failed\n") if "claude.ai/install.sh" in argv[-1] else World._in_ws(f, argv, f)
+        self.w._in_ws = failing
         self.assertIn("could not install the coding agents in 'ws' (claude=failed pi=?)", self.refused(lambda: self.detached()))
         (t,) = self.w.records.list()
         self.assertNotEqual("0", t.field("exit"))
         self.assertEqual("creating", workspace.creation_state(self.w.driver, self.w.records, "ws"))
-        del self.w._exec
+        del self.w._in_ws
         rc, err = self.stderr(lambda: self.detached())
         self.assertEqual(0, rc, err)
         self.assertIn("'ws' exists but was never finished -- destroying it and starting again", err)
