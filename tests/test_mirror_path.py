@@ -1,245 +1,189 @@
-"""Where a checkout fetches from, per place: Driver.mirror_dir (lib/wk/places.py)."""
-import contextlib
-import io
+"""Where each machine keeps its mirror, what it carries, and how a snapshot, a workspace and a build read it: `wk sync`,
+`wk build` and `wk pr` typed into worlds whose git runs for real."""
 import os
-import shutil
-import subprocess
 import sys
 import unittest
-from unittest import mock
+from pathlib import Path
 
-from tests.support import REPO, GitMirror, WkTest, git_run
+from tests import test_pr_workflow, test_sync, test_wk_build
+from tests.fakes import JobDriver
+from tests.support import REPO, GitMirror, git_run
+from tests.test_new_fetch import BoxFlow, WorkspaceFlow, real
+from tests.test_wk_workspace import said
 
-sys.path.insert(0, str(REPO / "lib"))
-from wk import act, git, images, places, sync  # noqa: E402
-from wk.machine import Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
-from wk.store import Store  # noqa: E402
-from wk.clock import Clock  # noqa: E402
-
-
-def _probe(argv, fake):
-    """A build box that answers the probe (home, uname, cores) and names no shared reference checkout in its MOTD."""
-    return Result(0, "" if "motd" in argv[-1] else "/home/box\nLinux\n4\n0.1 0 0\n===MEM===\nMemAvailable: 1024 kB\n===IONICE===\nno\n")
+GUEST = "/Volumes/wk-mirror/mirror/WebKit.git"
 
 
-def _driver(kind, env=None, system="Darwin"):
-    """Asked inside the uname stub: LocalWorkspace reads uname when asked, the only evidence of its kind."""
-    fake = Fake("here")
-    fake.react(["sh", "-c"], _probe)
-    env = dict({"HOME": "/nonexistent", "WK_STORE": "/the/store", "XDG_STATE_HOME": "/state",
-                "WK_MARKER": "/nonexistent/marker"}, **(env or {}))
-    with mock.patch("wk.places.os.uname", return_value=mock.Mock(sysname=system)), \
-         mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname=system)):
-        return places.Registry(REPO, env, fake).load(kind).mirror_dir()
+class TestEachPlaceNamesItsMirror(test_sync.Flow):
+    """A workspace's fetch reads the mirror of the place it is on, and its row names it."""
+
+    def row(self, w, *argv):
+        rc, err = self.sync(*argv, w=w)
+        self.assertEqual(rc, 0, err)
+        return next(l for l in err.splitlines() if l.startswith("  %-24s ok  (" % "one")).split("(", 1)[1][:-1]
+
+    def test_a_container_reads_the_store_a_guest_its_mount_and_a_build_box_its_own(self):
+        w = self.make_world()
+        w.make("one")
+        self.assertEqual(self.row(w, "one"), w.env["WK_STORE"] + "/git/WebKit.git")
+        w = self.make_world(kinds={"vm": "vm"}, in_vm=False)
+        w.make_guest("one")
+        self.assertEqual(self.row(w, "one"), GUEST)
+        w = self.make_world(kinds={"buildbox4": "remote"}, in_vm=False)
+        w.env.update(WK_REMOTE_LOCAL="1", WK_REMOTE_ROOT="/far")
+        w.dirs.add("/far/ws/one")
+        w.files["/far/ws/one/.wk-ready"] = ""
+        self.assertEqual(self.row(w, "one"), "/far/mirror")
+
+    def inside(self, **env):
+        w = self.make_world(kinds={"local": "local"}, in_vm=False)
+        Path(w.env["WK_MARKER"]).write_text("name=one\nsrc=/src/WebKit\n")
+        w.env.update(env)
+        w.answer(["test", "-S"])
+        w.files[test_sync.CLIENT] = ""
+        return w
+
+    @unittest.skipUnless(sys.platform == "darwin", "a workspace on macOS is a guest")
+    def test_inside_a_guest_it_is_the_guests_mount(self):
+        self.assertEqual(self.row(self.inside(WK_MIRROR="/elsewhere")), GUEST)
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "a workspace on Linux is a container")
+    def test_inside_a_container_it_is_the_one_its_place_handed_it(self):
+        self.assertEqual(self.row(self.inside(WK_MIRROR="/some/store/git/WebKit.git")), "/some/store/git/WebKit.git")
 
 
-class TestEveryDriverNamesOne(WkTest):
-    def setUp(self):
-        super().setUp()
-        # A build box driven without ssh (WK_REMOTE_LOCAL), in a registry of its own.
-        self.registry = self.tmp / "hosts"
-        self.registry.mkdir()
-        (self.registry / "fakebox.conf").write_text(
-            "kind=build\ndriver=remote\nlocal=1\n"
-            f"root={self.tmp / 'remote-root'}\n"
-            f"store={self.tmp / 'remote-store'}\n")
+class Refreshing(test_sync.Host):
+    """A host whose mirror refresh and git run for real, origin and the fork answered by local repositories
+    (support.GitMirror's) through a global `insteadOf`, and a new repository's first branch is not main; WPEWebKit and
+    its fork are not reached."""
 
-    def test_each_place_names_its_own_and_a_workspace_the_one_of_the_kind_it_is(self):
-        """LocalWorkspace runs in both kinds of workspace, so it answers from `uname -s`."""
-        guest = places.GUEST_MIRROR_MOUNT + "/mirror/WebKit.git"
-        for got, want in ((places.Driver("demo", str(REPO), {}, Fake("here")).mirror_dir(), ""),
-                          (_driver("fakebox", {"WK_MACHINES_DIR": str(self.registry)}), str(self.tmp / "remote-root" / "mirror")),
-                          (_driver("vm"), guest), (_driver("local"), guest),
-                          (_driver("container", {"WK_IN_VM": "1"}), Store({"WK_STORE": "/the/store", "WK_IN_VM": "1"}).mirror_dir()),
-                          (_driver("local", {"WK_MIRROR": "/some/store/git/WebKit.git"}, system="Linux"), "/some/store/git/WebKit.git")):
-            with self.subTest(want=want):
-                self.assertEqual(got, want)
-        self.assertTrue(_driver("container").startswith("/"))
-        self.assertNotIn(_driver("container"), (guest, str(self.tmp / "remote-root" / "mirror")))
+    def __init__(self, tmp, **kw):
+        super().__init__(tmp, in_vm=False, **kw)
+        self.up = GitMirror(self.tmp)
+        (self.tmp / "gitconfig").write_text('[init]\n\tdefaultBranch = master\n[url "%s"]\n\tinsteadOf = https://github.com/WebKit/WebKit.git\n'
+                                            '[url "%s"]\n\tinsteadOf = https://github.com/justinmichaud/WebKit.git\n' % (self.up.upstream, self.up.fork))
+        self.git_env = {"GIT_CONFIG_GLOBAL": str(self.tmp / "gitconfig")}
+        self.effects = []
 
+    def _git(self, argv, f):
+        return real(argv, self.git_env)
 
-class MirrorFixture(WkTest):
-    """A mirror made by the real mirror_refresh_script (lib/wk/git.py) out of two local repositories standing in
-    for the upstreams -- git takes a path as a URL, so nothing here reaches the network."""
-
-    ENV = {"WK_MIRROR_BRANCHES": "main"}
-
-    def setUp(self):
-        super().setUp()
-        m = GitMirror(self.tmp)
-        self.remotes, self.mirror = m.remotes, m.mirror
-
-    def wire_fetches(self, ws):
-        script = git.render(str(ws), git.fetch_config(str(self.mirror), ["main"], self.remotes))
-        cp = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
+    def _sh(self, text):
+        if test_sync.kind_of(text) != "refresh":
+            return super()._sh(text)
+        r = real(["sh", "-c", text], self.git_env)
+        self.dirs.add(self.mirror)
+        return r
 
 
-class TestOneMirrorLayoutEverywhere(MirrorFixture):
-    """mirror_refresh_script (lib/wk/git.py) makes every mirror in the fleet -- this machine's, a build box's, a
-    guest's -- and lib/wk/sync.py's fetch_script is what a workspace fetches from one with, so the emitter and
-    the consumer are held to one layout here rather than to two descriptions of it."""
+class TestTheRefresh(test_sync.Flow):
+    world_class = Refreshing
 
-    def test_origins_branches_are_the_mirrors_own_heads_and_forks_are_namespaced(self):
-        refs = git_run("for-each-ref", "--format=%(refname)",
-                         cwd=self.mirror).stdout.split()
-        self.assertIn("refs/heads/main", refs)
-        self.assertIn("refs/remotes/fork/side", refs)
-        self.assertEqual(
-            git_run("symbolic-ref", "HEAD", cwd=self.mirror).stdout.strip(),
-            "refs/heads/main")
+    def test_it_carries_origins_branches_as_its_heads_and_each_fork_under_its_name_with_no_tags_and_no_repack(self):
+        rc, err = self.sync("--mirror")
+        m = self.w.mirror
+        self.assertEqual(err.splitlines()[2:], ["  origin   ok", "  wpe      FAILED (continuing)", "  fork     ok", "  forkwpe  FAILED (continuing)"])
+        refs = git_run("for-each-ref", "--format=%(refname)", cwd=m).stdout.split()
+        self.assertEqual((rc, "refs/heads/main" in refs, "refs/remotes/fork/side" in refs), (0, True, True))
+        self.assertEqual([git_run(*a, cwd=m).stdout.strip() for a in (("symbolic-ref", "HEAD"), ("config", "remote.origin.tagOpt"), ("config", "gc.auto"))],
+                         ["refs/heads/main", "--no-tags", "0"])
 
-    def test_it_follows_no_tags_and_is_never_repacked_under_a_sharing_clone(self):
-        for key, want in (("remote.origin.tagOpt", "--no-tags"), ("gc.auto", "0")):
-            with self.subTest(key=key):
-                self.assertEqual(git_run("config", key, cwd=self.mirror).stdout.strip(), want)
-
-    def test_a_wired_checkout_writes_no_commit_graph_on_fetch(self):
-        ws = self.tmp / "ws-graph"
-        git_run("clone", "-q", "--shared", "--branch", "main",
-                  str(self.mirror), "ws-graph", cwd=self.tmp)
-        self.wire_fetches(ws)
-        for key in ("fetch.writeCommitGraph", "gc.writeCommitGraph"):
-            with self.subTest(key=key):
-                self.assertEqual(git_run("config", key, cwd=ws).stdout.strip(), "false")
-
-    def test_a_workspace_fetch_against_it_takes_the_mirror_arm(self):
-        ws = self.tmp / "ws"
-        git_run("clone", "-q", "--shared", "--branch", "main",
-                  str(self.mirror), "ws", cwd=self.tmp)
-        for remote, bare in (("origin", "up.git"), ("fork", "fk.git")):
-            git_run("remote", "remove", remote, cwd=ws, check=False)
-            git_run("remote", "add", remote, str(self.tmp / bare), cwd=ws)
-        self.wire_fetches(ws)
-        for bare in ("up.git", "fk.git"):
-            shutil.rmtree(self.tmp / bare)
-        out = subprocess.run(["sh", "-c", sync.fetch_script(str(ws), "")], cwd=str(self.tmp),
-                             capture_output=True, text=True)
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        refs = git_run("for-each-ref", "--format=%(refname)", cwd=ws).stdout.split()
-        self.assertIn("refs/remotes/origin/main", refs)
-        self.assertIn("refs/remotes/fork/side", refs)
+    def test_it_carries_main_and_every_image_configurations_branch_unless_told_otherwise(self):
+        for branches, line in ((None, "main webkitglib/2.52"), ("main only/this", "main only/this")):
+            if branches is None:
+                del self.w.env["WK_MIRROR_BRANCHES"]
+            else:
+                self.w.env["WK_MIRROR_BRANCHES"] = branches
+            self.assertIn("==> fetching origin wpe fork forkwpe (origin: %s)" % line, self.sync("--mirror")[1].splitlines())
 
 
-class TestABranchIsTakenFromTheMirrorFirst(MirrorFixture):
-    """`wk build <ws> <branch>` and the babysitter fetch one branch before they build."""
+class TestOneMirrorPerMachine(test_sync.Flow):
+    """A machine keeps one mirror, where `wk sync` runs: a macOS host in its own state, the podman VM and a Linux host
+    in the store."""
 
-    def _step(self, branch, mirror):
-        return git.origin_branch_fetch_step(branch, str(mirror) if mirror else "")
+    def test_a_macos_host_keeps_it_in_its_state(self):
+        w = self.make_world(kinds={"vm": "vm"}, in_vm=False)
+        self.sync("--mirror", w=w)
+        self.assertIn(("mkdir", w.env["XDG_STATE_HOME"] + "/wk/git"), w.effects)
 
-    def _checkout(self):
-        ws = self.tmp / "co"
-        git_run("clone", "-q", "--shared", "--branch", "main",
-                  str(self.mirror), "co", cwd=self.tmp)
-        git_run("remote", "set-url", "origin", str(self.tmp / "up.git"), cwd=ws)
-        return ws
+    @unittest.skipUnless(sys.platform.startswith("linux"), "this host is a Linux one")
+    def test_a_linux_host_keeps_it_in_the_store(self):
+        w = self.make_world(in_vm=False)
+        self.sync("--mirror", w=w)
+        self.assertIn(("mkdir", w.env["WK_STORE"] + "/git"), w.effects)
+
+    def test_the_podman_vm_reads_it_in_the_store(self):
+        rc, err = self.sync("--tools", "container")
+        self.assertEqual((rc, said(err)), (1, "error: no mirror at %s/git/WebKit.git to publish a snapshot from -- 'wk sync' on the host makes it" % self.w.env["WK_STORE"]))
+
+    def test_nothing_fetches_into_it_from_the_podman_vm(self):
+        w = test_pr_workflow.on_branch(self.tmp, "remote")
+        w.env["WK_IN_VM"] = "1"
+        rc, _, err = self.wk(w, "pr", "open", "ws")
+        self.assertEqual((rc, said(err), w.here_ran("git")), (1, "error: the mirror in here is the host's, mounted read-only; run this on the host", []))
+
+
+class TestASnapshotBorrowsItsObjects(BoxFlow):
+    def test_the_published_tree_shares_the_mirror_and_records_its_main_and_branch(self):
+        self.assertEqual(self.publish()[0], 0)
+        tree, snap = self.w.tree(), self.w.snapshot()
+        alternates = tree / ".git" / "objects" / "info" / "alternates"
+        self.assertEqual(os.path.realpath(alternates.read_text().strip()), os.path.realpath(self.w.mirror + "/objects"), "the snapshot copied the history")
+        self.assertEqual((self.w.files[snap + "/sha"].strip(), self.w.files[snap + "/branch"]),
+                         (git_run("rev-parse", "refs/heads/main", cwd=self.w.mirror).stdout.strip(), "origin/main\n"))
+
+
+class TestAWorkspaceReadsIt(WorkspaceFlow):
+    def test_its_fetch_takes_the_forks_too_and_writes_no_commit_graph(self):
+        self.assertEqual(self.sync("ws")[0], 0)
+        self.assertIn("refs/remotes/fork/side", git_run("for-each-ref", "--format=%(refname)", cwd=self.ws).stdout.split())
+        self.assertEqual([git_run("config", k, cwd=self.ws).stdout.strip() for k in ("fetch.writeCommitGraph", "gc.writeCommitGraph")], ["false", "false"])
+
+
+class Branches(test_wk_build.World):
+    """`ws`'s checkout `co` is a clone of a real mirror, origin pointed at its upstream; the checkout `wk build --branch`
+    runs there runs for real, reading the mirror or, with `mirrored` off, a place that keeps none."""
+
+    def __init__(self, tmp, mirrored=True):
+        super().__init__(tmp)
+        self.up = GitMirror(self.tmp)
+        self.co = self.tmp / "co"
+        git_run("clone", "-q", "--shared", "--branch", "main", str(self.up.mirror), str(self.co), cwd=self.tmp)
+        git_run("remote", "set-url", "origin", str(self.up.upstream), cwd=self.co)
+        mirror = str(self.up.mirror) if mirrored else ""
+        self.reg.make = lambda n, e: JobDriver("box", str(REPO), dict(e, **self.conf), self, self.kind, mirror=mirror)
+        self.react(["exec", "ws", "bash", "-c"], lambda a, f: real(["bash", "-c", a[-1].replace("/src/WebKit", str(f.co), 1)]))
+
+    def push(self, branch, to):
+        """`branch` on the upstream's main, in the mirror too when `to` says so."""
+        git_run("push", "-q", "origin", "main:refs/heads/" + branch, cwd=self.up.seed)
+        if to == "mirror":
+            git_run("fetch", "-q", "origin", "refs/heads/%s:refs/heads/%s" % (branch, branch), cwd=self.up.mirror)
+
+
+class TestABranchIsTakenFromTheMirrorFirst(test_wk_build.BuildTest):
+    """`wk build <ws> --branch <b>` checks the branch out before it builds, from the mirror when it carries it."""
+
+    def built(self, w, branch):
+        rc, _, err = self.wk(w, "build", "ws", "jsc-release", "--branch", branch)
+        return rc, git_run("symbolic-ref", "--short", "HEAD", cwd=w.co).stdout.strip()
 
     def test_a_branch_the_mirror_carries_costs_no_network(self):
-        ws = self._checkout()
-        git_run("remote", "set-url", "origin", str(self.tmp / "gone.git"), cwd=ws)
-        out = subprocess.run(["sh", "-c", self._step("main", self.mirror)],
-                             cwd=str(ws), capture_output=True, text=True)
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertEqual(
-            git_run("rev-parse", "refs/remotes/origin/main", cwd=ws).stdout.strip(),
-            git_run("rev-parse", "refs/heads/main", cwd=self.mirror).stdout.strip())
+        w = Branches(self.tmp)
+        w.push("topic", "mirror")
+        git_run("remote", "set-url", "origin", str(self.tmp / "gone.git"), cwd=w.co)
+        self.assertEqual(self.built(w, "topic"), (0, "topic"))
 
-    def test_a_branch_it_does_not_carry_is_asked_of_origin(self):
-        ws = self._checkout()
-        git_run("push", "-q", str(self.tmp / "up.git"), "HEAD:refs/heads/other",
-                  cwd=self.tmp / "seed")
-        out = subprocess.run(["sh", "-c", self._step("other", self.mirror)],
-                             cwd=str(ws), capture_output=True, text=True)
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertEqual(
-            git_run("rev-parse", "FETCH_HEAD", cwd=ws, check=False).returncode, 0)
+    def test_a_branch_it_does_not_carry_or_a_place_with_no_mirror_asks_origin(self):
+        for mirrored in (True, False):
+            w = Branches(self.tmp, mirrored)
+            w.push("other", "upstream")
+            self.assertEqual(self.built(w, "other"), (0, "other"), mirrored)
 
-    def test_a_target_with_no_mirror_asks_origin_and_nothing_else(self):
-        step = self._step("main", "")
-        self.assertEqual(step.strip(), "git fetch -q origin main")
+    def test_one_nowhere_is_refused_by_name(self):
+        rc, _, err = self.wk(Branches(self.tmp), "build", "ws", "jsc-release", "--branch", "nosuch")
+        self.assertEqual((rc, test_wk_build.said(err)), (1, "error: could not check out 'nosuch' in 'ws'"))
 
-class TestWhatTheMirrorCarries(WkTest):
-    """mirror_branches (lib/wk/images.py) is what origin is narrowed to, and the narrowing is the point:
-    WebKit/WebKit advertises 924 heads."""
-
-    def _branches(self, env=None):
-        return images.mirror_branches(dict(env or {}, WK_ROOT=str(REPO)))
-
-    def _configured(self):
-        return images.origin_branches({"WK_ROOT": str(REPO)})
-
-    def test_it_carries_main_and_every_configurations_branch_and_nothing_else(self):
-        self.assertTrue(self._configured(), "no image preset names an origin branch")
-        self.assertEqual(sorted(self._branches()),
-                         sorted({"main", *self._configured()}))
-
-    def test_the_override_replaces_it(self):
-        self.assertEqual(self._branches(env={"WK_MIRROR_BRANCHES": "main only/this"}),
-                         ["main", "only/this"])
-
-
-class TestOneMirrorPerMachine(WkTest):
-    """Store.mirror_dir (lib/wk/store.py): a machine keeps one mirror, written where `wk sync` runs."""
-
-    def _ask(self, macos, in_vm=False):
-        env = {"WK_STORE": "/var/lib/wk", "XDG_STATE_HOME": str(self.tmp / "state"), "HOME": str(self.tmp)}
-        if in_vm:
-            env["WK_IN_VM"] = "1"
-        with mock.patch("wk.store.os.uname", return_value=mock.Mock(sysname="Darwin" if macos else "Linux")):
-            return Store(env).mirror_dir()
-
-    def test_a_macos_host_keeps_it_in_its_state_and_the_podman_vm_and_linux_under_the_store(self):
-        for macos, in_vm, want in ((True, False, f"{self.tmp}/state/wk/git/WebKit.git"),
-                                   (True, True, "/var/lib/wk/git/WebKit.git"),
-                                   (False, False, "/var/lib/wk/git/WebKit.git")):
-            with self.subTest(macos=macos, in_vm=in_vm):
-                self.assertEqual(self._ask(macos, in_vm), want)
-
-    def test_nothing_fetches_into_the_mirror_from_the_podman_vm(self):
-        here = Fake("here")
-        with contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(act.Refused):
-            sync.fetch_into_mirror(here, Store({"WK_STORE": "/var/lib/wk", "WK_IN_VM": "1"}), None,
-                            "https://example/x.git", "refs/heads/b", "refs/remotes/pr/b")
-        self.assertIn("the host", err.getvalue())
-        self.assertEqual(here.effects, [])
-
-
-class TestASnapshotBorrowsTheMirrorsObjects(MirrorFixture):
-    """lib/wk/sync.py's publish against the fixture mirror and a scratch store: the snapshot it publishes is a
-    `--shared` clone, so its objects are the mirror's (an alternates file, no second copy), it is on main
-    tracking origin/main, and its completion marker is the mirror's main."""
-
-    def _sync(self):
-        """The store's mirror is where the store says (WK_IN_VM: under the store), linked to the fixture's."""
-        store = self.tmp / "store"
-        (store / "git").mkdir(parents=True)
-        os.symlink(str(self.mirror), str(store / "git" / "WebKit.git"))
-        p = mock.patch.dict(os.environ, dict(self.ENV, WK_STORE=str(store), WK_IN_VM="1", GIT_TERMINAL_PROMPT="0",
-                                             http_proxy="http://127.0.0.1:1", https_proxy="http://127.0.0.1:1"))
-        p.start()
-        self.addCleanup(p.stop)
-
-        class Here(places.Container):
-            def store_init(self):
-                pass
-        reg = places.Registry(REPO, env=dict(os.environ))
-        place = Here("container", str(REPO), dict(os.environ), reg.machine)
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            sync.Sync(reg, Clock(), None, "tools", place="container").sync_snapshot(place)
-        ids = sorted(d.name for d in (store / "base").iterdir())
-        self.assertEqual(len(ids), 1, ids)
-        return store, store / "base" / ids[0], err.getvalue()
-
-    def test_the_published_tree_shares_the_mirror_and_is_complete(self):
-        store, d, err = self._sync()
-        alternates = d / "WebKit" / ".git" / "objects" / "info" / "alternates"
-        self.assertTrue(alternates.exists(), "the snapshot copied the history instead of borrowing it")
-        self.assertEqual(os.path.realpath(alternates.read_text().strip()), os.path.realpath(str(self.mirror / "objects")))
-        self.assertEqual((d / "sha").read_text().strip(),
-                         git_run("rev-parse", "refs/heads/main", cwd=self.mirror).stdout.strip())
-        self.assertEqual((d / "branch").read_text().strip(), "origin/main")
-        self.assertEqual(git_run("symbolic-ref", "--short", "HEAD", cwd=d / "WebKit").stdout.strip(), "main")
 
 if __name__ == "__main__":
     unittest.main()
