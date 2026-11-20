@@ -23,7 +23,7 @@ from tests import test_rm_final_state as rmfs, test_repo_workspace as repo, test
 from tests import test_wk_test as wktest, test_wk_workspace as ws
 from tests import test_wk_places
 from tests.support import REPO
-from wk import dispatch, guest as wkguest, places  # noqa: E402 -- tests.support put lib on the path
+from wk import dispatch, places  # noqa: E402 -- tests.support put lib on the path
 from wk.act import Refused  # noqa: E402
 from wk.bench import record as brecord  # noqa: E402
 from wk.lock import Lock  # noqa: E402
@@ -186,16 +186,17 @@ def daemons_run(case, w):
 
 
 def guest_world(case):
-    w = guest.GuestWorld(case.tmp)
-    w.state = "stopped"
+    w = case.make_world()
+    w.make("ws")
+    w.vms["wk-ws"] = "stopped"
     w.effects.clear()
-    w.vm = places.Registry(str(REPO), env=w.env, machine=w).load("vm")
     return w
 
 
 def guest_state(w):
-    files = {p: ("live" if int(t) in w.pids else "dead") if p.endswith(".pid") else t for p, t in w.files.items()}
-    return files, sorted(w.loaded), sorted(w.serving)
+    files = {w.rel(p): ("live" if int(t) in w.pids else "dead") if p.endswith(".pid") else w.rel(t)
+             for p, t in w.files.items() if not p.startswith(w.env["WK_LOCK_DIR"])}
+    return sorted(w.vms.items()), files, sorted(w.loaded), sorted(w.rel(s) for s in w.serving)
 
 
 def tailnet_world(case):
@@ -325,8 +326,7 @@ ROWS = {
     "boot disarm rpi5-usb": boot_row("rpi5-usb", "disarm"),
     "daemons": Row(daemons.DaemonTest, daemons_world, daemons_run, lambda w: w.state(), effects=40),
     # A dry start boots no guest, and the rest of a start is what the booted guest answers.
-    "start guest": Row(guest.GuestTest, guest_world, lambda c, w: quiet(wkguest.start, w.vm, "demo", fakes.FakeClock()),
-                       guest_state, effects=80, dry=False),
+    "start guest": Row(guest.GuestStart, guest_world, lambda c, w: c.wk(w, "start", "ws"), guest_state, effects=80, dry=False),
     "sysimage stage tailnet": Row(unittest.TestCase, tailnet_world, tailnet_run,
                                   lambda w: {p: v for p, v in w.files.items() if p.startswith("/vol/")}, tailnet_mutations,
                                   effects=80),

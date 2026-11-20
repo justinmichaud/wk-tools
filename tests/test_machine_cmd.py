@@ -364,6 +364,18 @@ class TestProbeAndLs(MachineTest):
         self.assertEqual(len([e for e in w.fake.effects if e[1][0] == "tailscale"]), 1)
 
 
+class TestTheProvisioningInputs(unittest.TestCase):
+    def test_what_the_box_runs_is_in_it(self):
+        for changed in (None, "deps.sh", "probe.sh", "provision.sh"):
+            root = Path(tempfile.mkdtemp(prefix="wk-test-inputs-"))
+            self.addCleanup(shutil.rmtree, root, True)
+            shutil.copytree(str(REPO / "remote"), str(root / "remote"))
+            if changed:
+                with open(root / "remote" / changed, "a") as f:
+                    f.write("\n")
+            self.assertEqual(deps.inputs_hash(root) == deps.inputs_hash(REPO), changed is None, changed)
+
+
 def _a_build_box():
     if not live_selected():
         return None
