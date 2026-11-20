@@ -82,7 +82,7 @@ class Mac(Guests):
         cmd = argv[-1]
         self.asked.append((cmd, self.last_input))
         if cmd == "date -u +%s":
-            return Result(0, "%d\n" % (time.time() - self.skew))
+            return Result(0, "%d\n" % (self.clock.now() - self.skew))
         if cmd.startswith("test -S "):
             return Result(0 if cmd.split()[-1] in self.sockets else 1)
         said = [r for k, r in self.guest_said.items() if cmd.startswith(k) or k in self.last_input]

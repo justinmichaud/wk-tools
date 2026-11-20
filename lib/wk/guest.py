@@ -7,7 +7,7 @@ import time
 
 from wk import act, agents, claudelogin, daemons, git, images, project, secrets, tools
 from wk.act import Refused, debug, die, info, log, warn
-from wk.clock import Clock
+import wk.clock
 from wk.daemons import Daemon
 from wk.lock import Lock
 from wk.store import GUEST_BROKER_SOCKET, GUEST_PUSH_SOCKET, Store, no_such_workspace
@@ -58,7 +58,7 @@ class Host:
 
     def __init__(self, vm, clock=None):
         self.vm, self.machine, self.env, self.root = vm, vm.machine, vm.env, vm.root
-        self.clock = clock or Clock()
+        self.clock = clock or wk.clock.Clock()
         self.secrets = secrets.Secrets(vm.root, vm.env, vm.machine, host_side=True)
         self.dir = vm.vm_dir()
         self._addr = self._lock = None
