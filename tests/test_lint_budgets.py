@@ -45,9 +45,9 @@ FIXTURES_BUDGET = 800
 # row: (core interim, tests interim), measured 2026-10-22 after the day's cuts; lowered, never raised.
 INTERIM = {"dispatcher": (773, 931),
            "machine": (489, 1784),
-           "places": (1762, 3905),
+           "places": (1762, 3758),
            "record": (1241, 2682),
-           "workspace": (2980, 5184),
+           "workspace": (2980, 5054),
            "secrets": (2552, 4493),
            "status": (1704, 2645),
            "bench": (6313, 6785),
