@@ -2,7 +2,6 @@
 and two commands mutating one resource serialise or refuse naming the holder, each driven through the command's own
 entry with the resource held by a live process on the Fake (`guest start` is tests/test_guest.py's; a workspace's job
 is a hold on its record, tests/test_wk_record.py's)."""
-import contextlib
 import io
 import os
 import re
@@ -283,28 +282,20 @@ def hold(fake, store, resource):
     fake.pids.add(HOLDER_PID)
 
 
-def refusal(fn):
-    with contextlib.redirect_stderr(io.StringIO()) as err:
-        try:
-            fn()
-        except Refused:
-            return err.getvalue()
-    raise AssertionError("the command ran under another command's lock")
+class TestTwoSyncs(test_sync.Flow):
+    def setUp(self):
+        super().setUp()
+        self.w = self.make_world(in_vm=False)
+        hold(self.w, self.w.store, "store")
 
-
-class TestTwoSyncs(test_sync.SyncTest):
     def test_one_lock_per_resource_sync(self):
         """A mirror refresh waits on the store lock, names its holder, and refuses when the holder outlasts it."""
-        hold(self.w, self.w.store, "store")
-        err = refusal(self.w.sync("mirror").run)
-        self.assertIn(str(HOLDER_PID), err)
-        self.assertNotIn(("run", ("sh", "-c", "REFRESH %s" % self.w.mirror)), self.w.effects)
+        rc, err = self.sync("--mirror")
+        self.assertEqual((rc, test_sync.said(err), self.w.steps), (1, "error: could not take the store lock within 600s -- pid %d still holds it" % HOLDER_PID, []))
 
     def test_a_dead_holder_does_not_stop_the_sync(self):
-        hold(self.w, self.w.store, "store")
         self.w.pids.discard(HOLDER_PID)
-        self.stderr(self.w.sync("mirror").run)
-        self.assertIn(("run", ("sh", "-c", "REFRESH %s" % self.w.mirror)), self.w.effects)
+        self.assertEqual((self.sync("--mirror")[0], self.w.steps), (0, ["mirror"]))
 
 
 class TestBaseRefreshDuringABuild(test_vm_base.BaseTest):

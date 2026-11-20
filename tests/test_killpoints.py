@@ -63,14 +63,14 @@ def rm_row(kind):
     return Row(rmfs.RmFinalStateTest, lambda c: c.world(kind), lambda c, w: c.rm(w), lambda w: w.left(), rm_mutations, effects=80)
 
 
-def sync_row(scope, **kw):
+def sync_row(*argv):
     def make(case):
         w = case.make_world()
         w.dirs.add(w.mirror)
         w.publish("20190101T000000Z", sha="b" * 40)
-        w.workspaces["container"] = ["ws"]
+        w.make("ws")
         return w
-    return Row(sync.SyncTest, make, lambda c, w: quiet(w.sync(scope, place="container", **kw).run), sync.World.state)
+    return Row(sync.Flow, make, lambda c, w: c.wk(w, "sync", *argv), sync.Host.state)
 
 
 def wk_test(case, w):
@@ -315,8 +315,8 @@ ROWS = {
     "rm": rm_row("container"),
     "rm vm": rm_row("vm"),
     "rm remote": rm_row("remote"),
-    "sync tools": sync_row("tools"),
-    "sync place": sync_row("place", fix=True),
+    "sync tools": sync_row("--tools", "container"),
+    "sync place": sync_row("--on", "container", "--fix"),
     "build": Row(build.BuildTest, lambda c: build.World(c.tmp), lambda c, w: quiet(c.typed, w=w), build.World.state),
     "bench run": bench_row("container", "wpe-release"),
     "bench run vm": bench_row("vm", "mac-release"),

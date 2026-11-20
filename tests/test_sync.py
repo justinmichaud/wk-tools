@@ -833,138 +833,6 @@ class TestABuildBoxsTooling(Flow):
         self.assertIn("==> the WebKit mirror on buildbox4 is up to date", err.splitlines())
 
 
-# The fake places tests/test_repo_workspace.py, tests/test_wk_lock.py and tests/test_killpoints.py build on: their `SyncTest`
-# drives lib/wk/sync.py's Sync directly over SyncDrivers, with git's script generators stood in for.
-sys.path.insert(0, str(REPO / "lib"))
-from wk import decl, git, images, places, pr, sync  # noqa: E402
-from wk.lock import Lock  # noqa: E402
-from tests.fakes import FlowTest  # noqa: E402
-from unittest import mock  # noqa: E402
-
-
-def fake_retarget(driver, ws, src, forks, branches):
-    driver.machine.steps.append("UPSTREAMFIX %s" % ws)
-    r = driver.machine.fixes.get((ws, "UPSTREAMFIX"))
-    return [l for l in r.out.replace("\r", "").splitlines() if l.strip()] if r else []
-
-
-# The script generators, stood in for by a line naming what each would render: rendering is lib/wk/git.py's,
-# tests/test_cli_refspecs.py and tests/test_new_fetch.py run it for real, and what is asked for is this file's.
-GENERATORS = {
-    (git, "wiring_script"): lambda src, mirror, forks, branches, n="", u="", c="": "WIRING %s %s %s %s %s" % (src, mirror, n, u, c),
-    (git, "wiring_check_script"): lambda src, mirror, forks, branches: "CHECK %s %s" % (src, mirror),
-    (git, "pr_tool_setup_script"): lambda src, forks: "GITWEBKIT %s" % src,
-    (git, "mirror_refresh_script"): lambda mirror, branches: "REFRESH %s" % mirror,
-    (git, "REMOTES"): (("origin", "u1"), ("wpe", "u2"), ("fork", "u3"), ("forkwpe", "u4")),
-    (images, "mirror_branches"): lambda env=None: ["main"],
-    (pr, "retarget"): fake_retarget,
-    (pr, "converge"): lambda driver, ws, src, forks: [],
-}
-
-
-class SyncDriver(places.Driver):
-    """A place whose environment is the World's: its workspaces and their states are the World's answers."""
-
-    def __init__(self, name, root, env, machine, kind):
-        super().__init__(name, root, env, machine)
-        self.kind, self.needs_base = kind, kind == "container"
-
-    def list(self):
-        return [(n, "running") for n in self.machine.workspaces.get(self.name, [])]
-
-    def state(self, ws, info=None):
-        return self.machine.states.get(ws, "present")
-
-    def mirror_dir(self):
-        return "/mirror/%s/WebKit.git" % self.name
-
-    def exec(self, ws, argv, tty=False, timeout=None, person=False):
-        return self.machine.run(["exec", self.name, ws] + list(argv))
-
-    def act_exec(self, ws, argv):
-        return self.machine.act_run(["exec", self.name, ws] + list(argv))
-
-    def sync(self, named=False):
-        self.machine.steps.append("FURNITURE %s%s" % (self.name, " named" if named else ""))
-        return True
-
-
-class World(fakes.World):
-    """This host: a store in a scratch directory, a mirror the refresh makes, git answering for the snapshot, and each
-    workspace's exec answering from `fetched`."""
-
-    def __init__(self, tmp, kinds=None):
-        super().__init__(tmp)
-        self.env["WK_MARKER"] = str(self.tmp / "no-marker")
-        self.workspaces, self.states, self.fetched, self.fixes, self.steps, self.verified = {}, {}, {}, {}, [], set()
-        self.heads = ["main"]
-        self.refs, self.upstream = "", MAIN_SHA + " refs/heads/main\n"
-        kinds = kinds or {"container": "container"}
-        self.reg = FakeRegistry(self.env, self, lambda name, env: SyncDriver(name, str(REPO), env, self, kinds[name]), names=list(kinds))
-        self.store = self.reg.store
-        self.mirror = self.store.mirror_dir()
-        self.react(["sh", "-c"], self._sh)
-        self.react(["exec"], self._exec)
-        self.react(["git"], self._git)
-        self.react(["cp", "-al"], self._cp)
-        self.effects = []
-
-    _git, _cp, snapshot, publish, state = Host._git, Host._cp, Host.snapshot, Host.publish, Host.state
-
-    def lock(self):
-        return Lock(self.store, self, self.clock)
-
-    def sync(self, scope="here", only="", place="", fix=False):
-        return sync.Sync(self.reg, self.clock, self.lock(), scope, only, place, fix)
-
-    def _sh(self, argv, f):
-        text = argv[2]
-        if text.startswith("REFRESH "):
-            f.dirs.add(text.split(" ", 1)[1])
-            f.refs = f.upstream
-            return Result(0, "mirror-fetch origin ok\nmirror-fetch wpe FAILED\n")
-        if text.startswith("CHECK "):
-            return f.base_check
-        if text.startswith("WIRING "):
-            return f.wire_result
-        return Result(127, "", "no sh answer")
-
-    base_check = Result(0)
-    wire_result = Result(0)
-
-    def _exec(self, argv, f):
-        ws, script = argv[2], argv[-1]
-        if script.startswith(("WIRING", "UPSTREAMFIX", "GITWEBKIT")):
-            f.steps.append("%s %s" % (script.split()[0], ws))
-            return f.fixes.get((ws, script.split()[0]), Result(0, "setup=ok\n" if script.startswith("GITWEBKIT") else ""))
-        f.steps.append("FETCH %s" % ws)
-        r = f.fetched.get(ws, Result(0, "from=mirror\r\nfetch=0\r\ncheck=0\r\n"))
-        return r(argv) if callable(r) else r
-
-
-class SyncTest(FlowTest):
-    UNSET = FlowTest.UNSET + ("WK_BRANCH", "WK_IN_VM", "WK_PLACE", "WK_NAME", "WK_NO_DELEGATE")
-
-    def setUp(self):
-        super().setUp()
-        for p in [mock.patch.object(module, name, fn) for (module, name), fn in GENERATORS.items()] + [
-                mock.patch("wk.store.Store.is_local", lambda st: True)]:
-            p.start()
-            self.addCleanup(p.stop)
-        self.w = self.make_world()
-
-    def make_world(self, kinds=None):
-        return World(self.tmp, kinds)
-
-
-class TestNotReachableFromTheCLI(FlowTest):
-    def test_an_invalid_name_is_refused(self):
-        """The dispatcher refuses a name no place holds before cmd/sync reads it (TestTheCommandLine), and inside a
-        workspace the marker's name is not checked, so this refusal is reached by no command line."""
-        cmd = load_cmd("sync")
-        self.assertIn("invalid name", self.refused(lambda: cmd.parse(decl.parse("sync", cmd.COMMAND, ["bad/name"])[1], "")))
-
-
 STUB_BROKER = """
 import json, os, socket, sys
 sock, record = sys.argv[1], sys.argv[2]
@@ -1011,6 +879,19 @@ class TestTheBrokerClient(unittest.TestCase):
         cp = subprocess.run([sys.executable, str(REPO / "container" / "broker" / "wk-broker-client.py"), "sync"],
                             env=dict(os.environ, WK_BROKER_SOCKET="/nonexistent/broker.sock"), capture_output=True, text=True)
         self.assertEqual(cp.returncode, 2)
+
+
+# What no command line reaches: the one import of a lib module this file keeps.
+sys.path.insert(0, str(REPO / "lib"))
+from wk import decl  # noqa: E402
+
+
+class TestNotReachableFromTheCLI(fakes.FlowTest):
+    def test_an_invalid_name_is_refused(self):
+        """The dispatcher refuses a name no place holds before cmd/sync reads it (TestTheCommandLine), and inside a
+        workspace the dispatcher refuses a name argument outright, so this refusal is reached by no command line."""
+        cmd = load_cmd("sync")
+        self.assertIn("invalid name", self.refused(lambda: cmd.parse(decl.parse("sync", cmd.COMMAND, ["bad/name"])[1], "")))
 
 
 if __name__ == "__main__":

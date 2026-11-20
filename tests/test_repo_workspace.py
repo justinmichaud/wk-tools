@@ -1,22 +1,18 @@
 """`wk new --repo`: the repository a workspace holds is chosen at creation, kept in its marker, and every reader asks it."""
-import contextlib
-import io
 import os
 import re
+import shlex
 import subprocess
 import sys
 import unittest
-from unittest import mock
 
 from tests import test_sync
+from tests.fakes import Result
 from tests.support import REPO, bash, git_commit, git_run, scratch_dir
-from tests.test_wk_workspace import WK, World, WorkspaceTest
+from tests.test_wk_workspace import WK, Flow, World, said
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import git, places, project, repos, status, sync, workspace  # noqa: E402
-from wk.act import Refused  # noqa: E402
-from wk.machine import Result  # noqa: E402
-from wk.store import Snapshots  # noqa: E402
+from wk import repos  # noqa: E402 -- the repo tests/test_killpoints.py's "new tools" row hands the detached run
 
 TOOLS = "wk-tools"
 ORIGIN = "https://github.com/someone/wk-tools.git"
@@ -29,14 +25,14 @@ def tools():
 
 
 class ToolsWorld(World):
-    """`git remote get-url origin` in the tooling answers with an ssh GitHub URL, and wkdev-create's first start writes
-    the marker firstrun.sh writes, naming the repo the create flags carry. No mirror and no snapshot."""
+    """This machine's wk-tools is on `head`, its origin answers `origin` and `ls-remote` of it `remote`; wkdev-create's
+    first start writes the marker firstrun.sh writes, naming the repo the create flags carry. No mirror and no snapshot."""
 
     def __init__(self, tmp, **kw):
         super().__init__(tmp, **kw)
-        self.react(["git", "-c", "safe.directory=*", "-C"],
-                   lambda argv, f: Result(0, BRANCH + "\n" if "symbolic-ref" in argv else "git@github.com:someone/wk-tools.git\n"))
-        self.answer(["git", "ls-remote"])
+        self.origin, self.head, self.remote = Result(0, "git@github.com:someone/wk-tools.git\n"), Result(0, BRANCH + "\n"), Result(0)
+        self.react(["git", "-c", "safe.directory=*", "-C"], lambda argv, f: f.head if "symbolic-ref" in argv else f.origin)
+        self.react(["git", "ls-remote"], lambda argv, f: f.remote)
         store = self.driver.store
         self.dirs = {d for d in self.dirs if not d.startswith((store.mirror_dir(), store.snapshots_dir()))}
         self.files = {p: v for p, v in self.files.items() if not p.startswith(store.snapshots_dir())}
@@ -50,294 +46,217 @@ class ToolsWorld(World):
         return r
 
     def mark(self, name="ws", repo=TOOLS):
-        self.files[repos.marker_in(self.ws_dir(name))] = "name=%s\nrepo=%s\n" % (name, repo)
+        self.files[os.path.join(self.ws_dir(name), "home", ".wk-workspace")] = "name=%s\nrepo=%s\n" % (name, repo)
 
 
-class TestTheTable(unittest.TestCase):
-    def test_the_default_is_overlaid_on_a_snapshot_at_the_projects_checkout(self):
-        r = repos.default()
-        self.assertTrue(r.snapshot)
-        self.assertEqual(project.get("SRC"), r.src)
-        self.assertEqual(project.get("CHECKOUT"), r.checkout)
-
-    def test_wk_tools_is_cloned_beside_it_and_needs_no_snapshot(self):
-        self.assertFalse(tools().snapshot)
-        self.assertEqual("/src/wk-tools", tools().src)
-
-    def test_an_unknown_repo_is_a_lookup_error_naming_the_known_ones(self):
-        with self.assertRaises(LookupError) as cm:
-            repos.Repo("nope")
-        for name in repos.names():
-            self.assertIn(name, str(cm.exception))
-
-    def test_a_marker_without_a_repo_is_the_defaults(self):
-        self.assertEqual(project.get("REPO"), repos.of_marker({"name": "ws"}).name)
-        self.assertEqual(TOOLS, repos.of_marker({"repo": TOOLS}).name)
-
-
-class TestTheOrigin(unittest.TestCase):
-    def origin(self, rc, out):
-        m = mock.Mock()
-        m.run.return_value = Result(rc, out)
-        return tools().origin(m, "/tools")
-
-    def test_every_github_spelling_is_fetched_over_https(self):
-        for url in ("git@github.com:someone/wk-tools.git", "ssh://git@github.com/someone/wk-tools",
-                    "https://github.com/someone/wk-tools.git", "https://github.com/someone/wk-tools/"):
-            self.assertEqual(ORIGIN, self.origin(0, url + "\n"), url)
-
-    def test_an_origin_elsewhere_or_none_is_refused(self):
-        for rc, out in ((0, "https://gitlab.com/someone/wk-tools.git\n"), (2, "")):
-            with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()):
-                self.origin(rc, out)
-
-    def test_it_pushes_through_its_own_deploy_keys_alias(self):
-        m = mock.Mock()
-        m.run.return_value = Result(0, "git@github.com:someone/wk-tools.git\n")
-        self.assertEqual(PUSH, tools().push_url(m, "/tools"))
-
-    def test_the_defaults_origin_is_upstream_and_asks_no_machine(self):
-        m = mock.Mock()
-        self.assertEqual(dict(project.get("REMOTES"))["origin"], repos.default().origin(m, "/tools"))
-        m.run.assert_not_called()
-
-
-class TestTheBranch(unittest.TestCase):
-    """A cloned workspace checks out the branch this machine's wk-tools is on, which must be on its origin."""
-
-    def branch(self, head, remote):
-        m = Machine_answering(head, remote)
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            try:
-                return tools().branch(m, "/tools"), err.getvalue()
-            except Refused:
-                return None, err.getvalue()
-
-    def test_the_current_branch_on_the_origin_is_the_one(self):
-        self.assertEqual(BRANCH, self.branch(Result(0, BRANCH + "\n"), Result(0, "sha\trefs/heads/x\n"))[0])
-
-    def test_a_detached_checkout_is_refused(self):
-        name, err = self.branch(Result(128, "", "fatal: ref HEAD is not a symbolic ref"), Result(0))
-        self.assertIsNone(name)
-        self.assertIn("switch", err)
-
-    def test_a_branch_not_on_the_origin_is_refused_naming_the_push(self):
-        name, err = self.branch(Result(0, BRANCH + "\n"), Result(2))
-        self.assertIsNone(name)
-        self.assertIn("push -u origin " + BRANCH, err)
-
-    def test_an_origin_that_does_not_answer_is_refused_with_what_git_said(self):
-        name, err = self.branch(Result(0, BRANCH + "\n"), Result(128, "", "fatal: unable to access"))
-        self.assertIsNone(name)
-        self.assertIn("unable to access", err)
-
-
-def Machine_answering(head, remote):
-    m = mock.Mock()
-    m.run.side_effect = lambda argv: (head if "symbolic-ref" in argv else remote if argv[1] == "ls-remote"
-                                      else Result(0, "git@github.com:someone/wk-tools.git\n"))
-    return m
-
-
-class TestTheFront(WorkspaceTest):
+class TestTheFront(Flow):
     world_class = ToolsWorld
 
     def test_another_place_is_refused_before_anything_runs(self):
         for kind in ("vm", "remote"):
             w = self.make_world(kinds={"fakebox": kind})
-            self.refused(lambda: self.front(w, repo=TOOLS))
-            self.assertEqual([], [e for e in w.effects if e[0] in ("spawn", "write")], kind)
+            rc, err = self.new("--repo", TOOLS, w=w)
+            self.assertEqual((rc, said(err), [e for e in w.effects if e[0] in ("spawn", "write")]),
+                             (1, "error: --repo wk-tools is container-only for now (this is place 'fakebox'): a guest or a build", []), kind)
 
-    def test_an_unknown_repo_is_refused(self):
-        self.refused(lambda: self.front(repo="nope"))
-        self.assertEqual([], [e for e in self.w.effects if e[0] == "spawn"])
+    def test_an_unknown_repo_is_refused_naming_the_known_ones(self):
+        rc, err = self.new("--repo", "nope")
+        self.assertEqual((rc, said(err), self.spawned()), (1, "error: unknown repo 'nope' -- the known ones: webkit wk-tools", []))
 
     def test_the_detached_run_is_handed_the_repo(self):
-        self.stderr(lambda: self.front(no_wait=True, repo=TOOLS))
-        (spawn,) = [e for e in self.w.effects if e[0] == "spawn"]
+        self.assertEqual(self.new("--repo", TOOLS, "--no-wait")[0], 0)
+        (spawn,) = self.spawned()
         self.assertEqual(TOOLS, spawn[1][spawn[1].index("--repo") + 1])
 
     def test_kill_takes_no_repo(self):
-        self.refused(lambda: self.front(kill=True, repo=TOOLS))
+        rc, err = self.new("--kill", "--repo", TOOLS)
+        self.assertEqual((rc, said(err)), (1, "error: 'wk new ws --kill' stops the creation already running and takes"))
 
 
-class TestCreation(WorkspaceTest):
+class TestCreation(Flow):
     world_class = ToolsWorld
 
-    def create_flags(self):
-        (argv,) = self.runs(head="wkdev-create")
-        return argv[argv.index("--additional-flags") + 1].split()
+    def made(self, w=None):
+        return self.detach("--repo", TOOLS, w=w)
+
+    def create_flags(self, w=None):
+        return [f for argv in self.created(w) for f in argv[argv.index("--additional-flags") + 1].split()]
 
     def test_it_is_made_with_no_mirror_and_no_snapshot_and_a_default_one_is_not(self):
-        self.refused(lambda: self.detached())
-        rc, err = self.stderr(lambda: self.detached(self.make_world(), repo=tools()))
-        self.assertEqual(0, rc, err)
+        rc, err = self.detach()
+        self.assertEqual((rc, said(err), self.created()), (1, "error: no snapshot this machine can build a workspace from:  wk sync", []))
+        self.assertEqual(said(self.made()[1]), "==> workspace 'ws' created")
 
-    def test_nothing_of_the_mirror_or_the_snapshot_is_asked_for(self):
-        self.stderr(lambda: self.detached(repo=tools()))
-        self.assertEqual([], self.runs(head=WK))
-        self.assertNotIn("lock store", self.lock_takes())
+    def test_nothing_of_the_mirror_or_the_snapshot_is_asked_for_and_its_checkout_is_reported_not_fetched(self):
+        rc, err = self.made()
+        self.assertEqual((rc, self.runs(head=WK), "lock store" in self.lock_takes()), (0, [], False))
         self.assertNotIn(os.path.join(self.w.ws_dir(), "base-id"), self.w.files)
-        flags = self.create_flags()
-        self.assertFalse([f for f in flags if f.startswith("WK_MIRROR=") or ":O,upperdir=" in f])
+        self.assertFalse([f for f in self.create_flags() if f.startswith("WK_MIRROR=") or ":O,upperdir=" in f])
+        self.assertIn("==> 'ws' is on main at abc1234, up to date with origin/main", err.splitlines())
+
+    def test_a_dry_run_asks_no_fetch_of_it_and_does_of_a_default_one(self):
+        self.dry_run()
+        self.made()
+        default = World(self.tmp)
+        self.detach(w=default)
+        self.assertEqual([(WK, "sync", "ws") in w.acted for w in (self.w, default)], [False, True])
 
     def test_the_checkout_is_its_own_directory_cloned_from_the_tools_origin(self):
-        self.stderr(lambda: self.detached(repo=tools()))
+        self.made()
         flags = self.create_flags()
-        self.assertIn("%s/wk-tools:/src/wk-tools" % self.w.ws_dir(), flags)
-        self.assertIn("WK_CLONE=" + ORIGIN, flags)
-        self.assertIn("WK_BRANCH=" + BRANCH, flags)
-        self.assertIn("WK_PUSH=" + PUSH, flags)
-        self.assertIn("WK_REPO=wk-tools", flags)
+        for flag in ("%s/wk-tools:/src/wk-tools" % self.w.ws_dir(), "WK_CLONE=" + ORIGIN, "WK_BRANCH=" + BRANCH, "WK_PUSH=" + PUSH, "WK_REPO=wk-tools"):
+            self.assertIn(flag, flags)
         self.assertIn(os.path.join(self.w.ws_dir(), "wk-tools"), self.w.dirs)
 
-    def test_once_made_it_is_present_and_every_reader_finds_its_checkout(self):
-        self.stderr(lambda: self.detached(repo=tools()))
-        d = self.w.driver
-        self.assertEqual("present", d.state("ws"))
-        self.assertEqual(TOOLS, d.repo("ws").name)
-        self.assertEqual("/src/wk-tools", d.src("ws"))
+    def test_every_github_spelling_of_the_origin_is_cloned_over_https(self):
+        for url in ("git@github.com:someone/wk-tools.git", "ssh://git@github.com/someone/wk-tools",
+                    "https://github.com/someone/wk-tools.git", "https://github.com/someone/wk-tools/"):
+            w = self.make_world()
+            w.origin = Result(0, url + "\n")
+            self.assertEqual((self.made(w=w)[0], "WK_CLONE=" + ORIGIN in self.create_flags(w)), (0, True), url)
+
+    def test_an_origin_elsewhere_or_none_is_refused(self):
+        for answer, origin in ((Result(0, "https://gitlab.com/someone/wk-tools.git\n"), "'https://gitlab.com/someone/wk-tools.git'"), (Result(2), "not set")):
+            w = self.make_world()
+            w.origin = answer
+            rc, err = self.made(w=w)
+            self.assertEqual((rc, said(err), self.created(w)), (1, "error: a wk-tools workspace is cloned from the GitHub origin of this machine's wk-tools (/opt/wk-tools),", []))
+            self.assertIn("    and its origin is " + origin, err.splitlines())
+
+    def test_the_branch_this_machines_wk_tools_is_on_must_be_on_the_origin(self):
+        for head, remote, line, remedy in (
+                (Result(128, "", "fatal: ref HEAD is not a symbolic ref"), Result(0),
+                 "error: this machine's wk-tools (/opt/wk-tools) is on no branch, and a wk-tools workspace checks out the one it is on:", "    git -C /opt/wk-tools switch <branch>"),
+                (Result(0, BRANCH + "\n"), Result(2),
+                 "error: branch '%s' of this machine's wk-tools is not on %s, so a wk-tools workspace cannot check it out:" % (BRANCH, ORIGIN),
+                 "    git -C /opt/wk-tools push -u origin " + BRANCH),
+                (Result(0, BRANCH + "\n"), Result(128, "", "fatal: unable to access"),
+                 "error: could not ask %s for branch '%s': fatal: unable to access" % (ORIGIN, BRANCH), None)):
+            w = self.make_world()
+            w.head, w.remote = head, remote
+            rc, err = self.made(w=w)
+            self.assertEqual((rc, said(err), self.created(w)), (1, line, []))
+            if remedy:
+                self.assertIn(remedy, err.splitlines())
+
+    def test_once_made_its_record_ends_ok_and_status_reads_its_checkout(self):
+        self.made()
         (t,) = self.w.records.list()
-        self.assertEqual("ok", t.verdict())
+        self.w.effects = []
+        rc, out, _ = self.wk(self.w, "status", "ws")
+        self.assertEqual((t.verdict(), rc, row(out)), ("ok", 0, ["ws", "running", "-", "wk-tools", "clean"]))
+        self.assertTrue([a for a in self.runs(head="exec") if "/src/wk-tools" in a])
 
     def test_the_agents_are_installed_in_its_checkout(self):
-        self.stderr(lambda: self.detached(repo=tools()))
+        self.made()
         configs = [a[-1] for a in self.runs(head="exec") if "workspace-config.py" in a[-1]]
         self.assertTrue(configs)
         self.assertTrue(all(c.endswith(" /src/wk-tools") for c in configs), configs)
 
 
-class TestFreshen(WorkspaceTest):
-    def test_a_cloned_repo_is_reported_and_not_fetched(self):
-        self.stderr(lambda: workspace.freshen(self.w.driver, "ws", self.w, tools()))
-        self.assertEqual([], self.runs(head=WK))
-        (probe,) = self.runs(head="exec")
-        self.assertIn(git.PROBE, probe)
-
-    def test_a_dry_run_runs_nothing_for_it(self):
-        self.dry_run()
-        self.stderr(lambda: workspace.freshen(self.w.driver, "ws", self.w, tools()))
-        self.assertEqual([], self.runs())
+def row(out, ws="ws"):
+    """`wk status`'s row for workspace `ws`, by its columns."""
+    return next(l.split() for l in out.splitlines() if l.split()[:1] == [ws])
 
 
-class TestReaders(WorkspaceTest):
+class TestReaders(Flow):
     world_class = ToolsWorld
 
-    def test_the_branch_is_read_from_the_clone(self):
-        self.w.make(base=False)
-        self.w.mark()
-        self.w.files[os.path.join(self.w.ws_dir(), "wk-tools", ".git", "HEAD")] = "ref: refs/heads/topic\n"
-        self.assertEqual("topic", self.w.driver.branch("ws"))
-
-    def test_a_workspace_on_no_snapshot_does_not_hold_back_the_snapshots_gc_takes(self):
-        self.w.make(base=False)
-        self.w.mark()
-        self.w.make("old", base=False)
-        self.w.dirs.add(os.path.dirname(self.w.ws_dir()))
-        snaps = Snapshots(self.w.driver.store, self.w)
-        self.assertEqual(["old"], snaps.unpinned())
-
-    def test_inside_the_workspace_the_marker_names_it(self):
-        w = self.make_world(kinds={"fakebox": "local"})
-        (w.tmp / "home" / ".wk-workspace").write_text("name=ws\nsrc=/src/wk-tools\nrepo=wk-tools\n")
-        self.assertEqual(TOOLS, places.LocalWorkspace("fakebox", str(REPO), w.env, w).repo("ws").name)
-
-    def test_ls_names_the_repo_as_its_base(self):
-        from tests.support import load_cmd
-        self.w.make(base=False)
-        self.w.mark()
-        self.assertEqual(TOOLS, load_cmd("ls").base_of(str(REPO), self.w.driver, "ws"))
-
-
-class TestStatus(WorkspaceTest):
-    world_class = ToolsWorld
-
-    def status(self, origin):
-        self.w.checkout = Result(0, "origin=%s\nwsbase=main\n" % origin)
-        walk = status.Walk(REPO, env=self.w.env, reg=self.w.reg, clock=self.w.clock)
-        rec, _ = walk.workspace(self.w.driver, "here", "ws", self.w.records)
-        return rec.get("base"), [n["text"] for n in rec.get("notes", []) if n["text"].startswith("origin is")]
-
-    def test_an_origin_other_than_the_repos_is_named(self):
-        self.w.make()
-        self.assertEqual(("main", []), self.status(dict(project.get("REMOTES"))["origin"]))
-        self.assertEqual(1, len(self.status(ORIGIN)[1]))
-
-    def test_a_cloned_repo_is_held_to_its_own_origin_and_named_as_its_base(self):
-        self.w.make(base=False)
-        self.w.mark()
-        self.assertEqual((TOOLS, []), self.status(ORIGIN))
-
-
-class ToolsDriver(test_sync.SyncDriver):
-    def repo(self, ws):
-        return tools()
-
-    def src(self, ws):
-        return tools().src
-
-
-class TestSync(test_sync.SyncTest):
     def setUp(self):
         super().setUp()
-        for name, fn in (("origin", lambda r, machine, root: ORIGIN if not r.snapshot else "u1"),
-                         ("push_url", lambda r, machine, root: PUSH)):
-            p = mock.patch.object(repos.Repo, name, fn)
-            p.start()
-            self.addCleanup(p.stop)
-        self.w.reg = test_sync.FakeRegistry(self.w.env, self.w, lambda n, env: ToolsDriver(n, str(REPO), env, self.w, "container"),
-                                            names=["container"])
-        self.w.workspaces["container"] = ["tools"]
+        self.w.make(base=False)
+        self.w.mark()
 
-    def fetch(self, fix=False):
-        driver = self.w.reg.load("container")
-        return self.stderr(lambda: self.w.sync("ws", "tools", fix=fix).fetch_one(driver, "tools"))[0]
+    def test_status_reads_its_branch_from_the_clone_and_names_the_repo_as_its_base_held_to_its_own_origin(self):
+        self.w.files[os.path.join(self.w.ws_dir(), "wk-tools", ".git", "HEAD")] = "ref: refs/heads/topic\n"
+        self.w.checkout = Result(0, "origin=%s\nwsbase=main\n" % ORIGIN)
+        rc, out, _ = self.wk(self.w, "status", "ws")
+        self.assertEqual((rc, row(out), [l for l in out.splitlines() if "! origin" in l]), (0, ["ws", "running", "topic", "wk-tools", "clean"], []))
 
-    def test_it_fetches_its_origin_and_checks_nothing_of_the_mirror(self):
-        self.w.fetched["tools"] = Result(0, "from=github\nfetch=0\ncheck=0\n")
-        code, text = self.fetch()
-        self.assertEqual("ok", code, text)
-        (script,) = [e[1][-1] for e in self.w.effects if e[0] == "run" and e[1][0] == "exec"]
-        self.assertIn(ORIGIN, script)
-        self.assertNotIn("CHECK", script)
+    def test_status_names_a_default_ones_origin_other_than_upstream(self):
+        w = World(self.tmp)
+        w.make()
+        for origin, notes in (("https://github.com/WebKit/WebKit.git", []), (ORIGIN, ["      ! origin is %s, not upstream -- 'wk sync ws --fix'" % ORIGIN])):
+            w.checkout = Result(0, "origin=%s\nwsbase=main\n" % origin)
+            rc, out, _ = self.wk(w, "status", "ws")
+            self.assertEqual((rc, row(out)[3], [l for l in out.splitlines() if "! origin" in l]), (0, "main", notes), origin)
 
-    def test_fix_points_origin_back_at_the_tools_origin_and_not_the_wiring(self):
-        self.w.fetched["tools"] = Result(0, "from=github\nfetch=0\ncheck=0\n")
-        code, _ = self.fetch(fix=True)
-        self.assertEqual("ok", code)
-        runs = [e[1] for e in self.w.effects if e[0] == "run"]
-        self.assertIn(("exec", "container", "tools", "git", "-C", "/src/wk-tools", "remote", "set-url", "origin", ORIGIN), runs)
-        self.assertIn(("exec", "container", "tools", "git", "-C", "/src/wk-tools", "remote", "set-url", "--push", "origin", PUSH), runs)
-        self.assertFalse([s for s in self.w.steps if s.startswith(("WIRING", "GITWEBKIT"))])
+    def test_ls_names_the_repo_as_its_base_and_a_marker_naming_none_its_snapshot(self):
+        self.w.make("old")
+        self.w.mark("old", "")
+        self.w.answer(["podman", "ps"], out="wk-ws\tUp 2 hours\nwk-old\tUp 1 hour\n")
+        self.w.checkout = Result(0, "branch=main\nwsbase=main\n")
+        rc, out, _ = self.wk(self.w, "ls")
+        self.assertEqual((rc, [l.split()[:4] for l in out.splitlines()[1:]]), (0, [["old", "fakebox", "running", "main"], ["ws", "fakebox", "running", "wk-tools"]]))
+
+    def test_a_workspace_on_no_snapshot_does_not_hold_back_the_snapshots_gc_takes(self):
+        for old, line in ((True, "snapshots kept -- old never recorded a snapshot, so any snapshot may be under it: 'wk new <name>' remakes one, 'wk rm <name>' removes it"),
+                          (False, "snapshot main-0, no workspace on it goes")):
+            w = self.make_world(kinds={"fakebox": "container", "container": "container"})
+            w.make(base=False)
+            w.mark()
+            w.dirs.add(os.path.dirname(w.ws_dir()))
+            if old:
+                w.make("old", base=False)
+            w.publish("main-0")
+            w.publish("main-1")
+            rc, out, err = self.wk(w, "gc")
+            self.assertEqual([" ".join(l.split()[1:]) for l in err.splitlines() if l[11:].startswith("snapshot")], [line], old)
+
+
+class Clone(test_sync.Host):
+    """A container workspace `tools` holding wk-tools, whose checkout is the real git clone `co`: the fetch and the check
+    run there."""
+
+    def __init__(self, tmp, co=None, **kw):
+        super().__init__(tmp, **kw)
+        self.co = co
+        self.make("tools")
+        self.files[os.path.join(self.store.ws_dir("tools"), "home", ".wk-workspace")] = "repo=wk-tools\n"
+        self.answer(["git", "-c", "safe.directory=*", "-C", str(REPO), "remote", "get-url", "origin"], out="git@github.com:someone/wk-tools.git\n")
+
+    def in_ws(self, ws, argv):
+        if self.co and argv[:2] == ["sh", "-c"] and "echo check=$check" in argv[2]:
+            cp = subprocess.run(["sh", "-c", argv[2].replace("cd /src/wk-tools ", "cd %s " % shlex.quote(str(self.co)), 1)], capture_output=True, text=True)
+            return Result(cp.returncode, cp.stdout, cp.stderr)
+        return super().in_ws(ws, argv)
+
+
+class TestSync(test_sync.Flow):
+    world_class = Clone
 
     def test_inside_it_no_mirror_refresh_is_asked_for(self):
-        with open(self.w.env["WK_MARKER"], "w") as f:
-            f.write("name=tools\nrepo=wk-tools\n")
-        self.w.reg.env["WK_PLACE"] = "container"
-        self.w.fetched["tools"] = Result(0, "from=github\nfetch=0\ncheck=0\n")
-        with mock.patch.object(sync.Sync, "mirror_refresh_request") as ask:
-            rc, _ = self.stderr(self.w.sync("ws", "tools").sync_one)
-        self.assertEqual(0, rc)
-        ask.assert_not_called()
+        w = self.make_world(kinds={"local": "local"}, in_vm=False)
+        with open(w.env["WK_MARKER"], "w") as f:
+            f.write("name=tools\nsrc=/src/wk-tools\nrepo=wk-tools\n")
+        w.env["WK_BROKER_SOCKET"] = "/run/x.sock"
+        w.answer(["test", "-S"])
+        w.files[test_sync.CLIENT] = ""
+        rc, _ = self.sync(w=w)
+        self.assertEqual((rc, [e for e in w.effects if test_sync.CLIENT in e[1]], w.steps), (0, [], ["fetch ws"]))
 
-
-class TestTheCloneCheckScript(unittest.TestCase):
-    def test_a_matching_origin_and_push_url_check_and_each_other_one_is_named(self):
+    def test_its_fetch_reads_its_origin_and_its_check_names_an_origin_or_a_push_url_not_its_own(self):
+        """Run in a real clone of a local upstream; GitHub, which a test does not reach, is skipped by `fetch --all`."""
         with scratch_dir(prefix="wk-clone-check-") as d:
-            up = d / "up"
+            up, co = d / "up", d / "co"
             git_run("init", "-q", "-b", "main", str(up), cwd=str(d))
             git_commit(up, "one")
-            git_run("clone", "-q", str(up), str(d / "co"), cwd=str(d))
-            git_run("remote", "set-url", "--push", "origin", PUSH, cwd=str(d / "co"))
-            run = lambda origin, push: subprocess.run(["sh", "-c", sync.clone_fetch_and_check_script(str(d / "co"), origin, push)],
-                                                      capture_output=True, text=True).stdout
-            self.assertIn("check=0", run(str(up), PUSH))
-            out = run(ORIGIN, PUSH)
-            self.assertIn("check=1", out)
-            self.assertIn("problem: origin is %s, not %s" % (up, ORIGIN), out)
-            out = run(str(up), "git@elsewhere:x.git")
-            self.assertIn("check=1", out)
-            self.assertIn("problem: origin pushes to %s, not git@elsewhere:x.git" % PUSH, out)
+            git_run("clone", "-q", str(up), str(co), cwd=str(d))
+            git_run("remote", "set-url", "--push", "origin", PUSH, cwd=str(co))
+            git_commit(up, "two")
+            ok, wrong = "  %-24s ok  (over the network: this checkout reads no mirror)" % "tools", " -- wired wrong:"
+            for setup, rc, lines in (((), 1, [ok + wrong, "    - origin is %s, not %s" % (up, ORIGIN)]),
+                                     ((("remote", "set-url", "--push", "origin", "git@elsewhere:x.git"),), 1,
+                                      [ok + wrong, "    - origin is %s, not %s" % (up, ORIGIN), "    - origin pushes to git@elsewhere:x.git, not " + PUSH]),
+                                     ((("remote", "set-url", "origin", ORIGIN), ("remote", "set-url", "--push", "origin", PUSH),
+                                       ("config", "remote.origin.skipFetchAll", "true")), 0, [ok])):
+                for args in setup:
+                    git_run(*args, cwd=str(co))
+                w = self.make_world(co=co)
+                got, err = self.sync("tools", w=w)
+                i = err.splitlines().index(lines[0])
+                self.assertEqual((got, err.splitlines()[i:i + len(lines)]), (rc, lines), setup)
+            self.assertEqual(git_run("rev-parse", "origin/main", cwd=str(co)).stdout, git_run("rev-parse", "HEAD", cwd=str(up)).stdout)
 
 
 class TestFirstRun(unittest.TestCase):
