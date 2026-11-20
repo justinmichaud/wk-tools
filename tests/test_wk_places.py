@@ -632,7 +632,9 @@ class TestContainerWrite(DriversTest):
         self.fake.answer(["podman", "container", "exists"], rc=1)
         self.fake.answer(["podman", "container", "exists", "wk-a"], rc=0)
         self.fake.answer(lib_argv(self.t.root, "host/linux/gpu.sh", "gpu_flags")[:3], out="--device /dev/dri")
-        self.fake.answer(["env"], out="")
+        self.fake.answer(["env"], out="2.55-v2-8434060\n")
+        for podman in ("image", "build"):
+            self.fake.answer(["podman", podman], out="")
         self.fake.answer(["install"], out="")
 
     def wkdev_create(self):
@@ -653,7 +655,7 @@ class TestContainerWrite(DriversTest):
                      ("--env", "NO_PROXY=localhost,127.0.0.1,::1"), ("--device", "/dev/dri")):
             self.assertIn(pair, pairs)
         head = argv[argv.index("--network"):argv.index("--additional-flags")]
-        self.assertEqual(head, ("--network", "none", "--isolated", "--name", "wk-new", "--shell", "/bin/bash", "--user", u, "--group", u,
+        self.assertEqual(head, ("--network", "none", "--isolated", "--image", argv[argv.index("--image") + 1], "--name", "wk-new", "--shell", "/bin/bash", "--user", u, "--group", u,
                                 "--home", os.path.join(ws_dir, "home")))
         self.assertEqual(argv[0], "env")
         self.assertIn("WKDEV_SDK=%s" % self.t.sdk(), argv)
@@ -685,30 +687,27 @@ class TestContainerWrite(DriversTest):
         self.assertNotIn(("--device", "/dev/dri"), self.flag_pairs(argv))
         self.assertIn(("--env", "WK_ARCH=armhf"), self.flag_pairs(argv))
 
-    def sdk_asks_for(self, tag, published):
-        self.fake.answer(["env", "WKDEV_SDK=%s" % self.t.sdk()], out=tag + "\n")
-        rows = "".join("ghcr.io/igalia/wkdev-sdk\t%s\n" % t for t in published)
-        self.fake.answer(["podman", "search", "--list-tags"], out="NAME\tTAG\n" + rows)
-
     def test_an_unpublished_sdk_tag_is_refused_naming_the_newest_of_its_series_before_anything_is_made(self):
-        self.sdk_asks_for("2.55-v2-8434060", ["2.55-v2-8434060_amd64", "2.54-v9-aaa", "2.55-v1-1111111", "2.55-v10-2222222", "2.55-v2-3333333"])
+        rows = "".join("sdk\t%s\n" % t for t in ("2.55-v2-8434060_amd64", "2.54-v9-aaa", "2.55-v1-1111111", "2.55-v10-2222222", "2.55-v2-3333333"))
+        self.fake.answer(["podman", "search", "--list-tags"], out="NAME\tTAG\n" + rows)
         err = self.refused(lambda: self.t.create("new", self.base))
         self.assertIn("ghcr.io/igalia/wkdev-sdk:2.55-v2-8434060, which upstream has not published", err)
         self.assertIn("WK_SDK_IMAGE=ghcr.io/igalia/wkdev-sdk:2.55-v10-2222222 wk new", err)
         self.assertEqual([e for e in self.fake.effects if e[0] != "run"], [])
 
-    def test_a_published_tag_or_a_registry_that_cannot_be_asked_goes_on_to_wkdev_create(self):
-        for ws, search in (("published", Result(0, "NAME\tTAG\nghcr.io/igalia/wkdev-sdk\t2.55-v2-8434060\n")),
-                           ("unasked", Result(1, "", "timed out"))):
-            with self.subTest(ws):
-                self.sdk_asks_for("2.55-v2-8434060", [])
-                self.fake.answer(["podman", "search", "--list-tags"], rc=search.rc, out=search.out, err=search.err)
-                self.fake.effects = []
-                self.stderr_of(lambda: self.t.create(ws, self.base))
-                self.assertTrue(self.wkdev_create())
+    def test_a_native_workspace_is_made_under_the_tree_s_sdk_layer_built_once_whether_or_not_the_registry_answers(self):
+        tag = places.layer_tag(self.t.root, "sdk:2.55-v2-8434060", places.SDK_LAYER, "wk-sdk")
+        for ws, absent, search in (("published", 1, Result(0, "NAME\tTAG\nghcr.io/igalia/wkdev-sdk\t2.55-v2-8434060\n")),
+                                   ("unasked", 0, Result(1, "", "timed out"))):
+            self.fake.answer(["podman", "image", "exists"], rc=absent)
+            self.fake.answer(["podman", "search", "--list-tags"], rc=search.rc, out=search.out, err=search.err)
+            self.fake.effects = []
+            self.stderr_of(lambda: self.t.create(ws, self.base))
+            built = [e[1][2:6] for e in self.fake.effects if e[1][:2] == ("podman", "build")]
+            self.assertEqual(built, [("--build-arg", "BASE=ghcr.io/igalia/wkdev-sdk:2.55-v2-8434060", "-t", tag)] * absent)
+            self.assertIn(tag, self.wkdev_create())
 
     def test_an_image_override_skips_the_registry_check(self):
-        self.sdk_asks_for("2.55-v2-8434060", [])
         self.env["WK_SDK_IMAGE"] = "ghcr.io/x/sdk:tag"
         self.stderr_of(lambda: self.reg.load("container").create("other", self.base))
         self.assertFalse([e for e in self.fake.effects if e[1][:2] == ("podman", "search")])

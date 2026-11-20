@@ -220,17 +220,6 @@ class Registry:
     def here(self):
         return [t for t in self.all() if self.is_here(t)]
 
-    def peer_workstations(self):
-        out = []
-        for name in self.machines():
-            try:
-                t = self.load(name)
-            except LookupError:
-                continue
-            if t.peer and t.has_wk():
-                out.append(name)
-        return out
-
     def walk(self):
         """The places a listing covers: WK_PLACE's, this workspace's, the ones here when another wk asked, else all."""
         if dispatch_place(self.env):
@@ -594,9 +583,6 @@ class Driver:
         for d in ("",) + self.store_dirs:
             self.here.mkdir(os.path.join(root, d) if d else root)
 
-    def sdk_refresh(self):
-        return True
-
     def create(self, ws, base=None, arch="native", repo=None):
         raise NotImplementedError
 
@@ -724,9 +710,18 @@ def tart_path(env):
     return os.path.realpath(found) if found else None
 
 
+SDK_LAYER = os.path.join("container", "sdk", "Containerfile")
+
+
 def arch_image(arch):
     """Pinned, arm64 with armhf multiarch: the SDK's create script with --arch would hand podman the aarch64 image with --arch=arm."""
     return project.get("SDK_IMAGE_ARMHF") if arch == "armhf" else ""
+
+
+def layer_tag(root, base, spec, name):
+    """Tagged by a digest of `spec`, so an edited Containerfile is a new image."""
+    with open(os.path.join(root, spec), "rb") as f:
+        return "localhost/%s:%s-%s" % (name, base.rsplit(":", 1)[-1], hashlib.sha256(f.read()).hexdigest()[:8])
 
 
 def podman_vm(machine, name, timeout=None):
@@ -997,27 +992,35 @@ class Container(Driver):
     def sdk_image(self):
         return self.env.get("WK_SDK_IMAGE")
 
-    def check_sdk_tag(self):
+    def sdk_tag(self):
         r = self.machine.run(self.sdk_env() + [os.path.join(self.sdk(), "scripts", "helpers", "print-sdk-version")])
-        tag = r.out.strip() if r.ok else ""
-        published = self.sdk_upstream() if tag else None   # a registry that cannot be asked is left to the pull's own failure
+        if not (r.ok and r.out.strip()):
+            act.die("the SDK checkout %s names no image version: %s\n    ./setup refreshes it" % (self.sdk(), r.err.strip() or "no output"))
+        tag, published = r.out.strip(), self.sdk_upstream()   # a registry that cannot be asked is left to the pull's own failure
         if published is None or tag in published:
-            return
+            return tag
         series = tag.split("-v")[0] + "-v"
         newest = max((t for t in published if re.fullmatch(re.escape(series) + r"\d+-[0-9a-f]+", t)),
                      key=lambda t: int(t[len(series):].split("-")[0]), default="<tag>")
         act.die("the SDK checkout asks for image %s:%s, which upstream has not published.\n"
                 "    Use the newest of that series:  WK_SDK_IMAGE=%s:%s wk new ..." % (project.get("SDK_IMAGE"), tag, project.get("SDK_IMAGE"), newest))
 
-    def create_argv(self, ws, base, arch, repo):
+    def layered(self, base, spec, name, note=""):
+        """The image `base` under the tree's Containerfile `spec`, built where it is not there yet."""
+        tag, path = layer_tag(self.root, base, spec, name), os.path.join(self.root, spec)
+        if not self.machine.run(self.podman() + ["image", "exists", tag]).ok:
+            act.info("building the workspace image %s (%s on %s)" % (tag, spec, base))
+            act.log(note) if note else None
+            if not self.machine.act_run(self.podman() + ["build", "--build-arg", "BASE=" + base, "-t", tag, "-f", path, os.path.dirname(path)], tty=True).ok:
+                act.die("could not build %s (on the host, so a failed download or pull is not the workspace boundary)" % tag)
+        return tag
+
+    def create_argv(self, ws, base, arch, repo, image):
         u = self.user()
         argv = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_CREATE")), "--network", "none", "--isolated"]
         if arch != "native":
             argv += ["--arch", "arm"]
-        image = self.sdk_image() or arch_image(arch)
-        if image:
-            argv += ["--image", image]
-        return argv + ["--name", self.ctr(ws), "--shell", "/bin/bash", "--user", u, "--group", u,
+        return argv + ["--image", image, "--name", self.ctr(ws), "--shell", "/bin/bash", "--user", u, "--group", u,
                        "--home", os.path.join(self.store.ws_dir(ws), "home"), "--additional-flags", " ".join(self.create_flags(ws, base, arch, repo))]
 
     def create(self, ws, base=None, arch="native", repo=None):
@@ -1026,14 +1029,13 @@ class Container(Driver):
             act.die("snapshot %s not found; run 'wk sync' first" % base)
         if self.exists(ws):
             act.die("workspace '%s' already exists" % ws)
-        if not (self.sdk_image() or arch_image(arch)):
-            self.check_sdk_tag()
+        image = self.sdk_image() or arch_image(arch) or self.layered("%s:%s" % (project.get("SDK_IMAGE"), self.sdk_tag()), SDK_LAYER, "wk-sdk")
         for d in (ws_dir, "home", "ccache") + (("changes", "overlay-work", "build") if repo.snapshot else (repo.checkout,)):
             self.machine.mkdir(d if d == ws_dir else os.path.join(ws_dir, d))
         if repo.snapshot:
             self._ensure_home_mountpoint(ws_dir, self.store.mirror_parent())
         self.machine.write(os.path.join(ws_dir, "arch"), arch + "\n")
-        argv = self.create_argv(ws, base, arch, repo)
+        argv = self.create_argv(ws, base, arch, repo, image)
         if self.sdk_image():
             act.info("using workspace image %s (WK_SDK_IMAGE)" % self.sdk_image())
         act.info("creating workspace '%s' from %s (rootless-proxy, %s)" % (ws, "base " + base if repo.snapshot else repo.name, arch))

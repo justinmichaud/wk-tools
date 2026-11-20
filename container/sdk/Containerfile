@@ -1,0 +1,13 @@
+# The SDK image with the Swift toolchain built for its own Ubuntu: the one it ships is built for
+# 24.04, and its ld.lld (first on PATH) cannot load libxml2.so.2 on 26.04, so no link uses lld.
+# TODO: goes with the image upstream publishes from webkit-container-sdk's swift-ubuntu2604 change.
+ARG BASE
+FROM ${BASE}
+USER root
+ARG SWIFT_VERSION=6.4.2
+RUN case "$(uname -m)" in x86_64) arch="" ;; aarch64) arch="-aarch64" ;; esac && \
+    rm -rf /opt/swift && mkdir -p /opt/swift && \
+    curl --fail --silent --show-error --location --output /tmp/swift.tar.gz \
+        "https://download.swift.org/swift-${SWIFT_VERSION}-release/ubuntu2604${arch}/swift-${SWIFT_VERSION}-RELEASE/swift-${SWIFT_VERSION}-RELEASE-ubuntu26.04${arch}.tar.gz" && \
+    tar zxf /tmp/swift.tar.gz --strip-components=1 -C /opt/swift && rm /tmp/swift.tar.gz
+RUN clang -fuse-ld=lld -Wl,--version && swiftc --version

@@ -57,7 +57,6 @@ class World(fakes.World):
         self.bash = {}
         self.acted = set()
         self.answer([WK, "sync"], out="fetched\n")
-        self.answer([WK, "zed"])
         self.react(["podman", "container", "exists"], lambda a, f: Result(0 if a[-1] in f.containers else 1))
         self.react(["podman", "inspect"], lambda a, f: Result(0, "running\n") if a[2] in f.containers else Result(125, "", "no such container"))
         self.react(["podman", "rm", "-f"], self._podman_rm)
@@ -65,7 +64,8 @@ class World(fakes.World):
         self.react(["env"], self._sdk)
         self.answer(["bash", os.path.join(str(REPO), "container", "sdk-refresh.sh")])
         self.answer(["bash", "-lc"])   # the agents cache, filled from the store's side
-        self.answer(["install", "-m"])
+        for argv in ([WK, "zed"], ["install", "-m"], ["podman", "image", "exists"]):
+            self.answer(argv)
         self.answer(["nproc"], out="8\n")
         self.files["/proc/meminfo"] = "MemTotal:       33554432 kB\n"
         self.react(["find"], self._find)
@@ -191,7 +191,7 @@ class World(fakes.World):
         if step(argv) == "wkdev-create":
             return self.wkdev_create(argv, f)
         if argv[-1].endswith("print-sdk-version"):
-            return Result(1, "", "no checkout")
+            return Result(0, "2.55-v1-abc\n")
         return self._exec(["exec", argv[argv.index("--name") + 1][3:]] + list(argv[argv.index("--") + 2:]), f)
 
     def _find(self, argv, f):

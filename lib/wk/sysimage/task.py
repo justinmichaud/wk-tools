@@ -1,12 +1,12 @@
 """One image-build lifecycle: a builder's stage as a task with `wk build`'s record, detach, watchdog and stop."""
 
-import hashlib
 import os
 import re
 import sys
 
 from wk import act, decl, images, job
 from wk.machine import Local, isolated_module
+from wk.places import layer_tag
 from wk.act import Refused, die, info, log, warn
 from wk.resources import Budget, Resources, build_jobs, disk_gb
 from wk.store import Store, dispatch_place
@@ -235,11 +235,8 @@ class ContainerBuilder:
         return t
 
     def host_image(self):
-        """(base, tag): tagged by a digest of SPEC, so an edited spec is a new image."""
         base = self.env.get(self.BASE_VAR) or self.BASE_IMAGE
-        with open(os.path.join(self.root, self.SPEC), "rb") as f:
-            digest = hashlib.sha256(f.read()).hexdigest()[:8]
-        return base, "localhost/wk-%s-host:%s-%s" % (self.KIND, base.rsplit(":", 1)[-1], digest)
+        return base, layer_tag(self.root, base, self.SPEC, "wk-%s-host" % self.KIND)
 
     def stage(self, driver, ws, stage):
         flag = "" if ws == images.image_ws(self.name, self.env) else " --workspace " + ws
@@ -278,14 +275,7 @@ class ContainerBuilder:
         st.run(t, argv(), self.PATTERN)
 
     def ensure_ws(self, driver, ws):
-        base, tag = self.host_image()
-        podman = driver.podman()
-        if not self.here.run(podman + ["image", "exists", tag]).ok:
-            info("building the %s workspace image %s (one layer on %s)" % (self.TITLE, tag, base))
-            log(self.IMAGE_NOTE % {"spec": self.SPEC})
-            spec = os.path.join(self.root, self.SPEC)
-            if not self.here.run_tty(podman + ["build", "--build-arg", "BASE=" + base, "-t", tag, "-f", spec, os.path.dirname(spec)]).ok:
-                die("could not build %s (on the host, so a failed apt or pull is not the workspace boundary)" % tag)
+        tag, podman = driver.layered(self.host_image()[0], self.SPEC, "wk-%s-host" % self.KIND, self.IMAGE_NOTE % {"spec": self.SPEC}), driver.podman()
         if driver.info(ws) == "absent":
             info("creating workspace '%s' for the %s build" % (ws, self.TITLE))
             if not self.here.run_tty(["env", "WK_SDK_IMAGE=" + tag, os.path.join(self.root, "wk"), "new", ws, "--on", driver.name]).ok:

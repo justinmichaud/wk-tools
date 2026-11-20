@@ -17,7 +17,7 @@ from tests.fakes import FakeProc, FakeRegistry, WsDriver
 from tests.support import REPO
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import images, job, pgo, record, resources  # noqa: E402
+from wk import images, job, pgo, places, record, resources  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import Result, isolated_module  # noqa: E402
 from wk.sysimage import buildroot, task, yocto  # noqa: E402
@@ -30,6 +30,7 @@ TASK_LINE = "NOTE: Running task 7658 of 13213 (virtual:native:/w/sources/meta-cl
 class Box(WsDriver):
     """The container place, holding the world's workspace once it is made."""
 
+    layered = places.Container.layered
     def podman(self):
         return ["podman"]
 
@@ -208,9 +209,8 @@ class Lifecycle:
 
     def test_the_host_image_is_tagged_by_its_base_and_its_containerfile_and_its_variable_names_another(self):
         b = self.w.BUILDER
-        base, tag = self.w.driver().host_image()
-        self.assertEqual(base, b.BASE_IMAGE)
-        self.assertRegex(tag, r"^localhost/wk-%s-host:%s-[0-9a-f]{8}$" % (self.w.KIND, re.escape(b.BASE_IMAGE.rsplit(":", 1)[-1])))
+        self.assertEqual(self.w.driver().host_image()[0], b.BASE_IMAGE)
+        self.assertRegex(self.w.tag(), r"^localhost/wk-%s-host:%s-[0-9a-f]{8}$" % (self.w.KIND, re.escape(b.BASE_IMAGE.rsplit(":", 1)[-1])))
         self.w.env[b.BASE_VAR] = "docker.io/library/debian:13"
         self.assertEqual(self.w.driver().host_image()[0], "docker.io/library/debian:13")
 
