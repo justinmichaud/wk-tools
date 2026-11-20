@@ -3,7 +3,6 @@
 Refused inside a workspace: Zed runs where the person is.
 """
 import os
-import sys
 
 from wk import dispatch, guest, images, places, store
 from wk.act import die, log
@@ -24,14 +23,6 @@ def exec_clean(argv):
     Local().exec(argv, env={k: v for k, v in os.environ.items() if k not in dispatch.DISPATCH_VARS})
 
 
-def emit(url_only, zed, url):
-    if url_only:
-        print(url)
-        log("  zed '%s'" % url)
-        sys.exit(0)
-    exec_clean([zed, url])
-
-
 def main(args, inv):
     url_only, route, name = args.flag("--url"), args.flag("--route"), store.ws_name()
 
@@ -46,11 +37,7 @@ def main(args, inv):
     reg = places.Registry(ROOT)
 
     require_name(name)
-    try:
-        tname = reg.ws_place(name)
-        driver = reg.load(tname)
-    except LookupError as e:
-        die(str(e))
+    driver = reg.driver_of(name)
     if driver.state(name) == "broken":
         die(driver.broken_words(name))
 
@@ -74,6 +61,11 @@ def main(args, inv):
     if driver.kind == "vm":
         guest.login_note(driver.env)
 
-    emit(url_only, zed, "ssh://%s%s" % (host, driver.src(name)))
+    url = "ssh://%s%s" % (host, driver.src(name))
+    if url_only:
+        print(url)
+        log("  zed '%s'" % url)
+    else:
+        exec_clean([zed, url])
     return 0
 

@@ -47,12 +47,8 @@ def _diskutil(target):
     return _plist_of(["diskutil", "info", "-plist", target]) or {}
 
 
-def cmd_volume_name(args):
-    return _print(_diskutil(args.target).get("VolumeName"))
-
-
-def cmd_volume_group(args):
-    return _print(_diskutil(args.target).get("APFSVolumeGroupID"))
+def _diskutil_key(key):
+    return lambda args: _print(_diskutil(args.target).get(key))
 
 
 def cmd_boot_volume(args):
@@ -69,51 +65,38 @@ def cmd_physical_store(args):
     return _print(stores and stores[0].get("APFSPhysicalStore"))
 
 
-def _declare(lib, name, restype):
-    fn = getattr(lib, name)
-    fn.argtypes = [ctypes.c_uint32]
-    fn.restype = restype
+def _bind(path, signatures):
+    """Load `path` and declare every `name: (restype, *argtypes)`; None where the framework or a symbol is absent."""
+    try:
+        lib = ctypes.CDLL(path)
+        for name, (restype, *argtypes) in signatures.items():
+            fn = getattr(lib, name)
+            fn.argtypes, fn.restype = argtypes, restype
+    except (OSError, AttributeError):
+        return None
+    return lib
 
 
 def _coregraphics():
     # Every argtype and restype declared: an undeclared ctypes call on a display handle segfaults, which is why the CGDisplayMode API is not used here at all.
-    try:
-        cg = ctypes.CDLL(CG_FRAMEWORK)
-        cg.CGGetOnlineDisplayList.argtypes = [ctypes.c_uint32,
-                                              ctypes.POINTER(ctypes.c_uint32),
-                                              ctypes.POINTER(ctypes.c_uint32)]
-        cg.CGGetOnlineDisplayList.restype = ctypes.c_int32
-        for name in _FLAGS.values():
-            _declare(cg, name, ctypes.c_int32)
-        for name in _NUMBERS.values():
-            _declare(cg, name, ctypes.c_uint32)
-        for name in ("CGDisplayPixelsWide", "CGDisplayPixelsHigh"):
-            _declare(cg, name, ctypes.c_size_t)
-    except (OSError, AttributeError):
-        return None
-    return cg
+    u32, u32p = ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)
+    sigs = {"CGGetOnlineDisplayList": (ctypes.c_int32, u32, u32p, u32p)}
+    sigs.update({name: (ctypes.c_int32, u32) for name in _FLAGS.values()})
+    sigs.update({name: (u32, u32) for name in _NUMBERS.values()})
+    sigs.update({name: (ctypes.c_size_t, u32) for name in ("CGDisplayPixelsWide", "CGDisplayPixelsHigh")})
+    return _bind(CG_FRAMEWORK, sigs)
 
 
 def _display_services():
     # macOS ships no brightness CLI; this private framework is the mechanism.
-    try:
-        ds = ctypes.CDLL(DS_FRAMEWORK)
-        ds.DisplayServicesGetBrightness.argtypes = [ctypes.c_uint32,
-                                                    ctypes.POINTER(ctypes.c_float)]
-        ds.DisplayServicesGetBrightness.restype = ctypes.c_int32
-        ds.DisplayServicesSetBrightness.argtypes = [ctypes.c_uint32, ctypes.c_float]
-        ds.DisplayServicesSetBrightness.restype = ctypes.c_int32
-        _declare(ds, "DisplayServicesCanChangeBrightness", ctypes.c_bool)
-        _declare(ds, "DisplayServicesHasAmbientLightCompensation", ctypes.c_bool)
-        ds.DisplayServicesAmbientLightCompensationEnabled.argtypes = [
-            ctypes.c_uint32, ctypes.POINTER(ctypes.c_bool)]
-        ds.DisplayServicesAmbientLightCompensationEnabled.restype = ctypes.c_int32
-        ds.DisplayServicesEnableAmbientLightCompensation.argtypes = [ctypes.c_uint32,
-                                                                     ctypes.c_bool]
-        ds.DisplayServicesEnableAmbientLightCompensation.restype = ctypes.c_int32
-    except (OSError, AttributeError):
-        return None
-    return ds
+    u32, i32, boolean = ctypes.c_uint32, ctypes.c_int32, ctypes.c_bool
+    return _bind(DS_FRAMEWORK, {
+        "DisplayServicesGetBrightness": (i32, u32, ctypes.POINTER(ctypes.c_float)),
+        "DisplayServicesSetBrightness": (i32, u32, ctypes.c_float),
+        "DisplayServicesCanChangeBrightness": (boolean, u32),
+        "DisplayServicesHasAmbientLightCompensation": (boolean, u32),
+        "DisplayServicesAmbientLightCompensationEnabled": (i32, u32, ctypes.POINTER(boolean)),
+        "DisplayServicesEnableAmbientLightCompensation": (i32, u32, boolean)})
 
 
 def _online_ids(cg):
@@ -163,19 +146,11 @@ def _builtin_id(cg):
 
 
 def _colorsync():
-    try:
-        cs = ctypes.CDLL(CS_FRAMEWORK)
-        cs.CGDisplayCreateUUIDFromDisplayID.argtypes = [ctypes.c_uint32]
-        cs.CGDisplayCreateUUIDFromDisplayID.restype = ctypes.c_void_p
-        cf = ctypes.CDLL(CF_FRAMEWORK)
-        cf.CFUUIDCreateString.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-        cf.CFUUIDCreateString.restype = ctypes.c_void_p
-        cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
-                                          ctypes.c_long, ctypes.c_uint32]
-        cf.CFStringGetCString.restype = ctypes.c_bool
-    except (OSError, AttributeError):
-        return None, None
-    return cs, cf
+    void, u32 = ctypes.c_void_p, ctypes.c_uint32
+    cs = _bind(CS_FRAMEWORK, {"CGDisplayCreateUUIDFromDisplayID": (void, u32)})
+    cf = _bind(CF_FRAMEWORK, {"CFUUIDCreateString": (void, void, void),
+                              "CFStringGetCString": (ctypes.c_bool, void, ctypes.c_char_p, ctypes.c_long, u32)})
+    return (cs, cf) if cs and cf else (None, None)
 
 
 def _builtin_uuid(cs, cf, ident):
@@ -320,44 +295,28 @@ def cmd_auto_brightness(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
-
-    sp = sub.add_parser("volume-name", help="VolumeName of a mounted APFS volume")
-    sp.add_argument("target", help="mount point, device node, or disk identifier")
-    sp.set_defaults(func=cmd_volume_name)
-
-    sp = sub.add_parser("volume-group", help="APFS volume group UUID of a mounted volume")
-    sp.add_argument("target")
-    sp.set_defaults(func=cmd_volume_group)
-
-    sp = sub.add_parser("boot-volume", help="the firmware's boot-volume NVRAM value (colon-separated UUIDs)")
-    sp.set_defaults(func=cmd_boot_volume)
-
-    sp = sub.add_parser("displays", help="every online display as JSON")
-    sp.set_defaults(func=cmd_displays)
-
-    sp = sub.add_parser("display-mode", help="the built-in display's mode in points, "
-                                            "as <wide>x<high>")
-    sp.add_argument("--declare", metavar="WxH", type=_points,
-                    help="declare WxH as the mode WindowServer comes up at next boot (root); "
-                         "prints what the file now declares")
-    sp.set_defaults(func=cmd_display_mode)
-
-    sp = sub.add_parser("brightness", help="the built-in display's brightness, 0.0 to 1.0")
-    sp.add_argument("--set", metavar="V", type=_fraction,
-                    help="set it to V, then print the value read back")
-    sp.set_defaults(func=cmd_brightness)
-
-    sp = sub.add_parser("auto-brightness", help="whether the built-in panel is under "
-                                                "ambient-light control: on, off, or none "
-                                                "for a panel with no sensor")
-    sp.add_argument("--off", action="store_true",
-                    help="turn it off first, then print what it reads back")
-    sp.set_defaults(func=cmd_auto_brightness)
-
-    sp = sub.add_parser("physical-store", help="device identifier of the physical store backing a volume's APFS container")
-    sp.add_argument("target", nargs="?", default="/")
-    sp.set_defaults(func=cmd_physical_store)
-
+    rows = (
+        ("volume-name", "VolumeName of a mounted APFS volume", _diskutil_key("VolumeName"), [("target", {"help": "mount point, device node, or disk identifier"})]),
+        ("volume-group", "APFS volume group UUID of a mounted volume", _diskutil_key("APFSVolumeGroupID"),
+         [("target", {})]),
+        ("boot-volume", "the firmware's boot-volume NVRAM value (colon-separated UUIDs)", cmd_boot_volume, []),
+        ("displays", "every online display as JSON", cmd_displays, []),
+        ("display-mode", "the built-in display's mode in points, as <wide>x<high>", cmd_display_mode,
+         [("--declare", {"metavar": "WxH", "type": _points,
+                         "help": "declare WxH as the mode WindowServer comes up at next boot (root); "
+                                 "prints what the file now declares"})]),
+        ("brightness", "the built-in display's brightness, 0.0 to 1.0", cmd_brightness,
+         [("--set", {"metavar": "V", "type": _fraction, "help": "set it to V, then print the value read back"})]),
+        ("auto-brightness", "whether the built-in panel is under ambient-light control: on, off, or none "
+                            "for a panel with no sensor", cmd_auto_brightness,
+         [("--off", {"action": "store_true", "help": "turn it off first, then print what it reads back"})]),
+        ("physical-store", "device identifier of the physical store backing a volume's APFS container",
+         cmd_physical_store, [("target", {"nargs": "?", "default": "/"})]))
+    for name, text, func, arguments in rows:
+        sp = sub.add_parser(name, help=text)
+        for flag, kwargs in arguments:
+            sp.add_argument(flag, **kwargs)
+        sp.set_defaults(func=func)
     args = p.parse_args()
     sys.exit(args.func(args))
 

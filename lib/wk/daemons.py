@@ -105,10 +105,7 @@ class Supervisor:
         return self.render(d, d.env if d.argv else dict(d.env, WK_PROGRAM_STAMP=stamp(PROGRAMS[d.word])))
 
     def installed(self, d):
-        try:
-            return self.m.read(self.path(d))
-        except OSError:
-            return None
+        return self.m.read_or(self.path(d), None)
 
     def put(self, d, body):
         self.m.mkdir(self.dir(d.domain))

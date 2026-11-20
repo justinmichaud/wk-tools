@@ -148,9 +148,6 @@ class Fleet:
             act.warn("%s is not usable: %s\n  Leaving it in place rather than deleting it -- check it and re-run." % (path, why))
         return ""
 
-    def key(self):
-        return self.stored() if self.authkey() else ""
-
     def mint(self, api, path, tag):
         if act.dry_run():
             act.log("would mint a tailnet auth key for %s into %s" % (tag, path))
@@ -204,11 +201,7 @@ def main(argv, env=None, out=None, transport=urllib_transport):
         return 0 if path else 1
     path = env.get("WK_TS_API_SECRET_FILE", "")
     try:
-        try:
-            value = Local().read(path) if path else ""
-        except OSError:
-            value = ""
-        n = len(Api(secret(value, path), api_url(env), transport).devices())
+        n = len(Api(secret(Local().read_or(path) if path else "", path), api_url(env), transport).devices())
         out.write("ok: the credential works (%d device%s on the tailnet)\n" % (n, "" if n == 1 else "s"))
     except Failed as e:
         sys.stderr.write("wk-tailnet: %s\n" % e)

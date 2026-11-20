@@ -86,10 +86,7 @@ class Host:
         return ["--net-softnet", "--net-softnet-block=0.0.0.0/0", "--net-softnet-allow=%s/32" % self.proxy_addr()]
 
     def daemon_pid(self, pidfile):
-        try:
-            pid = self.machine.read(pidfile).strip()
-        except OSError:
-            return None
+        pid = self.machine.read_or(pidfile).strip()
         return int(pid) if pid.isdigit() and self.machine.alive(int(pid)) else None
 
     def spawn(self, argv, log, pidfile):
@@ -104,12 +101,12 @@ class Host:
     def daemons(self):
         login = self.secrets.cred_path("claude-login")
         self.secrets.ensure_dir(os.path.dirname(login), "0700")
-        store, push = Store(self.env), self.push_sock()
+        store, inject = Store(self.env), self.inject_env()
+        push = store.push_socket()
         at = "%s:%s" % (self.proxy_addr(), proxy_port(self.env))
-        proxy = {"WK_PROXY_UNIX": "0", "WK_PROXY_TCP": at, "WK_STORE": self.vm.store.store_dir(),
-                 "WK_PUSH_SOCKET": push, **{k: v for k, v in self.inject_env().items() if k in ("WK_INJECT_SOCK", "WK_INJECT_READ_SOCK",
-                                                                                              "WK_INJECT_CA_OUT")}}
-        return {"github-inject": Daemon("github-inject", self.inject_env(), self.path("github-inject.sock"), lock=login),
+        proxy = {"WK_PROXY_UNIX": "0", "WK_PROXY_TCP": at, "WK_STORE": self.vm.store.store_dir(), "WK_PUSH_SOCKET": push,
+                 **{k: inject[k] for k in ("WK_INJECT_SOCK", "WK_INJECT_READ_SOCK", "WK_INJECT_CA_OUT")}}
+        return {"github-inject": Daemon("github-inject", inject, self.path("github-inject.sock"), lock=login),
                 "broker": Daemon("broker", {"WK_ROOT": self.root, "WK_STORE": store.store_dir(),
                                             "WK_BROKER_PUBLISH_MACHINE": store.podman_machine()}, store.runtime_socket()),
                 "push": Daemon("push", {"WK_PUSH_SOCKET": push, "WK_PUSH_GUEST_DIR": self.dir}, push),
@@ -160,9 +157,6 @@ class Host:
              "  credential:  ./setup --stage inject" % project.get("PR_TOOL"))
         return False
 
-    def push_sock(self):
-        return Store(self.env).push_socket()
-
     def start_push(self):
         """The push service every guest's push reaches, run here because a guest cannot see a unix socket across the hypervisor."""
         with self.lock().held("vm-daemons"):
@@ -171,7 +165,7 @@ class Host:
     def push_listen(self, ws):
         if not self.start_push():
             return None
-        if not self.machine.act_run(["/usr/bin/python3", "-c", PUSH_LISTEN, self.push_sock(), ws]).ok:
+        if not self.machine.act_run(["/usr/bin/python3", "-c", PUSH_LISTEN, Store(self.env).push_socket(), ws]).ok:
             return None
         return self.path(ws + ".push.sock")
 
@@ -342,10 +336,7 @@ class Guest:
     def set_guest_egress(self):
         h = self.host
         addr = "" if is_unfiltered(h.env) else h.proxy_addr()
-        try:
-            ca = h.machine.read(h.path("wk-github-ca.pem")) if addr else ""
-        except OSError:
-            ca = ""
+        ca = h.machine.read_or(h.path("wk-github-ca.pem")) if addr else ""
         ca = ca if "BEGIN CERTIFICATE" in ca else ""
         debug("guest egress in %s: %s" % (self.ws, addr or "off"))
         script = here_doc("/tmp/.wk-github-ca.new", ca) + here_doc("/tmp/.wk-egress.new", self.egress_env(addr, ca)) + tree(h.root, "vm/egress.sh")
@@ -406,10 +397,7 @@ def here_doc(path, text):
 
 def runlog_tail(machine, path):
     """The only place a `tart run` says why it died ("The number of VMs exceeds the system limit")."""
-    try:
-        lines = machine.read(path).splitlines()
-    except OSError:
-        lines = []
+    lines = machine.read_or(path).splitlines()
     if not lines:
         return "    nothing -- %s is empty" % path
     return "\n".join("      " + line for line in lines[-5:]) + "\n    (%s)" % path
@@ -442,20 +430,23 @@ def unexpected(root, machine, windows):
     return bench(root, machine, '. "$0/%s"; wk_window_unexpected "$1"' % WINDOWS, windows).strip()
 
 
+def streamed(g, script):
+    """What `script`, streamed to the guest's bash, printed without the TTY's carriage returns; "" when it failed."""
+    r = g.run(["bash", "-s"], input=script)
+    return r.out.replace("\r", "") if r.ok else ""
+
+
 def window_reading(root, machine, g):
-    r = g.run(["bash", "-s"], input=quiet_script(root, machine) + tree(root, WINDOWS) + "wk_window_probe\n")
-    return value(r.out.replace("\r", ""), "windows") if r.ok else ""
+    return value(streamed(g, quiet_script(root, machine) + tree(root, WINDOWS) + "wk_window_probe\n"), "windows")
 
 
 def desktop_probe(root, machine, g):
     """Streamed, never the guest's own wk-tools: it answers about a guest whose copy is older than this tree."""
-    r = g.run(["bash", "-s"], input=quiet_script(root, machine) + tree(root, WINDOWS, PYOBJC, "vm/desktop-probe.sh"))
-    return r.out.replace("\r", "") if r.ok else ""
+    return streamed(g, quiet_script(root, machine) + tree(root, WINDOWS, PYOBJC, "vm/desktop-probe.sh"))
 
 
 def load_probe(root, g):
-    r = g.run(["bash", "-s"], input=tree(root, "vm/load-probe.sh"))
-    return r.out.replace("\r", "") if r.ok else ""
+    return streamed(g, tree(root, "vm/load-probe.sh"))
 
 
 def value(probe, key):

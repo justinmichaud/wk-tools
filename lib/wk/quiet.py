@@ -125,11 +125,8 @@ class Quiesce:
         return 0
 
     def _running(self, pidfile):
-        try:
-            pid = int(self.m.read(self._at(pidfile)).strip())
-        except (OSError, ValueError):
-            return False
-        return self.m.alive(pid)
+        pid = self.m.read_or(self._at(pidfile)).strip()
+        return pid.isdigit() and self.m.alive(int(pid))
 
     def status(self):
         claim = self.priv_claim()

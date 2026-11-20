@@ -36,13 +36,9 @@ def _without(text, name):
     return "".join(line + "\n" for line in kept)
 
 
-def _current(machine, conf):
-    return machine.read(conf) if machine.exists(conf) else ""
-
-
 def alias_remove(machine, env, name):
     conf = alias_path(env)
-    text = _current(machine, conf)
+    text = machine.read_or(conf)
     if "Host wk-" + name not in text.splitlines():
         return
     machine.write(conf, _without(text, name))
@@ -61,5 +57,5 @@ def alias_set(machine, env, name, hostname, user, identity=None, extra=()):
     tail = "    IdentityFile %s\n    IdentitiesOnly yes" % identity if identity else ""
     for line in extra:
         tail += "\n    " + line
-    text = _without(_current(machine, conf), name)
+    text = _without(machine.read_or(conf), name)
     machine.write(conf, text + BLOCK % (name, hostname, user, tail))

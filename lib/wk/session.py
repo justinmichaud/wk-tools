@@ -30,20 +30,20 @@ class Session:
         return said(self.m.act_run(["sudo", "-n", PRIV, verb])).ok
 
     def _text(self, path, default=""):
-        try:
-            return self.m.read(path).strip()
-        except OSError:
-            return default
+        return self.m.read_or(path, default).strip()
 
     def driver(self, card):
         link = self.m.readlink("%s/%s/device/driver" % (SYS_DRM, card))
         return os.path.basename(link.rstrip("/")) if link else "none"
 
-    def _conns(self, which):
+    def _cards(self):
         try:
-            names = self.m.listdir(SYS_DRM)
+            return self.m.listdir(SYS_DRM)
         except OSError:
             return []
+
+    def _conns(self, which):
+        names = self._cards()
         out = []
         for card in (n for n in names if CARD.match(n)):
             drv = self.driver(card)
@@ -86,11 +86,7 @@ class Session:
             warn(said + "\n  a measurable session:  wk quiesce session on")
 
     def bmc_drm_device(self):
-        try:
-            names = sorted(self.m.listdir(SYS_DRM))
-        except OSError:
-            return None
-        return next(("/dev/dri/" + n for n in names if CARD.match(n) and self.driver(n) == "ast"), None)
+        return next(("/dev/dri/" + n for n in sorted(self._cards()) if CARD.match(n) and self.driver(n) == "ast"), None)
 
     def _sessions(self, on_seat0):
         if not self.m.have("loginctl"):
