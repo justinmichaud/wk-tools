@@ -1,63 +1,63 @@
 """`wk ls` is one table: places with no wk of their own are read here, every other place's own `wk ls --json` is
 merged in, and a place that was not asked is named."""
-import contextlib
-import io
 import json
-import os
-import sys
 import unittest
-from unittest import mock
 
-from tests.fakes import FakeDriver, FakeRegistry
-from tests.support import REPO, as_dispatched, fake_workspace, invocation, load_cmd
+from tests import fakes
+from tests.fakes import FakeRegistry, FlowTest, Result
+from tests.test_wk_places import LINUX_PROBE
+from tests.test_wk_workspace import WorkspaceTest
 
-sys.path.insert(0, str(REPO / "lib"))
-from tests.fakes import Fake  # noqa: E402
-
-ls = load_cmd("ls")
+W1 = {"name": "w1", "place": "box", "state": "present", "base": "main", "arch": "native", "changes": "1G"}
 
 
-class TestOneTable(unittest.TestCase):
-    def listed(self, drivers, *argv):
-        by_name = {d.name: d for d in drivers}
-        reg = FakeRegistry({}, Fake(), lambda name, env: by_name[name], names=list(by_name))
-        out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            ls.main(as_dispatched("ls", argv), invocation(reg))
-        return out.getvalue(), err.getvalue()
+class Fleet(fakes.World):
+    """A workstation whose podman machine is not made yet, and its peers: `box` lists W1, `garbled` prints no JSON
+    and `down` does not answer ssh."""
+    LS = {"box": json.dumps({"workspaces": [W1]}), "garbled": "not json"}
 
-    def test_every_answering_place_s_rows_are_merged_and_a_silent_one_named(self):
-        far = {"name": "w1", "place": "box", "state": "present", "base": "main", "arch": "native", "changes": "1G"}
-        box = FakeDriver("box", out=json.dumps({"workspaces": [far]}))
-        down = FakeDriver("down", side="unreachable", why="timed out")
-        out, err = self.listed([box, down], "--json")
-        self.assertEqual(json.loads(out), {"workspaces": [far]})
-        self.assertEqual(box.asked[0][0], ("ls", "--json"))
-        self.assertIn("down: unreachable over ssh: timed out, so its workspaces are not listed", err)
-        out, _ = self.listed([box])
-        self.assertEqual(out.splitlines()[1].split(), ["w1", "box", "present", "main", "native", "1G"])
+    def __init__(self, tmp, peers=("box", "garbled", "down")):
+        super().__init__(tmp)
+        (self.tmp / "machines").mkdir()
+        for peer in peers:
+            (self.tmp / "machines" / (peer + ".conf")).write_text("kind=peer\nhost=%s.example\n" % peer)
+        self.env["WK_MACHINES_DIR"] = str(self.tmp / "machines")
+        self.answer(["podman", "machine", "inspect"], rc=125, err="Error: wk: VM does not exist\n")
+        self.react(["ssh"], self._ssh)
+        self.reg = FakeRegistry(self.env, self)
 
-    def test_an_answer_that_is_no_json_is_named(self):
-        _, err = self.listed([FakeDriver("box", out="not json")], "--json")
-        self.assertIn("box: its 'wk ls --json' printed no JSON", err)
+    def _ssh(self, argv, f):
+        peer = next(a for a in argv if a.endswith(".example"))[:-len(".example")]
+        if peer == "down":
+            return Result(255, "", "ssh: connect to host down.example port 22: Operation timed out\n")
+        if "uname -s" in argv[-1]:
+            return Result(0, LINUX_PROBE)
+        return Result(0, f.LS[peer] if "wk ls --json" in argv[-1] else "")
 
 
-class TestInsideAWorkspace(unittest.TestCase):
+class TestOneTable(FlowTest):
+    def test_every_answering_places_rows_are_merged_into_one_table(self):
+        w = Fleet(self.tmp, peers=("box",))
+        rc, out, _ = self.wk(w, "ls", "--json")
+        self.assertEqual((rc, json.loads(out)), (0, {"workspaces": [W1]}))
+        rc, out, _ = self.wk(w, "ls")
+        self.assertEqual((rc, out.splitlines()[1].split()), (0, ["w1", "box", "present", "main", "native", "1G"]))
+
+    def test_a_place_that_did_not_answer_or_answered_no_json_is_named_and_the_rest_listed(self):
+        rc, out, err = self.wk(Fleet(self.tmp), "ls", "--json")
+        self.assertEqual((rc, json.loads(out)), (0, {"workspaces": [W1]}))
+        self.assertIn("warning: down: unreachable over ssh: connect to host down.example port 22: Operation timed out, so its "
+                      "workspaces are not listed", err.splitlines())
+        self.assertIn("warning: garbled: its 'wk ls --json' printed no JSON, so its workspaces are not listed", err.splitlines())
+
+
+class TestInsideAWorkspace(WorkspaceTest):
     """From inside a workspace BASE and CHANGES are not applicable: the host holds them."""
 
-    def listed(self, ws, *argv):
-        out = io.StringIO()
-        with mock.patch.dict(os.environ, ws.env()), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            ls.main(as_dispatched("ls", list(argv)), invocation())
-        return out.getvalue()
-
     def test_base_and_changes_are_not_applicable(self):
-        with fake_workspace() as ws:
-            table = self.listed(ws).splitlines()
-            doc = json.loads(self.listed(ws, "--json"))
-        self.assertEqual(table[1].split(), ["selftest-ws", "local", "running", "n/a", "native", "n/a"])
-        (row,) = doc["workspaces"]
-        self.assertEqual((row["base"], row["changes"]), ("n/a", "n/a"))
+        w = self.make_world(kinds={"fakebox": "local"})
+        rc, out, _ = self.wk(w, "ls")
+        self.assertEqual((rc, out.splitlines()[1].split()), (0, ["ws", "fakebox", "running", "n/a", "native", "n/a"]))
 
 
 if __name__ == "__main__":
