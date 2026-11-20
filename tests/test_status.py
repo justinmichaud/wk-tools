@@ -1,6 +1,6 @@
-"""`wk status` and the other reports: the walk (lib/wk/status.py), the renderer (lib/wk/statusview.py), the fleet
-fan-out (lib/wk/fleet.py), `--log`, the base a workspace tracks, and that a report changes nothing, driven in process
-over fakes."""
+"""`wk status` typed into worlds: a container workspace's row, the tasks its store records, its log and the readings its
+build left; a fleet of a build box and a peer seen as one view. What no world reaches -- `--wait`, the order a stream
+draws in, the colour of a terminal -- is at the bottom, with the reports run for real."""
 import contextlib
 import io
 import json
@@ -16,38 +16,464 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.fakes import Fake, FakeClock, FakeDriver, FakeRegistry
-from tests.support import BLIND_FLEET, REPO, WkTest, as_dispatched, clean_env, fake_workspace, invocation, load_cmd, requires_container_place, run
+from tests import test_places_flows as places_flows
+from tests.fakes import Fake, FakeClock, FakeDriver, FakeRegistry, FlowTest, Result
+from tests.support import BLIND_FLEET, REPO, as_dispatched, clean_env, invocation, load_cmd, requires_container_place, run
+from tests.test_wk_workspace import Flow
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import dispatch, fleet, git, places, record, status, statusview  # noqa: E402
+from wk import dispatch, fleet, places, status, statusview  # noqa: E402
 from wk.act import Refused  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from wk.record import Records  # noqa: E402
 
 CMD = load_cmd("status")
+NONE = "  (no workspaces on it)"
 
 
-def render(records):
-    buf = io.StringIO()
-    statusview.render_text_stream(iter(records), buf, False)
-    return buf.getvalue()
+def real(argv):
+    r = subprocess.run(argv, capture_output=True, text=True)
+    return Result(r.returncode, r.stdout, r.stderr)
 
 
-def machine_rec(name, **extra):
-    return dict({"kind": "machine", "name": name}, **extra)
+def line(out, start):
+    """The one line of `out` that starts with `start` once its indent is gone."""
+    found = [l.rstrip() for l in out.splitlines() if l.strip().startswith(start)]
+    if len(found) != 1:
+        raise AssertionError("%d lines start with %r:\n%s" % (len(found), start, out))
+    return found[0]
 
 
-def ws_rec(machine, name, state="running", ws="present", **extra):
-    return dict({"kind": "workspace", "machine": machine, "method": "container", "name": name, "state": state, "ws": ws}, **extra)
+class Host(places_flows.World):
+    """The machine holding container workspaces: a workspace's git probe answers `git`, or runs for real in the
+    repository `repo`; the gates script runs for real with the checkout at `src`; `mute` workspaces never answer
+    whether a pid lives."""
+
+    def __init__(self, tmp, kinds=None):
+        super().__init__(tmp, kinds)
+        self.git, self.repo, self.mute = "", None, set()
+        self.src = str(self.tmp / "src")
+
+    def _in_ws(self, argv, f):
+        script = argv[4] if len(argv) > 4 else ""
+        if argv[2:4] == ["sh", "-c"] and "wsbase=" in script:
+            return real(argv[2:-2] + [self.repo, argv[-1]]) if self.repo else Result(0, self.git)
+        if argv[2:4] == ["bash", "-c"] and "SRC=" in script:
+            return real(["bash", "-c", script.replace("/src/WebKit", self.src).replace("/opt/wk-tools", str(REPO))])
+        if argv[2:4] == ["kill", "-0"] and argv[1] in self.mute:
+            return Result(124)
+        return super()._in_ws(argv, f)
 
 
-class TestBump(unittest.TestCase):
-    def test_the_worst_wins_and_garbage_reads_4(self):
-        self.assertEqual(status.bump(status.bump(status.bump(0, "2"), 1), "0"), 2)
-        for c in ("", "abc", "7", "-1", "255"):
-            self.assertEqual(status.bump(0, c), 4, c)
+class HostFlow(Flow):
+    world_class = Host
 
+    def setUp(self):
+        super().setUp()
+        self.w.make("ws")
+
+    def status(self, *argv):
+        self.w.effects = []
+        return self.wk(self.w, "status", *argv)
+
+    def doc(self, *argv):
+        rc, out, _ = self.status("--json", *argv)
+        return rc, json.loads(out)
+
+    def tasks(self, *argv):
+        _, doc = self.doc(*argv)
+        return [t for m in doc["machines"] for t in m["tasks"]]
+
+    def begin(self, name="ws", kind="build", **kw):
+        return self.w.begin(kind, name, **kw)
+
+
+class TestAWorkspaceRow(HostFlow):
+    def test_its_row_is_its_state_branch_base_work_and_last_build_from_one_probe_inside_it(self):
+        self.w.files[os.path.join(self.w.ws_dir(), "changes", ".git", "HEAD")] = "ref: refs/heads/feature\n"
+        self.w.git = "dirty=2\nuntracked=1\nunpushed=3\nbehind=4\nahead=1\nwsbase=main\n"
+        self.begin(pid=None).end(1)
+        rc, out, _ = self.status()
+        self.assertEqual((rc, line(out, "ws ")), (1, "    ws         running  feature ↓4 ↑1  main  3 unpushed, 2 dirty, +1 new  build=failed"))
+        self.assertEqual([e[1][:2] if e[1][0] == "podman" else e[1][0] for e in self.w.effects if e[0] == "run"], [("podman", "ps"), ("podman", "inspect"), "env"])
+
+    def test_one_nothing_is_known_of_has_no_branch_an_unknown_base_and_is_clean(self):
+        rc, out, _ = self.status("ws")
+        self.assertEqual((rc, line(out, "ws ")), (0, "    ws         running  -       ?     clean"))
+
+    def test_a_machine_with_none_says_so_once(self):
+        self.w.containers.clear()
+        rc, out, _ = self.status()
+        self.assertEqual((rc, out.count(NONE), line(out, "here")), (0, 1, "here   this machine"))
+
+    def test_an_image_workspaces_base_is_its_presets_release_in_the_row_and_the_json(self):
+        for kind, preset in (("buildroot", "webkit-2.52-buildroot-rpi3-32"), ("yocto", "wpewebkit-2.46-yocto-rpi3-32")):
+            name = "%s-%s" % (kind, preset)
+            release = re.search(r"^CFG_RELEASE=(\S+)", (REPO / "image" / "presets" / (preset + ".conf")).read_text(), re.M).group(1)
+            self.w.make(name)
+            rc, out, _ = self.status(name)
+            self.assertEqual(line(out, name).split()[3], release)
+            _, doc = self.doc(name)
+            self.assertEqual(doc["machines"][0]["methods"][0]["workspaces"][0]["base"], release)
+        self.w.make("yocto-no-such-preset")
+        self.assertEqual(line(self.status("yocto-no-such-preset")[1], "yocto-no-such-preset").split()[3], "?")
+
+
+def git(repo, *args):
+    return subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True).stdout.strip()
+
+
+class TestTheBaseItTracks(HostFlow):
+    """The upstream WebKit line a checkout's HEAD descends from, by the probe run in real disposable repositories."""
+
+    def base(self):
+        repo = Path(tempfile.mkdtemp(dir=str(self.tmp))) / "r"
+        repo.mkdir()
+        git(repo, "init", "-q", "-b", "main")
+        git(repo, "config", "user.email", "a@example.invalid")
+        git(repo, "config", "user.name", "wk-tools test")
+        (repo / "f").write_text("one\n")
+        git(repo, "add", "f")
+        git(repo, "commit", "-qm", "init")
+        self.w.repo = str(repo)
+        return repo
+
+    def shown(self):
+        return line(self.status("ws")[1], "ws ").split()[3]
+
+    def test_the_line_a_tracked_branch_names(self):
+        for branch, remote, ref, want in (("main", "origin", "main", "main"), ("work", "wpe", "webkitglib/2.52", "2.52"),
+                                          ("eng/stringimpl-2.38", "fork", "eng/stringimpl-2.38", "?")):
+            repo = self.base()
+            git(repo, "checkout", "-qB", branch)
+            git(repo, "remote", "add", remote, "https://example.invalid/%s.git" % remote)
+            git(repo, "update-ref", "refs/remotes/%s/%s" % (remote, ref), "HEAD")
+            git(repo, "branch", "--set-upstream-to=%s/%s" % (remote, ref), branch)
+            self.assertEqual(self.shown(), want, ref)
+
+    def test_detached_with_nothing_reachable_is_unknown(self):
+        git(self.base(), "checkout", "-q", "--detach", "HEAD")
+        self.assertEqual(self.shown(), "?")
+
+    def test_detached_but_reachable_from_two_releases_is_the_newer(self):
+        repo = self.base()
+        first = git(repo, "rev-parse", "HEAD")
+        (repo / "f").write_text("two\n")
+        git(repo, "commit", "-qam", "second")
+        git(repo, "update-ref", "refs/remotes/origin/webkitglib/2.46", first)
+        (repo / "f").write_text("three\n")
+        git(repo, "commit", "-qam", "third")
+        git(repo, "update-ref", "refs/remotes/origin/webkitglib/2.52", "HEAD")
+        git(repo, "checkout", "-q", "--detach", first)
+        self.assertEqual(self.shown(), "2.52")
+
+
+class TestItsTasks(HostFlow):
+    def test_a_name_reports_its_own_tasks_and_one_that_ended_as_asked_is_not_reported(self):
+        self.w.make("other")
+        self.begin()
+        self.begin("other", "test")
+        self.assertEqual(sorted((t["task_kind"], t["name"]) for t in self.tasks()), [("build", "ws"), ("test", "other")])
+        self.assertEqual([t["name"] for t in self.tasks("ws")], ["ws"])
+        for word, reported in (("0", False), ("cancelled", False), ("refused", False), ("3", True), ("stalled", True)):
+            self.w.make("w3")
+            self.begin("w3", pid=None).end(word)
+            self.assertEqual(len(self.tasks("w3")), reported, word)
+
+    def test_a_pid_inside_a_workspace_is_asked_of_it_and_reported_on_the_machine_it_named(self):
+        self.begin(where="place", pid=None).pid(4242, "farbox")
+        for answer, state, rc in (("lives", "running", 2), ("gone", "died", 4), ("mute", "unanswered", 4)):
+            self.w.pids.discard(4242)
+            self.w.pids.update({4242} if answer == "lives" else ())
+            self.w.mute = {"ws"} if answer == "mute" else set()
+            got, out, _ = self.status("ws")
+            self.assertEqual((got, line(out, "build ws").split("since")[0]), (rc, "  build ws  %s  farbox  " % state))
+            self.assertIn(("kill", "-0", "4242"), [e[1][-3:] for e in self.w.effects if e[0] == "run"])
+
+    def test_a_task_shows_its_subject_steps_holds_kill_and_log(self):
+        self.w.pids.add(4242)
+        t = self.begin(kind="yocto", plan=["layers", "fetch", "image"], holds=["ws:ws", "build:here"])
+        t.step(2)
+        t.set("subject", "slot base")
+        rc, out, _ = self.status("ws")
+        block = out[out.index("  yocto ws"):].splitlines()
+        self.assertEqual((rc, block[1:8]), (2, ["      slot base", "      [x] layers", "      [>] fetch", "      [ ] image",
+                                                 "      holds: ws:ws build:here", "      kill: wk yocto ws --kill", "      log:  /nolog"]))
+
+    def test_each_verdict_is_its_exit_status(self):
+        log = os.path.join(self.w.ws_dir(), "build.log")
+        self.w.files[log] = "[9/4200] cc\nx.cpp:1:1: error: no\n"
+        for end, age, state, rc in ((None, 0, "running", 2), (None, 600, "silent", 2), (None, 4000, "silent", 4), ("1", 0, "failed", 1),
+                                    ("stalled", 0, "stalled", 3), ("oom", 0, "oom", 3), ("gave-up", 0, "gave-up", 1), ("died", 0, "died", 4)):
+            self.w.mtimes[log] = self.w.clock.now() - age
+            t = self.begin(pid=4242 if end != "died" else 4343, log=log, fields={"abort_after": "1800"})
+            self.w.pids.add(4242)
+            if end not in (None, "died"):
+                t.end(end)
+            got, out, _ = self.status("ws")
+            self.assertEqual((got, line(out, "build ws").split()[2]), (rc, state), (end, age))
+
+
+FAILED = "Building place foo\nfoo.cpp:10:5: error: use of undeclared identifier 'x'\nninja: build stopped: subcommand failed.\n"
+CLEAN = "-- no error: handling here, everything is fine\nx.cpp:3:1: warning: cast: error: prone\nninja: no work to do.\n"
+
+
+class TestItsLog(HostFlow):
+    """`wk status <ws> --log` on the machine holding the store: build.log, else the image stage log under home/."""
+
+    def log(self, files, *argv):
+        d = self.w.ws_dir()
+        for rel, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
+            Path(d, rel).write_text(text)
+        return self.status("ws", "--log", *argv)
+
+    def test_which_log_is_shown_and_its_first_error(self):
+        for files, showing, last, error in (({"home/yocto-image.log": "the yocto stage output\n"}, "==> showing %s/home/yocto-image.log", "the yocto stage output", "(none)"),
+                                            ({"home/buildroot-image.log": "the buildroot stage output\n"}, "==> showing %s/home/buildroot-image.log", "the buildroot stage output", "(none)"),
+                                            ({"build.log": FAILED}, None, "ninja: build stopped: subcommand failed.", "2:foo.cpp:10:5: error: use of undeclared identifier 'x'")):
+            shutil.rmtree(self.w.ws_dir(), True)
+            rc, _, err = self.log(files)
+            lines = err.splitlines()
+            tail = lines[lines.index("last output:") + 1:]
+            self.assertEqual((rc, lines[0] if showing else None, lines[lines.index("errors:") + 1].strip(), tail[:tail.index("")][-1].strip()),
+                             (0, showing and showing % self.w.ws_dir(), error, last))
+
+    def test_a_build_log_is_shown_over_a_stale_image_stage_log(self):
+        rc, _, err = self.log({"home/yocto-image.log": "stale image-stage output\n", "build.log": "ninja: building places\n"})
+        self.assertEqual((rc, err.splitlines()[:5]), (0, ["errors:", "  (none)", "", "last output:", "  ninja: building places"]))
+
+    def test_the_word_error_mid_sentence_or_in_a_warning_is_not_an_error(self):
+        rc, _, err = self.log({"build.log": CLEAN})
+        self.assertEqual((rc, err.splitlines()[:2]), (0, ["errors:", "  (none)"]))
+
+    def test_no_log_is_refused_naming_what_makes_one(self):
+        rc, _, err = self.status("ws", "--log")
+        self.assertEqual((rc, err.splitlines()[0]), (1, "error: no log for 'ws': nothing has made, built or staged it here ('wk new', 'wk build', 'wk sysimage build')"))
+
+
+GOOD_BROWSER = {"accelerator": "IOAccelerator", "dpr": 2, "focused": True, "raf_hz": 59.7, "renderer": "Apple M1 Pro", "screen": [1512, 982],
+                "webgl": "WebGL 2.0", "webkit_gpu_clients": {"913": "com.apple.WebKit.GPU"}}
+LIBRARIES = ("JavaScriptCore", "WebCore", "WebKit")
+GOOD_PROFILE = {"profile_dir": "/Users/wk/pgo", "arch": "arm64", "missing": [],
+                "combined": {lib: {"total_functions": 40000, "maximum_function_count": 900000} for lib in LIBRARIES},
+                "compressed": {lib: 1234567 for lib in LIBRARIES},
+                "benchmarks": {b: {lib: {"total_functions": 24000, "maximum_function_count": 4200} for lib in LIBRARIES}
+                               for b in ("speedometer3", "jetstream3", "motionmark")}}
+
+
+class TestTheReadingsTravelWithTheBuild(HostFlow):
+    """`wk status <ws> --log --gates`: the readings a build left beside its products, read by the script run in the workspace."""
+
+    def gates(self, browser=None, profile=None, pins=None):
+        products = Path(self.w.src, "WebKitBuild", "Release-mac-release-pgo")
+        products.mkdir(parents=True)
+        for name, text in (("wk-browser-check.json", browser and json.dumps(browser)), ("wk-profile-check.json", profile and json.dumps(profile)),
+                           ("wk-payload-pins", pins)):
+            if text:
+                (products / name).write_text(text)
+        rc, out, _ = self.status("ws", "--log", "--gates")
+        return rc, out.replace(self.w.src, "/src/WebKit")
+
+    def test_a_build_with_no_readings_says_which_builds_have_them(self):
+        rc, out = self.gates()
+        self.assertEqual((rc, out.splitlines()[0]), (0, "no readings under /src/WebKit/WebKitBuild -- only a profile-guided build"))
+
+    def test_the_readings_are_shown_from_beside_the_products(self):
+        rc, out = self.gates(GOOD_BROWSER, GOOD_PROFILE, "speedometer3 9f3c1a\nmotionmark 44ab02\n")
+        self.assertEqual(rc, 0, out)
+        for want in ("raf_hz=59.7", "JavaScriptCore: functions=40000", "  speedometer3 9f3c1a"):
+            self.assertIn(want, out)
+
+    def test_a_reading_that_did_not_justify_a_measurement_says_so_again(self):
+        rc, out = self.gates(dict(GOOD_BROWSER, raf_hz=8.0, webgl=None, webkit_gpu_clients={}))
+        self.assertEqual(rc, 0, out)
+        for want in ("this window is throttled", "no WebGL context"):
+            self.assertIn(want, out)
+
+
+def ws_rec(machine, name, state="running", ws="present"):
+    return {"kind": "workspace", "machine": machine, "method": "container", "name": name, "state": state, "ws": ws}
+
+
+class Fleet(places_flows.Fleet):
+    """A Linux workstation with no container of its own, a build box `box` and a peer `pal`; `says(name, rc, *records)`
+    is what that machine's own `wk status --records` prints and exits."""
+    WK = {"box": "/home/u/wk/tools/wk", "pal": "/opt/wk-tools/wk"}
+
+    def __init__(self, tmp, confs=None):
+        super().__init__(tmp, confs)
+        for name in self.WK:
+            self.says(name, 0)
+
+    def says(self, name, rc, *records, end="\n"):
+        self.far[self.WK[name] + " status --records"] = Result(rc, "".join((r if isinstance(r, str) else json.dumps(r)) + end for r in records))
+
+    def status_asked(self, name):
+        return [a for a in self.asked(name) if "wk status" in a]
+
+
+class FleetTest(FlowTest):
+    OS = "Linux"
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch("os.uname", return_value=os.uname_result((self.OS, "here", "25.0", "", "arm64")))
+        p.start()
+        self.addCleanup(p.stop)
+        self.w = Fleet(self.tmp)
+
+    def status(self, *argv):
+        self.w.effects = []
+        return self.wk(self.w, "status", *argv)
+
+    def block(self, out, machine):
+        """`machine`'s block of the text, its heading first."""
+        lines = out.splitlines()
+        start = lines.index(machine)
+        end = next((i for i in range(start + 1, len(lines)) if lines[i] and not lines[i].startswith(" ")), len(lines))
+        return [l for l in lines[start:end] if l]
+
+
+class TestTheFleetIsOneView(FleetTest):
+    def test_each_machine_is_asked_for_its_records_under_its_name_and_its_rows_are_its_block(self):
+        self.w.says("box", 2, {"kind": "machine", "name": "box"}, ws_rec("box", "bw"), end="\r\n")
+        rc, out, _ = self.status()
+        self.assertEqual((rc, self.block(out, "box")), (2, ["box", "  container", "    WORKSPACE  STATE    BRANCH  BASE  WORK   BUILD",
+                                                             "    bw         running  -       ?     clean"]))
+        self.assertEqual((self.w.status_asked("box"), self.w.status_asked("pal")),
+                         (["cd $HOME && WK_NO_DELEGATE=1 WK_ROW_LABEL=box /home/u/wk/tools/wk status --records"],
+                          ["cd $HOME && WK_NO_DELEGATE=1 WK_ROW_LABEL=pal /opt/wk-tools/wk status --records"]))
+        self.assertEqual((self.block(out, "pal"), self.block(out, "here   this machine")), (["pal", NONE], ["here   this machine", NONE]))
+
+    def test_the_exit_is_the_worst_state_found_anywhere_in_every_mode(self):
+        self.w.says("box", 1, ws_rec("box", "x", state="failed"))
+        self.w.says("pal", 3, ws_rec("pal", "y"))
+        for argv in ([], ["--json"], ["--records"]):
+            self.assertEqual(self.status(*argv)[0], 3, argv)
+        self.w.says("pal", 0, ws_rec("pal", "z"), ws_rec("pal", "z", state="absent", ws="absent"))
+        for argv in ([], ["--json"], ["--records"]):
+            self.assertEqual(self.status(*argv)[0], 4, argv)
+
+    def test_an_exit_outside_0_to_4_from_a_far_wk_reads_4(self):
+        self.w.says("box", 7)
+        self.assertEqual(self.status()[0], 4)
+
+    def test_a_disagreement_names_both_views_and_a_pipe_gets_no_colour(self):
+        self.w.says("box", 2, ws_rec("box", "ws"), ws_rec("box", "ws", state="absent", ws="absent"))
+        rc, out, _ = self.status()
+        self.assertEqual((rc, line(out, "ws ")), (4, "    ws         disagree (running vs absent)  -       ?     clean"))
+        self.assertNotIn("\033[", out)
+
+    def test_json_is_the_one_merged_document(self):
+        self.w.says("box", 2, ws_rec("box", "bw"), {"kind": "task", "machine": "box", "name": "bw", "state": "running"})
+        rc, out, _ = self.status("--json")
+        box = {"name": "box", "self": False, "raw": [], "methods": [{"name": "container", "workspaces": [ws_rec("box", "bw")]}],
+               "tasks": [{"kind": "task", "machine": "box", "name": "bw", "state": "running"}]}
+        doc = json.loads(out)
+        self.assertEqual((rc, doc["exit"], [m for m in doc["machines"] if m["name"] == "box"]), (2, 2, [box]))
+
+    def test_a_machine_record_after_its_rows_still_heads_its_block_and_an_unreadable_line_is_skipped_and_said(self):
+        self.w.says("box", 0, ws_rec("box", "bw"), {"kind": "machine", "name": "box"}, "{not json")
+        rc, out, err = self.status()
+        self.assertEqual((rc, self.block(out, "box")[0], line(out, "bw")), (0, "box", "    bw         running  -       ?     clean"))
+        self.assertEqual(err, "wk status: unreadable record: {not json\n")
+
+    def test_an_unreachable_machine_is_a_line_saying_why_after_one_ssh_and_is_4(self):
+        self.w.down["box"] = Result(255, "", "ssh: connect to host box.example port 22: Connection refused\n")
+        rc, out, _ = self.status()
+        self.assertEqual((rc, self.block(out, "box"), len(self.w.asked("box"))),
+                         (4, ["box", "  box: unreachable over ssh: connect to host box.example port 22: Connection refused"], 1))
+
+    def test_a_box_with_no_wk_of_its_own_is_read_from_here(self):
+        self.w.far.update({"test -f $HOME/.wk-remote": Result(1), "ls -1A /home/u/wk/ws": Result(0, "a\n"), "ws/a ]": Result(0, "present\n")})
+        rc, out, _ = self.status()
+        self.assertEqual((rc, self.block(out, "box")[1:], self.w.status_asked("box")), (0, ["  native", "    WORKSPACE  STATE    BRANCH  BASE  WORK   BUILD",
+                                                                                            "    a          present  -       ?     clean"], []))
+
+    def test_a_name_on_one_machine_is_asked_of_it_alone_and_one_on_two_is_refused_naming_both(self):
+        self.w.far["ws/demo ]"] = Result(0, "present\n")
+        self.w.says("box", 0, ws_rec("box", "demo"))
+        rc, out, _ = self.status("demo")
+        self.assertEqual((rc, line(out, "demo"), self.w.status_asked("box"), self.w.status_asked("pal")),
+                         (0, "    demo       running  -       ?     clean", ["cd $HOME && WK_NO_DELEGATE=1 WK_ROW_LABEL=box /home/u/wk/tools/wk status --records demo"], []))
+        self.w.far["/opt/wk-tools/wk ls --json"] = self.w.lists(("demo", "pal", "running"))
+        rc, _, err = self.status("demo")
+        self.assertEqual((rc, err.splitlines()[0]), (1, "error: workspace 'demo' exists on places: box pal -- this cannot be"))
+
+
+class TestSeenFromOneWorkstation(FleetTest):
+    """Two workstations reaching one box see one state: each asks it under its own name and reads the same block."""
+    HOST = "left"
+
+    def test_the_box_is_one_state_whoever_asks(self):
+        self.w.says("box", 2, ws_rec("box", "ws"))
+        rc, out, _ = self.status("--json")
+        self.assertEqual((rc, [m for m in json.loads(out)["machines"] if m["name"] == "box"], self.w.status_asked("box")),
+                         (2, [{"name": "box", "self": False, "raw": [], "tasks": [], "methods": [{"name": "container", "workspaces": [ws_rec("box", "ws")]}]}],
+                          ["cd $HOME && WK_NO_DELEGATE=1 WK_ROW_LABEL=box /home/u/wk/tools/wk status --records"]))
+
+
+class TestSeenFromAnother(TestSeenFromOneWorkstation):
+    HOST = "right"
+
+
+class TestOnAMac(FleetTest):
+    """The containers are in the podman machine `wk`, asked through `podman machine ssh` as this machine's own rows."""
+    OS = "Darwin"
+
+    def machine(self, state):
+        self.w.answer(["podman", "machine", "inspect", "wk"], out=json.dumps([{"Name": "wk", "State": state, "Resources": {"CPUs": 8, "Memory": 16384}}]))
+
+    def test_a_running_podman_machine_is_asked_for_its_records_as_this_machine(self):
+        self.machine("running")
+        self.w.answer(["podman", "machine", "ssh", "wk", "--"], out=json.dumps(ws_rec("here", "c")) + "\n")
+        rc, out, _ = self.status()
+        self.assertEqual((rc, self.block(out, "here   this machine")[1:]), (0, ["  container", "    WORKSPACE  STATE    BRANCH  BASE  WORK   BUILD",
+                                                                                "    c          running  -       ?     clean"]))
+        self.assertIn(("podman", "machine", "ssh", "wk", "--", "WK_IN_VM=1 WK_HOST_SELF=1 WK_NO_DELEGATE=1 WK_ROW_LABEL=here /opt/wk-tools/wk status --records"),
+                      [e[1] for e in self.w.effects if e[0] == "run"])
+
+    def test_a_stopped_or_missing_podman_machine_is_a_line_naming_the_remedy_and_no_failure(self):
+        for state, said in (("stopped", "the podman machine 'wk' is stopped -- 'wk start' brings it up"), (None, "no podman machine 'wk' yet -- ./setup makes it")):
+            if state:
+                self.machine(state)
+            else:
+                self.w.answer(["podman", "machine", "inspect", "wk"], rc=125)
+            rc, out, _ = self.status()
+            self.assertEqual((rc, self.block(out, "here   this machine")), (0, ["here   this machine", "  container: " + said]))
+
+
+class TestTheFanOut(FleetTest):
+    """The same fan-out lists every machine's bench tasks and stops every machine's tasks."""
+
+    def test_bench_ls_lists_each_answering_machines_rows_and_warns_of_each_other(self):
+        self.w = Fleet(self.tmp, dict(Fleet.CONFS, far="kind=build\nhost=far.example\n"))
+        self.w.far.update({"wk/tools/wk bench ls --continued": Result(0, "a\r\n\nb\n"), "/opt/wk-tools/wk bench ls --continued": Result(2)})
+        self.w.down["far"] = Result(255, "", "ssh: connect to host far.example port 22: Connection refused\n")
+        rc, out, err = self.wk(self.w, "bench", "ls")
+        self.assertEqual((rc, out, err.splitlines()[:2]), (0, "a\nb\n", [
+            "warning: far: unreachable over ssh: connect to host far.example port 22: Connection refused, so the tasks in its store are not listed",
+            "warning: 'pal' did not answer the listing, so the tasks in its store are not here."]))
+        self.assertEqual([a for a in self.w.asked("box") if "bench" in a], ["cd $HOME && WK_NO_DELEGATE=1 WK_ROW_LABEL=box /home/u/wk/tools/wk bench ls --continued"])
+
+    def test_stop_tasks_all_names_a_box_with_no_wk_of_its_own(self):
+        self.w.far.update({"test -f $HOME/.wk-remote": Result(1), "/opt/wk-tools/wk stop --tasks": Result(0, "no task\n")})
+        rc, out, err = self.wk(self.w, "stop", "--tasks", "--all", "--yes")
+        self.assertEqual((rc, out, err.splitlines()[-1]), (3, "pal                   no task\n", "box                    no wk-tools there yet -- 'wk machine setup box'"))
+
+
+class TestTheHelp(FlowTest):
+    def test_it_leads_with_this_machine_its_role_and_its_mode(self):
+        rc, out, _ = self.wk(places_flows.Fleet(self.tmp), "help")
+        self.assertEqual((rc, out.splitlines()[0]), (0, "here -- workstation, host mode"))
+
+    def test_every_report_says_it_changes_nothing(self):
+        for cmd in ("status", "ls", "doctor"):
+            rc, out, _ = self.wk(places_flows.Fleet(self.tmp), cmd, "-h")
+            self.assertEqual((rc, line(out, "changes things:")), (0, "  changes things: no -- starts nothing, writes nothing, repairs nothing"), cmd)
+
+
+# What no world reaches. `--wait` reads the real fleet: each look builds a places.Registry of its own (cmd/status), so
+# a flow's world answers none of it.
 
 class TestWait(unittest.TestCase):
     """`--wait` polls while the answer is busy (2), and another answer ends it only once the next poll repeats it;
@@ -74,8 +500,6 @@ class TestWait(unittest.TestCase):
         self.assertIn("still busy after 10s", said[-1])
 
     def test_the_exit_is_the_waits_verdict_not_the_walk_after_it(self):
-        cmd = CMD
-
         class FlakyWalk:
             worst = 4
 
@@ -87,248 +511,42 @@ class TestWait(unittest.TestCase):
 
             def records(self, markers=True):
                 return iter(())
-        with mock.patch.object(cmd, "Walk", FlakyWalk), mock.patch.object(cmd, "wait", return_value=0), \
+        with mock.patch.object(CMD, "Walk", FlakyWalk), mock.patch.object(CMD, "wait", return_value=0), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(0, cmd.main(as_dispatched("status", ["--wait", "--records"]), invocation()))
-            self.assertEqual(4, cmd.main(as_dispatched("status", ["--records"]), invocation()))
+            self.assertEqual(0, CMD.main(as_dispatched("status", ["--wait", "--records"]), invocation()))
+            self.assertEqual(4, CMD.main(as_dispatched("status", ["--records"]), invocation()))
+
+    def test_the_exit_is_the_worst_state_found_anywhere(self):
+        def answering(name, rc, *rows):
+            d = FakeDriver(name, rc=rc, out="".join(json.dumps(r) + "\n" for r in [{"kind": "machine", "name": name}, *rows]))
+            d.host = name + ".tailnet"
+            return d
+        for drivers, want in (([answering("alpha", 1, ws_rec("alpha", "x", state="failed")), answering("beta", 3, ws_rec("beta", "y"))], 3),
+                              ([answering("gamma", 0, ws_rec("gamma", "z"), ws_rec("gamma", "z", state="absent", ws="absent"))], 4)):
+            by = {d.name: d for d in drivers}
+            with mock.patch.dict(os.environ, clean_env({"WK_IN_VM": "1"}), clear=True), mock.patch.object(dispatch, "_registry", None), \
+                    mock.patch.object(places, "Registry", lambda *a, **kw: FakeRegistry(dict(os.environ), Fake(), lambda n, e: by[n], names=list(by))), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(Refused) as e:
+                dispatch.main(["status", "--wait"])
+            self.assertEqual(e.exception.status, want)
 
 
-class TaskTest(WkTest):
-    def setUp(self):
-        super().setUp()
-        self.store, self.answers, self.clock = str(self.tmp / "store"), {}, FakeClock()
+# The order a stream draws in is set by which place's thread answers first, which no command line fixes; a flush for
+# a job outside the plan is one Walk never makes.
 
-    def begin(self, where, name, *plan, kind="build", abort=None, log="/nolog"):
-        env = {"WK_STORE": self.store, **({"WK_ABORT_SECONDS": str(abort)} if abort else {})}
-        return Records(self.store, clock=self.clock, env=env).begin(kind, where, name, "wk %s %s --kill" % (kind, name), log, list(plan))
-
-    def reported(self, only=None):
-        return status.task_records(Records(self.store, clock=self.clock, ask_place=lambda n, pid, cap: self.answers.get(n),
-                                           env={"WK_STORE": self.store}), only, self.clock)
-
-
-class TestTasks(TaskTest):
-    def test_a_name_reports_its_tasks_and_one_that_ended_as_asked_is_not_reported(self):
-        self.begin("here", "ws1", "compile")
-        self.begin("here", "ws2", "jsc", kind="test")
-        self.assertEqual(sorted(r["name"] for r in self.reported()[0]), ["ws1", "ws2"])
-        self.assertEqual([r["name"] for r in self.reported("ws1")[0]], ["ws1"])
-        for word, reported in (("0", False), ("cancelled", False), ("refused", False), ("3", True), ("stalled", True)):
-            self.begin("here", "ws3", "compile").end(word)
-            self.assertEqual(bool(self.reported("ws3")[0]), reported, word)
-
-    def test_a_pid_in_a_workspace_is_asked_of_it_and_reported_on_its_machine(self):
-        self.begin("place", "ws4", "compile").pid(4242, "farbox")
-        for answer, state, code in ((True, "running", 2), (False, "died", 4), (None, "unanswered", 4)):
-            self.answers["ws4"] = answer
-            (rec,), worst = self.reported("ws4")
-            self.assertEqual((rec["state"], worst, rec["machine"]), (state, code, "farbox"))
-
-    def test_the_record_carries_its_subject_plan_steps_holds_and_kill(self):
-        t = self.begin("here", "ws5", "layers", "fetch", "image", kind="yocto")
-        t.step(2)
-        t.set("subject", "slot base")
-        t.set("holds", "ws:ws5\nbuild:here")
-        (rec,), _ = self.reported("ws5")
-        self.assertEqual((rec["task_kind"], rec["subject"], rec["kill"], rec["holds"]), ("yocto", "slot base", "wk yocto ws5 --kill", "ws:ws5 build:here"))
-        self.assertEqual((rec["plan"], rec["steps"], rec["state"]), (["layers", "fetch", "image"], ["done", "running", "pending"], "running"))
-
-    def test_each_verdict_is_its_exit_code(self):
-        log = self.tmp / "build.log"
-        for end, age, state, code in ((None, 0, "running", 2), (None, 600, "silent", 2), (None, 4000, "silent", 4), (1, 0, "failed", 1),
-                                      ("stalled", 0, "stalled", 3), ("oom", 0, "oom", 3), ("gave-up", 0, "gave-up", 1)):
-            with self.subTest(end=end, age=age):
-                log.write_text("[9/4200] cc\n")
-                os.utime(log, (self.clock.now() - age, self.clock.now() - age))
-                t = self.begin("here", "w", "compile", abort=1800, log=str(log))
-                if end is not None:
-                    t.end(end)
-                (rec,), worst = self.reported("w")
-                self.assertEqual((rec["state"], worst), (state, code))
-        self.begin("here", "gone", "compile").pid(4194304)
-        self.assertEqual(self.reported("gone")[1], 4)
-
-
-class TestTheWalk(unittest.TestCase):
-    """A place whose own wk answers is asked for its records; one that cannot be asked is a line saying why."""
-
-    def walk(self, *drivers, name=None):
-        by_name = {d.name: d for d in drivers}
-        reg = FakeRegistry({}, Fake(), lambda n, env: by_name[n], names=list(by_name), ws_place=lambda ws: drivers[0].name)
-        w = status.Walk(REPO, name=name, env={"WK_ROW_LABEL": "here"}, reg=reg)
-        return [r for r in w.records(markers=False) if r["kind"] != "exit"], w.worst
-
-    def test_an_answering_place_is_asked_for_its_records_under_its_label(self):
-        far = [machine_rec("box"), ws_rec("box", "ws", state="absent", ws="absent")]
-        box = FakeDriver("box", rc=2, out="".join(json.dumps(r) + "\n" for r in far + [{"kind": "plan", "jobs": []}]))
-        box.host = "box.example"
-        recs, worst = self.walk(box, name="ws")
-        self.assertEqual([r["kind"] for r in recs], ["machine", "machine", "workspace"])
-        self.assertEqual(worst, 2)
-        args, env, _ = box.asked[0]
-        self.assertEqual((args, env["WK_ROW_LABEL"], env["WK_NO_DELEGATE"]), (("status", "--records", "ws"), "box", "1"))
-
-    def test_a_place_that_cannot_be_asked_is_a_line_and_unreachable_is_4(self):
-        for side, worst in (("unreachable", 4), ("stopped", 0)):
-            d = FakeDriver("container", kind="container", side=side, why="timed out")
-            recs, w = self.walk(d)
-            self.assertEqual(([r["text"] for r in recs if r["kind"] == "raw"], w),
-                             (["container: " + fleet.reason(d, side, "timed out")], worst))
-
-
-class TestRenderer(unittest.TestCase):
-    def test_a_partial_row_a_raw_line_and_an_empty_machine(self):
-        out = render([machine_rec("m"), ws_rec("m", "bare"), machine_rec("box"), {"kind": "raw", "machine": "box", "text": "box: unreachable"},
-                      machine_rec("empty")])
-        self.assertRegex(out, r"(?m)^\s+bare\s+running\s+-\s+\?\s+clean")
-        self.assertIn("box: unreachable", out)
-        self.assertEqual(out.count("(no workspaces on it)"), 1)
-
-    def test_a_task_is_its_state_steps_and_lines(self):
-        t = {"kind": "task", "machine": "m", "task_kind": "build", "name": "ws", "state": "running", "since": "now",
-             "plan": ["sync", "compile"], "steps": ["done", "running"], "holds": "ws:ws", "kill": "wk build ws --kill", "log": "/l"}
-        out = render([machine_rec("m"), t])
-        for want in ("[x] sync", "[>] compile", "holds: ws:ws", "kill: wk build ws --kill", "log:  /l"):
-            self.assertIn(want, out)
-
-    def test_a_machine_is_drawn_when_its_last_job_flushes_and_an_unreadable_line_is_skipped(self):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            recs = list(statusview.records_from_lines(['{"kind":"machine","name":"m"}', "{not json"]))
-        self.assertIn("unreadable record", err.getvalue())
-        out = io.StringIO()
-        stream = [{"kind": "plan", "jobs": [{"job": "a", "machine": "m"}, {"job": "b", "machine": "m"}]}] + recs + [{"kind": "flush", "job": "a"}]
-        statusview.render_text_stream(iter(stream), out, False)
-        self.assertEqual(out.getvalue().count("\nm\n"), 1)
-
-
-class TestHelpLeadsWithTheSelfLine(unittest.TestCase):
-    def test_help_leads_with_role_and_mode(self):
-        out = io.StringIO()
-        with mock.patch.object(dispatch.os, "isatty", return_value=False), contextlib.redirect_stdout(out), \
-                self.assertRaises(dispatch.Exit):
-            dispatch.help_doc("")
-        self.assertEqual(out.getvalue().splitlines()[0], fleet.self_line(str(REPO), os.environ))
-
-
-FAILED = "Building place foo\nfoo.cpp:10:5: error: use of undeclared identifier 'x'\nninja: build stopped: subcommand failed.\n"
-CLEAN = "Building place foo\n-- no error: handling here, everything is fine\nninja: no work to do.\n"
-
-
-def status_cmd(env, *argv):
-    """`wk status <argv>` in process under `env`: (exit, everything it printed)."""
-    out = io.StringIO()
-    with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-        try:
-            rc = CMD.main(as_dispatched("status", list(argv)), invocation())
-        except Refused as e:
-            rc = e.status
-    return rc, out.getvalue()
-
-
-class TestLogsPicksTheRightFile(WkTest):
-    """`wk status <ws> --log`, as the machine that holds the store: build.log, else the image stage log its builder
-    wrote under home/, and the errors it names."""
-
-    def _run(self, name, files):
-        """`files` is {path under the workspace's directory: text}; the output, and whether it exited 0."""
-        wsdir = self.tmp / "ws" / name
-        wsdir.mkdir(parents=True)
-        for rel, text in files.items():
-            (wsdir / rel).parent.mkdir(parents=True, exist_ok=True)
-            (wsdir / rel).write_text(text)
-        env = {"WK_NAME": name, "WK_PLACE": "container", "WK_IN_VM": "1", "WK_STORE": str(self.tmp)}
-        rc, out = status_cmd(env, "--log")
-        return out, rc == 0
-
-    def test_which_log_is_shown_and_what_it_says(self):
-        for name, files, ok, shown, hidden in (
-                ("yoctows", {"home/yocto-image.log": "the yocto stage output\n"}, True,
-                 ("the yocto stage output", "home/yocto-image.log"), ()),
-                ("buildrootws", {"home/buildroot-image.log": "the buildroot stage output\n"}, True,
-                 ("the buildroot stage output", "home/buildroot-image.log"), ()),
-                ("bothws", {"home/yocto-image.log": "stale image-stage output\n", "build.log": "ninja: building places\n"}, True,
-                 ("ninja: building places",), ("stale image-stage output",)),
-                ("emptyws", {}, False, ("wk build", "wk sysimage build"), ()),
-                ("badws", {"build.log": FAILED}, True, ("ninja: build stopped",), ("(none)",))):
-            with self.subTest(name):
-                out, rc_ok = self._run(name, files)
-                self.assertEqual(rc_ok, ok, out)
-                for text in shown:
-                    self.assertIn(text, out)
-                for text in hidden:
-                    self.assertNotIn(text, out)
-
-    def test_a_message_containing_the_word_error_mid_sentence_is_not_reported(self):
-        out, ok = self._run("goodws", {"build.log": CLEAN})
-        self.assertTrue(ok, out)
-        self.assertIn("(none)", out, out)
-        self.assertNotIn("no error: handling here", out.split("errors:", 1)[1].split("last output:", 1)[0], out)
-
-
-GOOD_BROWSER = {
-    "accelerator": "IOAccelerator", "dpr": 2, "focused": True, "raf_hz": 59.7,
-    "renderer": "Apple M1 Pro", "screen": [1512, 982], "webgl": "WebGL 2.0",
-    "webkit_gpu_clients": {"913": "com.apple.WebKit.GPU"},
-}
-LIBRARIES = ("JavaScriptCore", "WebCore", "WebKit")
-BENCHMARKS = ("speedometer3", "jetstream3", "motionmark")
-GOOD_PROFILE = {
-    "profile_dir": "/Users/wk/pgo", "arch": "arm64", "missing": [],
-    "combined": {lib: {"total_functions": 40000, "maximum_function_count": 900000}
-                 for lib in LIBRARIES},
-    "compressed": {lib: 1234567 for lib in LIBRARIES},
-    "benchmarks": {b: {lib: {"total_functions": 24000, "maximum_function_count": 4200}
-                       for lib in LIBRARIES} for b in BENCHMARKS},
-}
-
-
-class TestTheReadingsTravelWithTheBuild(WkTest):
-    """What `wk status <ws> --log --gates` says about the readings a build left beside its products."""
-
-    def _gates(self, browser=None, profile=None, pins=None):
-        with fake_workspace() as ws:
-            products = ws.ws_dir / "WebKit" / "WebKitBuild" / "Release-mac-release-pgo"
-            products.mkdir(parents=True)
-            if browser is not None:
-                (products / "wk-browser-check.json").write_text(json.dumps(browser))
-            if profile is not None:
-                (products / "wk-profile-check.json").write_text(json.dumps(profile))
-            if pins is not None:
-                (products / "wk-payload-pins").write_text(pins)
-            return status_cmd(ws.env({"WK_NAME": "selftest-ws", "WK_PLACE": "local"}), "--log", "--gates")
-
-    def test_a_build_with_no_readings_says_which_configs_have_them(self):
-        rc, out = self._gates()
-        self.assertEqual(rc, 0, out)
-        self.assertIn("no readings under", out, out)
-
-    def test_the_readings_are_shown_from_beside_the_products(self):
-        rc, out = self._gates(browser=GOOD_BROWSER, profile=GOOD_PROFILE,
-                              pins="speedometer3 9f3c1a\nmotionmark 44ab02\n")
-        self.assertEqual(rc, 0, out)
-        self.assertIn("raf_hz=59.7", out, out)
-        self.assertIn("JavaScriptCore: functions=40000", out, out)
-        self.assertIn("speedometer3 9f3c1a", out, out)
-
-    def test_a_reading_that_did_not_justify_a_measurement_says_so_again(self):
-        bad = dict(GOOD_BROWSER, raf_hz=8.0, webgl=None, webkit_gpu_clients={})
-        rc, out = self._gates(browser=bad)
-        self.assertEqual(rc, 0, out)
-        self.assertIn("this window is throttled", out, out)
-        self.assertIn("no WebGL context", out, out)
+def render(records):
+    """Records drawn as text: tests/test_task_record.py and tests/test_build_subject.py read their rows with it."""
+    buf = io.StringIO()
+    statusview.render_text_stream(iter(records), buf, False)
+    return buf.getvalue()
 
 
 def _plan(*jobs):
-    """<(job, machine)...>: a job with no machine completes nobody's block."""
-    return dict(kind="plan", jobs=[{"job": j, "machine": m} if m else {"job": j} for j, m in jobs])
+    return dict(kind="plan", jobs=[{"job": j, "machine": m} for j, m in jobs])
 
 
 def _machine_lines(name):
-    """One job's records: its machine, one workspace, and the flush that ends it."""
-    return [dict(kind="machine", name=name, self=(name == "alpha")),
-            dict(kind="workspace", machine=name, method="container", name="ws-" + name, state="present", ws="present"),
-            dict(kind="flush", job=name)]
+    return [dict(kind="machine", name=name, self=(name == "alpha")), ws_rec(name, "ws-" + name), dict(kind="flush", job=name)]
 
 
 class _Tap:
@@ -343,22 +561,18 @@ class _Tap:
             yield r
 
     def write(self, text):
-        for line in text.rstrip("\n").split("\n"):
-            self.lines.append((self.consumed, line))
+        for l in text.rstrip("\n").split("\n"):
+            self.lines.append((self.consumed, l))
 
     def flush(self):
         pass
 
     def when(self, predicate):
-        for consumed, line in self.lines:
-            if predicate(line):
-                return consumed
-        raise AssertionError("no line matched:\n" + "\n".join(l for _, l in self.lines))
+        return next(consumed for consumed, l in self.lines if predicate(l))
 
 
 def _render(records):
-    tap = _Tap(records)
-    err = io.StringIO()
+    tap, err = _Tap(records), io.StringIO()
     with contextlib.redirect_stderr(err):
         statusview.render_text_stream(tap.feed(), tap, False)
     return tap, err.getvalue()
@@ -366,71 +580,58 @@ def _render(records):
 
 class TestTextStreamsAsRecordsArrive(unittest.TestCase):
     def test_first_machine_prints_before_second_machines_records_are_consumed(self):
-        records = [_plan(("alpha", "alpha"), ("beta", "beta"))] + _machine_lines("alpha") + _machine_lines("beta") + [dict(kind="exit", code=0)]
-        tap, err = _render(records)
-        alpha_at = tap.when(lambda l: l.startswith("alpha"))
-        self.assertLessEqual(alpha_at, 4, "alpha's block waited for beta's records -- not streaming")
+        tap, err = _render([_plan(("alpha", "alpha"), ("beta", "beta"))] + _machine_lines("alpha") + _machine_lines("beta") + [dict(kind="exit", code=0)])
+        self.assertLessEqual(tap.when(lambda l: l.startswith("alpha")), 4, "alpha's block waited for beta's records -- not streaming")
         self.assertGreater(tap.when(lambda l: l.startswith("beta")), 4)
         self.assertEqual(err, "")
 
     def test_a_planned_machine_shows_as_probing_before_it_answers(self):
-        records = [_plan(("slowbox", "slowbox"))] + _machine_lines("slowbox") + [dict(kind="exit", code=0)]
-        tap, _ = _render(records)
+        tap, _ = _render([_plan(("slowbox", "slowbox"))] + _machine_lines("slowbox") + [dict(kind="exit", code=0)])
         self.assertEqual(tap.when(lambda l: "probing slowbox" in l), 1)
         self.assertGreater(tap.when(lambda l: l.strip() == "slowbox"), 1)
 
-    def test_a_delegated_machines_heading_comes_before_its_rows_even_when_its_rows_lead_or_its_job_never_flushes(self):
-        for records in ([_plan(("far", "far")), dict(kind="workspace", machine="far", method="native", name="ws-far", state="present", ws="present"),
-                         dict(kind="machine", name="far"), dict(kind="flush", job="far"), dict(kind="exit", code=0)],
-                        [_plan(("far", "far")), dict(kind="machine", name="far"),
-                         dict(kind="workspace", machine="far", method="native", name="ws-far", state="present", ws="present"),
-                         dict(kind="exit", code=0)]):
-            tap, _ = _render(records)
-            out = [l for _, l in tap.lines]
-            heading = next(i for i, l in enumerate(out) if l.strip() == "far")
-            self.assertLess(heading, next(i for i, l in enumerate(out) if "ws-far" in l), "\n".join(out))
-
-
-class TestABlockWaitsForEveryPlannedJob(unittest.TestCase):
-    """A macOS host feeds one machine from two jobs, the podman VM's container place and the tart vm place."""
-
-    def test_the_first_job_flushing_empty_does_not_draw_the_machine(self):
-        tap, err = _render([
-            _plan(("container", "host"), ("vm", "host")), dict(kind="machine", name="host", self=True), dict(kind="flush", job="container"),
-            dict(kind="machine", name="host", self=True),
-            dict(kind="workspace", machine="host", method="macOS guest", name="ws-v", state="stopped", ws="present"),
-            dict(kind="flush", job="vm"), dict(kind="exit", code=0)])
+    def test_a_block_waits_for_every_job_planned_for_its_machine(self):
+        tap, err = _render([_plan(("container", "host"), ("vm", "host")), dict(kind="machine", name="host", self=True), dict(kind="flush", job="container"),
+                            dict(kind="machine", name="host", self=True), dict(ws_rec("host", "ws-v", state="stopped"), method="macOS guest"),
+                            dict(kind="flush", job="vm"), dict(kind="exit", code=0)])
         out = "\n".join(l for _, l in tap.lines)
-        self.assertEqual(err, "")
-        self.assertEqual(len([l for l in out.splitlines() if l.startswith("host ")]), 1, out)
-        self.assertIn("ws-v", out)
-        self.assertNotIn("no workspaces", out)
+        self.assertEqual((err, len([l for l in out.splitlines() if l.startswith("host ")]), "no workspaces" in out), ("", 1, False))
         self.assertLess(out.index("probing vm"), out.index("host "))
+        self.assertIn("ws-v", out)
 
     def test_a_flush_for_a_job_outside_the_plan_is_reported_and_draws_nothing(self):
-        tap, err = _render([
-            _plan(("container", "host")), dict(kind="machine", name="host", self=True), dict(kind="flush", job="vm"),
-            dict(kind="workspace", machine="host", method="container", name="ws-c", state="present", ws="present"),
-            dict(kind="flush", job="container"), dict(kind="exit", code=0)])
+        tap, err = _render([_plan(("container", "host")), dict(kind="machine", name="host", self=True), dict(kind="flush", job="vm"),
+                            ws_rec("host", "ws-c"), dict(kind="flush", job="container"), dict(kind="exit", code=0)])
         out = "\n".join(l for _, l in tap.lines)
         self.assertIn("'vm' ended without being in the plan", err)
-        self.assertIn("ws-c", out)
-        self.assertNotIn("no workspaces", out)
+        self.assertEqual(("ws-c" in out, "no workspaces" in out), (True, False))
 
 
-class TestJsonModeUnchangedByStreamMarkers(unittest.TestCase):
-    def test_json_output_equals_the_merge_of_the_same_stream_without_markers(self):
-        records = ([_plan(("alpha", "alpha"), ("beta", "beta"))] + _machine_lines("alpha") + _machine_lines("beta")
-                   + [dict(kind="exit", code=2)])
-        with_markers = statusview.merge(records)
-        without = statusview.merge([r for r in records if r["kind"] not in ("plan", "flush")])
-        self.assertEqual(with_markers, without)
-        self.assertEqual(with_markers["exit"], 2)
-        self.assertEqual([m["name"] for m in with_markers["machines"]], ["alpha", "beta"])
-        self.assertEqual(json.loads(json.dumps(with_markers)), with_markers)
+class TestColourOnATerminal(unittest.TestCase):
+    """A flow's stdout is always a pipe."""
+
+    def test_only_a_terminal_without_no_color_gets_colour(self):
+        for tty, env, want in ((True, {}, True), (True, {"NO_COLOR": "1"}, False), (False, {}, False), (False, {"NO_COLOR": "1"}, False)):
+            self.assertEqual(statusview.colour_wanted(types.SimpleNamespace(isatty=lambda: tty), env), want, (tty, env))
+
+    def test_the_renderer_honours_it(self):
+        for colour in (True, False):
+            out = io.StringIO()
+            statusview.render_text_stream(iter([{"kind": "machine", "name": "b"}, ws_rec("b", "demo"), {"kind": "exit", "code": 0}]), out, colour)
+            self.assertEqual("\033[" in out.getvalue(), colour)
 
 
-class TestEveryWorkspaceIsInTheListing(WkTest):
+class TestAnUnknownMachine(unittest.TestCase):
+    """Every name a command fans out to comes from a conf the registry loads."""
+
+    def test_is_an_answer_naming_it(self):
+        a, = fleet.each(FakeRegistry({}, Fake(), lambda n, e: None, names=[]), ["status"], names=["ghost"])
+        self.assertEqual((a.side, a.driver, "ghost" in a.why), ("unknown", None, True))
+
+
+# The reports run for real.
+
+class TestEveryWorkspaceIsInTheListing(unittest.TestCase):
     @requires_container_place()
     def test_bare_status_lists_every_workspace_ls_lists(self):
         ls = run("ls", "--json", timeout=120)
@@ -442,223 +643,8 @@ class TestEveryWorkspaceIsInTheListing(WkTest):
             self.assertRegex(st.stdout, r"(?m)^\s+%s\s" % n, f"'{n}' missing from a bare 'wk status':\n{st.stdout}")
 
 
-ESC = "\033["
-
-
-def _render_coloured(colour):
-    records = [
-        {"kind": "machine", "name": "buildbox4"},
-        {"kind": "workspace", "machine": "buildbox4", "method": "container", "name": "demo",
-         "state": "running", "branch": "main", "base": "main"},
-        {"kind": "exit", "code": 0},
-    ]
-    out = io.StringIO()
-    statusview.render_text_stream(iter(records), out, colour)
-    return out.getvalue()
-
-
-class TestColourDecision(unittest.TestCase):
-    def test_only_a_terminal_without_no_color_gets_colour(self):
-        for tty, env, want in ((True, {}, True), (True, {"NO_COLOR": "1"}, False), (False, {}, False),
-                               (False, {"NO_COLOR": "1"}, False)):
-            with self.subTest(tty=tty, env=env):
-                self.assertEqual(statusview.colour_wanted(types.SimpleNamespace(isatty=lambda: tty), env), want)
-
-    def test_the_renderer_honours_the_flag(self):
-        self.assertIn(ESC, _render_coloured(True))
-        self.assertNotIn(ESC, _render_coloured(False))
-
-
-def fleet_registry(drivers):
-    by_name = {d.name: d for d in drivers}
-    return FakeRegistry({}, Fake(), lambda name, env: by_name[name], names=list(by_name))
-
-
-def answering(name, rc, *rows):
-    d = FakeDriver(name, rc=rc, out="".join(json.dumps(r) + "\n" for r in [machine_rec(name), *rows, {"kind": "exit", "code": rc}]))
-    d.host = name + ".tailnet"
-    return d
-
-
-def wk_status(drivers, *argv, host="here"):
-    """`wk status <argv>` through the dispatcher into a pipe, typed on workstation `host` of a fleet of `drivers`: (exit, output)."""
-    by, out = {d.name: d for d in drivers}, io.StringIO()
-    with mock.patch.dict(os.environ, clean_env({"WK_IN_VM": "1"}), clear=True), \
-            mock.patch.object(dispatch, "_registry", None), mock.patch.object(record, "host_name", return_value=host), \
-            mock.patch.object(places, "Registry", lambda *a, **kw: FakeRegistry(dict(os.environ), Fake(), lambda n, e: by[n], names=list(by))), \
-            contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-        try:
-            dispatch.main(["status", *argv])
-        except Refused as e:
-            return e.status, out.getvalue()
-
-
-class TestTheFleetViewIsOne(unittest.TestCase):
-    """`unit status.fleet_is_one`, less the clause a decision is owed for."""
-
-    def test_the_exit_is_the_worst_state_found_anywhere_in_every_mode(self):
-        fleet = [answering("alpha", 1, ws_rec("alpha", "x", state="failed")), answering("beta", 3, ws_rec("beta", "y"))]
-        torn = fleet + [answering("gamma", 0, ws_rec("gamma", "z"), ws_rec("gamma", "z", state="absent", ws="absent"))]
-        for argv in ([], ["--json"], ["--records"], ["--wait"]):
-            self.assertEqual((wk_status(fleet, *argv)[0], wk_status(torn, *argv)[0]), (3, 4), argv)
-
-    def test_two_workstations_reaching_one_box_see_one_state_and_a_disagreement_names_both_views(self):
-        box = answering("box", 2, ws_rec("box", "ws"))
-        left, right = (json.loads(wk_status([box], "--json", host=h)[1]) for h in ("left", "right"))
-        self.assertEqual((left, {(a, e["WK_ROW_LABEL"]) for a, e, _ in box.asked}), (right, {(("status", "--records"), "box")}))
-        rc, out = wk_status([answering("box", 2, ws_rec("box", "ws"), ws_rec("box", "ws", state="absent", ws="absent"))])
-        self.assertEqual((rc, re.findall(r"disagree \(\w+ vs \w+\)", out)), (4, ["disagree (running vs absent)"]))
-        self.assertNotIn(ESC, out, "a pipe is no terminal, so the text has no colour")
-
-
-class TestEach(unittest.TestCase):
-    def test_each_place_is_asked_for_its_own_rows_under_its_label(self):
-        box, vm = FakeDriver("box", out="row\r\n"), FakeDriver("container", kind="container")
-        answers = fleet.each(fleet_registry([box, vm]), ["ls", "--json"])
-        self.assertEqual([(a.name, a.rc, a.out, a.why) for a in answers], [("box", 0, "row\n", ""), ("container", 0, "", "")])
-        args, env, quiet = box.asked[0]
-        self.assertEqual((args, env["WK_ROW_LABEL"], env["WK_NO_DELEGATE"], quiet), (("ls", "--json"), "box", "1", True))
-        self.assertNotIn("WK_ROW_LABEL", vm.asked[0][1], "the podman machine labels its rows as this machine's itself")
-
-    def test_a_place_not_asked_says_why_and_one_with_no_far_side_is_the_callers(self):
-        drivers = [FakeDriver("here", side="none"), FakeDriver("far", side="unreachable", why="timed out"),
-                   FakeDriver("ctr", kind="container", side="stopped"), FakeDriver("bare", side="no-wk")]
-        answers = fleet.each(fleet_registry(drivers), ["status"])
-        self.assertEqual([(a.side, a.rc) for a in answers], [("none", None), ("unreachable", None), ("stopped", None), ("no-wk", None)])
-        self.assertEqual([a.why for a in answers], ["", "unreachable over ssh: timed out",
-                                                    "the podman machine 'wk' is stopped -- 'wk start' brings it up",
-                                                    "no wk-tools there yet -- 'wk machine setup bare'"])
-        self.assertEqual([d.asked for d in drivers], [[], [], [], []])
-
-    def test_an_unknown_place_is_an_answer_naming_it(self):
-        reg = fleet_registry([])
-        a, = fleet.each(reg, ["status"], names=["ghost"])
-        self.assertEqual((a.side, a.driver), ("unknown", None))
-        self.assertIn("ghost", a.why)
-
-
-class TestListing(unittest.TestCase):
-    def test_rows_of_every_answering_place_and_a_warning_for_each_other(self):
-        warned = []
-        drivers = [FakeDriver("box", out="a\n\nb\n"), FakeDriver("old", rc=2), FakeDriver("far", side="unreachable"),
-                   FakeDriver("here", side="none")]
-        self.assertEqual(fleet.listing(fleet_registry(drivers), ["bench", "ls", "--continued"], "tasks", warned.append), ["a", "b"])
-        self.assertEqual(len(warned), 2)
-        self.assertIn("'old' did not answer the listing", warned[0])
-        self.assertIn("far: unreachable over ssh, so the tasks", warned[1])
-
-
-class TestResolution(unittest.TestCase):
-    def registry(self, names, holding, ws):
-        fake = Fake()
-        fake.answer(["podman", "inspect"], rc=125)
-
-        def make(name, env):
-            return places.Container(name, str(REPO), dict(env, WK_STORE="/store/" + name, WK_IN_VM="1"), fake)
-        reg = FakeRegistry({}, fake, make, names=names)
-        for name in holding:
-            fake.dirs.add(reg.load(name).store.ws_dir(ws))
-        return reg
-
-    def test_a_name_on_two_places_refuses_naming_both(self):
-        with self.assertRaises(LookupError) as e:
-            self.registry(["alpha", "beta", "gamma"], {"alpha", "beta"}, "demo").ws_place("demo")
-        self.assertIn("alpha beta", str(e.exception))
-        self.assertNotIn("gamma", str(e.exception))
-
-    def test_a_name_on_one_place_resolves(self):
-        self.assertEqual(self.registry(["alpha", "beta"], {"beta"}, "demo").ws_place("demo"), "beta")
-
-
-CONFIGS = REPO / "image" / "presets"
-
-
-def _git(repo, *args):
-    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
-
-
-def _init_repo(repo):
-    repo.mkdir(parents=True)
-    _git(repo, "init", "-q", "-b", "main")
-    _git(repo, "config", "user.email", "a@example.invalid")
-    _git(repo, "config", "user.name", "wk-tools test")
-    (repo / "f").write_text("one\n")
-    _git(repo, "add", "f")
-    _git(repo, "commit", "-qm", "init")
-
-
-def upstream_line(repo):
-    """The probe `wk ls` and `wk status` run inside a workspace, run in `repo`."""
-    return git.probe(Local().run, str(repo))["wsbase"]
-
-
-class TestUpstreamLine(unittest.TestCase):
-    """The base a workspace tracks: the upstream WebKit line a checkout's HEAD descends from (git.PROBE's `wsbase`),
-    against real disposable repositories."""
-
-    def setUp(self):
-        self.repo = self.new_repo()
-
-    def new_repo(self):
-        tmp = tempfile.TemporaryDirectory(prefix="wk-base-")
-        self.addCleanup(tmp.cleanup)
-        repo = Path(tmp.name) / "r"
-        _init_repo(repo)
-        return repo
-
-    def test_the_line_a_tracked_branch_names(self):
-        for branch, remote, ref, want in (("main", "origin", "main", "main"), ("work", "wpe", "webkitglib/2.52", "2.52"),
-                                          ("eng/stringimpl-2.38", "fork", "eng/stringimpl-2.38", "?")):
-            with self.subTest(ref=ref):
-                repo = self.new_repo()
-                _git(repo, "checkout", "-qB", branch)
-                _git(repo, "remote", "add", remote, "https://example.invalid/%s.git" % remote)
-                _git(repo, "update-ref", "refs/remotes/%s/%s" % (remote, ref), "HEAD")
-                _git(repo, "branch", "--set-upstream-to=%s/%s" % (remote, ref), branch)
-                self.assertEqual(upstream_line(repo), want)
-
-    def test_detached_with_nothing_reachable_is_unknown(self):
-        _git(self.repo, "checkout", "-q", "--detach", "HEAD")
-        self.assertEqual(upstream_line(self.repo), "?")
-
-    def test_detached_but_reachable_from_two_releases_picks_the_newer(self):
-        repo = self.repo
-        base = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-        (repo / "f").write_text("two\n")
-        _git(repo, "commit", "-qam", "second")
-        _git(repo, "update-ref", "refs/remotes/origin/webkitglib/2.46", base)
-        (repo / "f").write_text("three\n")
-        _git(repo, "commit", "-qam", "third")
-        _git(repo, "update-ref", "refs/remotes/origin/webkitglib/2.52", "HEAD")
-        _git(repo, "checkout", "-q", "--detach", base)
-        self.assertEqual(upstream_line(repo), "2.52")
-
-
-class TestImageBase(unittest.TestCase):
-    """An image workspace's base is its preset's own CFG_RELEASE, read from the real conf this checkout ships."""
-
-    def test_an_image_workspace_reads_its_presets_release(self):
-        for kind, preset in (("buildroot", "webkit-2.52-buildroot-rpi3-32"), ("yocto", "wpewebkit-2.46-yocto-rpi3-32")):
-            with self.subTest(kind=kind):
-                release = re.search(r"^CFG_RELEASE=(\S+)", (CONFIGS / (preset + ".conf")).read_text(), re.M).group(1)
-                self.assertEqual(places.image_base(str(REPO), "%s-%s" % (kind, preset)), release)
-
-    def test_a_plain_checkout_name_is_not_an_image_workspace(self):
-        self.assertIsNone(places.image_base(str(REPO), "stringimpl238"))
-        self.assertIsNone(places.image_base(str(REPO), "yocto-no-such-preset"))
-
-
-class TestJsonCarriesTheBase(unittest.TestCase):
-    """One merged document feeds every view: a field present in text is present in json."""
-
-    def test_workspace_base_survives_into_json(self):
-        recs = [machine_rec("moose"), dict(kind="workspace", machine="moose", method="container", name="stringimpl238", state="running",
-                                           ws="present", branch="eng/stringimpl-2.38", base="?")]
-        self.assertIn("stringimpl238", render(recs))
-        self.assertEqual(statusview.merge(recs)["machines"][0]["methods"][0]["workspaces"][0]["base"], "?")
-
-
 REPORTS = (("status",), ("ls",), ("status", "nosuch", "--log"), ("doctor",))
+READS = {"status", "ls", "doctor"}   # what a report may ask a far wk
 PLACES = {"store": {"WK_IN_VM": "1"}, "workstation": {}}
 TOOLS = ("ssh", "scp", "rsync", "podman", "tart", "tailscale", "sudo", "systemctl", "launchctl", "gh", "nmap")
 # A tool followed by one of these words acts; the power verbs and the copies act whatever follows.
@@ -669,11 +655,6 @@ ACTS = {"podman": {"start", "run", "create", "rm", "rmi", "stop", "kill", "resta
         "launchctl": {"load", "unload", "bootstrap", "bootout", "kickstart", "start", "stop", "enable", "disable"}}
 ALWAYS = {"reboot", "shutdown", "poweroff", "scp", "rsync"}
 HELPERS = {"wk-boot-priv", "wk-card-priv", "wk-quiesce-priv"}   # the privileged helpers: `status` is their one read
-
-
-def readonly_verbs():
-    from wk import decl
-    return {name for name, m in decl.commands(REPO) if any(t.readonly for _, t, _ in decl.variants(name, m.COMMAND))}
 
 
 def acts_in(tokens, readonly):
@@ -735,29 +716,24 @@ class TestReportsAreReadOnly(unittest.TestCase):
             with open(p, "w") as f:
                 f.write('#!/bin/sh\n{ printf "%%s\\0" %s "$@"; printf "\\n"; } >> %s\nexit 97\n' % (tool, shlex.quote(self.log)))
             os.chmod(p, 0o755)
-        fleet = os.path.join(self.tmp, "fleet")
-        os.makedirs(fleet)
+        machines = os.path.join(self.tmp, "fleet")
+        os.makedirs(machines)
         for conf in os.listdir(BLIND_FLEET):
-            os.symlink(os.path.join(BLIND_FLEET, conf), os.path.join(fleet, conf))
-        with open(os.path.join(fleet, "farbox.conf"), "w") as f:
+            os.symlink(os.path.join(BLIND_FLEET, conf), os.path.join(machines, conf))
+        with open(os.path.join(machines, "farbox.conf"), "w") as f:
             f.write("kind=build\ndriver=remote\nhost=farbox\n")
         self.watched = {k: os.path.join(self.tmp, k) for k in ("home", "state", "store", "secrets")}
         for d in self.watched.values():
             os.makedirs(d)
-        self.env = {"PATH": shims + os.pathsep + os.environ["PATH"], "WK_MACHINES_DIR": fleet, "HOME": self.watched["home"],
-                    "XDG_STATE_HOME": self.watched["state"], "WK_STORE": self.watched["store"],
-                    "WK_HOST_SECRETS": self.watched["secrets"]}
-        self.readonly = readonly_verbs()
+        self.env = {"PATH": shims + os.pathsep + os.environ["PATH"], "WK_MACHINES_DIR": machines, "HOME": self.watched["home"],
+                    "XDG_STATE_HOME": self.watched["state"], "WK_STORE": self.watched["store"], "WK_HOST_SECRETS": self.watched["secrets"]}
 
     def calls(self):
         try:
             with open(self.log) as f:
-                return [line.rstrip("\0").split("\0") for line in f.read().split("\0\n") if line]
+                return [l.rstrip("\0").split("\0") for l in f.read().split("\0\n") if l]
         except OSError:
             return []
-
-    def test_every_report_is_declared_readonly(self):
-        self.assertLessEqual({r[0] for r in REPORTS}, self.readonly)
 
     def test_a_report_starts_boots_and_repairs_nothing_here_or_on_the_far_machine(self):
         for place, extra in PLACES.items():
@@ -767,7 +743,7 @@ class TestReportsAreReadOnly(unittest.TestCase):
                     before = {k: tree(d) for k, d in self.watched.items()}
                     run(*argv, env=dict(self.env, **extra), timeout=60)
                     after = {k: tree(d) for k, d in self.watched.items()}
-                    self.assertEqual([a for a in map(lambda c: acts(c, self.readonly), self.calls()) if a], [])
+                    self.assertEqual([a for a in map(lambda c: acts(c, READS), self.calls()) if a], [])
                     self.assertEqual(before, after, "wk %s wrote under the scratch %s" % (argv[0], place))
 
 
