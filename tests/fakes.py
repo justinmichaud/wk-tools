@@ -414,9 +414,8 @@ class FlowTest(unittest.TestCase):
 
     def wk(self, w, *argv):
         """`wk <argv>` typed in world `w`, through the dispatcher: (exit status, stdout, stderr); `w.effects` is what it asked for."""
-        os.environ.update(w.env)
-        out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(dispatch, "_registry", w.reg), mock.patch.object(dispatch.clock, "Clock", lambda: w.clock), \
+        out, err = io.StringIO(), io.StringIO()   # the environment is restored after: the dispatcher exports into it
+        with mock.patch.dict(os.environ, w.env), mock.patch.object(dispatch, "_registry", w.reg), mock.patch.object(dispatch.clock, "Clock", lambda: w.clock), \
                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
                 self.assertRaises((act.Refused, SystemExit)) as cm:   # SystemExit: a dry run's end of an exec
             dispatch.main(list(argv))
