@@ -6,13 +6,13 @@ last step lands.
 
 ## Where we are
 
-Measured 2026-11-19 on the host (`./wk selftest`).
+Measured 2026-11-20 on the host (`./wk selftest`).
 
 | | |
 | --- | --- |
 | code and tests | `python3 -m tests.test_lint_budgets` prints each row's size beside its interim and its budget |
-| `wk selftest` (lint then unit) | 3,255 tests, 5 minutes, green; 48 owed |
-| the last live runs from the host | 2026-11-19 on the podman machine re-created from the pinned image and a guest of the current base: `DevIntegrationContainer` and `DevIntegrationTart` each pass creation, git, pi, the jsc-debug build, the push to the fork, git-webkit, sync and the editor; the four steps that need a Claude session fail on a claude.ai login its issuer refuses to refresh (`wk key set claude-login --replace`), and removal waits for them |
+| `wk selftest` (lint then unit) | 3,235 tests, 5 minutes, green; 50 owed |
+| the last live runs from the host | 2026-11-20: `DevIntegrationContainer` (14 of 14, 10 min) and `DevIntegrationTart` (14 of 14, 15 min) pass whole -- creation, git, a Claude session behind the wall, pi, the jsc-debug build, the push to the fork and its refusals, git-webkit, sync, the editor and removal. `wk new` for a container takes 1 min 22 s (3 min 24 s before the first start's apt installs became the image layer's) |
 
 Why bugs come back:
 
@@ -1232,6 +1232,14 @@ exist.
      Mac bench, then the rest -- one module at a time, its old tests deleted in the same change; `lint.test_shape`
      (owed until the first module lands) refuses a test that imports a lib module or patches one. The tests
      interim budget is lowered per row as each module lands.
+     *Landing since 2026-11-20:* `FlowTest.wk(world, *argv)` (tests/fakes.py) types a command line into a world through the
+     dispatcher and returns its exit status and streams; `tests.test_wk_workspace.Flow.typed` and `said` are the shared
+     helpers; `lint.test_shape_held` holds each landed module (`SHAPED`, tests/test_lint.py). Landed: `enter`, `ls`, `scp`'s
+     routes, `run`, `gui`, rr, `test`, `zed`, `new` and `rm`, and a third of the place drivers (tests/test_places_flows.py).
+     Each conversion was proven by breaking the production line a test names. What the conversions found, fixed in the same
+     run: commands that built a Registry, a Session or a clock of their own and so left the world (`run`, `gui`, `pr`, `stop`,
+     `status`, `test`, `ai`, `zed`, `new`, `rm`), and dry runs that refused or reported a failure over an effect that did not
+     run (`wk zed`, `wk sync <ws>`).
 8. Delete this file.
 
 ## Owed
@@ -1372,6 +1380,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The macOS `_remote_probe_cmd`/`_remote_probe_parse` branches hold against a live macOS or BSD remote, not only captured samples | 5 | `live remote.probe_macos_bsd` |
 | `wk ls` stays read-only on a peer whose own wk does not answer: its rows are read from here, `Peer.src` asks for an editor route (`wk zed <ws> --route`), and that generates this machine's zed key and fails the listing with "could not open a route" (seen 2026-11-20 in a world whose peer answered no `has_wk`) | 3 | `unit ls.readonly_on_a_mute_peer` |
 | One command line asks a place a question once: `wk enter`, `wk run` and `wk test` on a container ask `podman inspect … {{.State.Status}}` three times (the dispatcher's existence check, its readiness wait, the command's own `reg.present`), `wk scp` asks `{{.Config.WorkingDir}}` before every probe, and a guest copy asks `tart list` two or three times (read 2026-11-20 from the recorded effects of the flow tests) | 2 | `unit dispatch.asks_once` |
+| What the flow conversions read and left unfixed: `Store.workspaces()` and `presets.default_preset` read this host's disk, not the registry's machine; a `podman ps` that does not answer lists no container and warns of nothing, and a `podman inspect` that fails reads as absent; a build box that is this machine blames ssh for a failed probe; the unknown-place refusal lists this machine's own conf; `wk rm` inside a workspace asks before it refuses, and a registry refusal there is followed by "no such workspace"; `wk start` on a build box exits 0 and `wk stop` exits 1 for the same "nothing to bring up or down" | 3 | `unit places.flow_findings` |
 
 ### Decisions for the user
 
