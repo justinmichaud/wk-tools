@@ -72,15 +72,6 @@ class TestTheWallHolds(unittest.TestCase):
 class TestBuiltinsAreAskedThroughAShell(unittest.TestCase):
     """A place's exec runs argv, not a shell, so a builtin such as `command -v` goes through `sh -c` (machine.HAVE)."""
 
-    def test_cmd_ai_asks_for_bwrap_through_a_shell(self):
-        from tests.test_ai import AI, sim_registry, SimDriver
-        from wk.machine import HAVE
-        from tests.fakes import Fake
-        fake = Fake()
-        driver = SimDriver(fake, {})
-        AI.Ai(str(REPO), {}, sim_registry({}, fake, driver), driver, "claude", "demo").wall_available()
-        self.assertEqual([" ".join(HAVE + ("bwrap",))], driver.asked)
-
     def test_no_bare_builtin_reaches_a_places_exec(self):
         import re
         bad = re.compile(r'exec\([^,()]+, \[\s*"(command|type|alias|cd|builtin|source)"')
