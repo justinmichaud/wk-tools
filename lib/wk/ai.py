@@ -7,7 +7,6 @@ import uuid
 
 from wk import agents, images, job, pushgate, secrets, store, wall
 from wk.act import barrier, die, info, warn
-from wk.clock import Clock
 from wk.machine import HAVE, Local
 from wk.places import Registry
 from wk.workspace import require_name
@@ -24,13 +23,13 @@ def _ending(signum, frame):
     raise job.Interrupted(signum)
 
 
-def end_session(driver, ws, env, session, clock=None):
+def end_session(driver, ws, env, session, clock):
     """This session's agents (by WK_SESSION), TERM then KILL after job.kill's grace; another session's are not its to end."""
     def send(signum):
         pids = pushgate.agent_pids(driver, ws, session)
         if pids:
             driver.exec(ws, ["kill", "-" + job.signal_name(signum)] + pids)
-    return job.terminate(send, lambda: not pushgate.agent_pids(driver, ws, session), clock or Clock(), job.kill_wait(env), 5)
+    return job.terminate(send, lambda: not pushgate.agent_pids(driver, ws, session), clock, job.kill_wait(env), 5)
 
 
 def foreground(machine, argv, cwd, end):
@@ -58,9 +57,9 @@ def on_a_terminal():
 
 
 class Ai:
-    def __init__(self, root, env, reg, driver, agent, name):
+    def __init__(self, root, env, reg, driver, agent, name, clock):
         self.root, self.env, self.reg, self.machine = root, env, reg, reg.machine
-        self.driver, self.agent, self.name = driver, agent, name
+        self.driver, self.agent, self.name, self.clock = driver, agent, name, clock
 
     def exec(self, argv):
         return self.driver.exec(self.name, argv)
@@ -112,7 +111,7 @@ class Ai:
         argv, cwd = t.exec_argv(name, ["env", "WK_AGENT=" + self.agent, "WK_WORKSPACE=" + name, "WK_SESSION=" + session,
                                        "bash", "-lc", line],
                                 on_a_terminal())
-        return foreground(self.machine, argv, cwd, lambda: end_session(t, name, self.env, session))
+        return foreground(self.machine, argv, cwd, lambda: end_session(t, name, self.env, session, self.clock))
 
     def run(self, args):
         t, name = self.driver, self.name
@@ -134,7 +133,7 @@ class Ai:
         return self.session(agent_bin, mode, args)
 
 
-def main(agent, tail, env, reg):
+def main(agent, tail, env, reg, clock):
     env = os.environ if env is None else env
     name = store.ws_name(env)
     require_name(name)
@@ -142,4 +141,4 @@ def main(agent, tail, env, reg):
         driver = reg.load(reg.ws_place(name))
     except LookupError as e:
         die(str(e))
-    return Ai(ROOT, env, reg, driver, agent, name).run(tail)
+    return Ai(ROOT, env, reg, driver, agent, name, clock).run(tail)

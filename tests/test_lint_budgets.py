@@ -47,8 +47,8 @@ INTERIM = {"dispatcher": (773, 931),
            "machine": (489, 1784),
            "places": (1762, 3905),
            "record": (1241, 2682),
-           "workspace": (2980, 5195),
-           "secrets": (2553, 4682),
+           "workspace": (2980, 5184),
+           "secrets": (2552, 4493),
            "status": (1704, 2705),
            "bench": (6313, 6785),
            "boot": (1260, 2243),
@@ -57,7 +57,7 @@ INTERIM = {"dispatcher": (773, 931),
            "cmd": (873, 0),
            "lint rules": (0, 2072),
            "live bodies": (0, 151),
-           "fixtures": (0, 1801)}
+           "fixtures": (0, 1800)}
 
 
 def tracked():

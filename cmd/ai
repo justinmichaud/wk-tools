@@ -27,4 +27,4 @@ COMMAND = Command(name="required", ready=True, tail="all", session=True, group="
 
 
 def main(args, inv):
-    return ai.main(args.positionals[0], args.tail, inv.reg.env, inv.reg)
+    return ai.main(args.positionals[0], args.tail, inv.reg.env, inv.reg, inv.clock)
