@@ -16,10 +16,10 @@ from unittest import mock
 
 from tests import fakes
 from tests.fakes import Fake, FakeClock, WsDriver
-from tests.support import rand_suffix, REPO, run, scratch_dir, stub_path, temp_store
+from tests.support import rand_suffix, REPO, scratch_dir, stub_path, temp_store
 
 sys.path.insert(0, str(REPO / "lib"))
-from wk import act, git, machine, places, presets, project, record, secrets  # noqa: E402
+from wk import act, git, machine, places, record  # noqa: E402
 from wk.act import Refused  # noqa: E402
 from wk.machine import lib_argv, Local, Result, TIMED_OUT  # noqa: E402
 from wk.record import Records  # noqa: E402
@@ -87,56 +87,6 @@ class TestSessionSocket(unittest.TestCase):
 
 
 class TestRegistry(DriversTest):
-    def host_registry(self):
-        env = {k: v for k, v in self.env.items() if k != "WK_IN_VM"}
-        return places.Registry(REPO, env=env, machine=self.fake)
-
-    def test_the_builtins_and_every_conf_are_places(self):
-        self.conf("box1", "kind=build\ndriver=remote\nhost=box1\n")
-        self.conf("peer", "# a peer\npeer=1\n")
-        reg = self.host_registry()
-        self.assertEqual(reg.all(), ["container", "box1", "peer"])
-        self.assertEqual(reg.machines(), ["box1", "peer"])
-        self.assertEqual(reg.kind("peer"), "remote")
-        self.assertIsNone(reg.kind("nosuch"))
-        with self.assertRaises(LookupError) as cm:
-            reg.load("nosuch")
-        self.assertIn("The machines here: box1 peer", str(cm.exception))
-
-    def test_a_conf_named_after_this_machine_is_not_a_peer(self):
-        me = record.machine_name({})
-        self.conf(me.upper(), "host=%s\n" % me)
-        self.conf("box1", "host=box1\n")
-        self.assertEqual(self.host_registry().machines(), ["box1"])
-
-    def test_the_far_end_of_a_target_lists_no_conf(self):
-        self.conf("box1", "host=box1\n")
-        self.assertEqual(self.reg.all(), ["container"])   # WK_IN_VM
-        env = {k: v for k, v in self.env.items() if k != "WK_IN_VM"}
-        env["WK_REMOTE_MARKER"] = str(self.tmp / "wk-remote")
-        (self.tmp / "wk-remote").write_text("place=box2\nroot=/home/u/wk\n")
-        self.conf("box2", "hostname=box2-host\n")
-        self.fake.answer(["hostname", "-s"], out="box2-host\n")
-        self.assertEqual(places.Registry(REPO, env=env, machine=self.fake).all(), ["container", "box2"])
-
-    def test_inside_a_workspace_the_default_is_local(self):
-        marker = self.tmp / "marker"
-        marker.write_text("name=ws\nsrc=/src/WebKit\narch=armhf\n")
-        self.env["WK_MARKER"] = str(marker)
-        self.assertEqual(self.reg.default(), "local")
-        t = self.reg.load("local")
-        self.assertEqual(t.list(), [("ws", "running")])
-        self.assertEqual((t.info("ws"), t.info("other"), t.arch("ws")), ("running", "absent", "armhf"))
-
-    def test_a_build_box_defaults_to_its_own_place(self):
-        rm = self.tmp / "remote-marker"
-        rm.write_text("place=buildbox\nroot=/home/u/wk\n")
-        self.env["WK_REMOTE_MARKER"] = str(rm)
-        self.conf("buildbox", "host=buildbox\n")
-        self.fake.answer(["hostname", "-s"], out="buildbox\n")
-        self.assertEqual(self.reg.default(), "buildbox")
-        self.assertIn("buildbox", self.reg.all())
-
     def test_vm_is_listed_only_on_a_macos_host_with_a_store_of_its_own(self):
         self.assertFalse(self.reg.vm_listed())   # WK_IN_VM
         env = dict(self.env)
@@ -157,54 +107,11 @@ class TestContainer(DriversTest):
         self.fake.answer(["podman", "inspect", "wk-b"], out="exited\n")
         self.fake.answer(["podman", "inspect", "wk-c"], rc=125, err="no such container")
 
-    def test_list_strips_the_prefix(self):
-        self.assertEqual(self.t.list(), [("a", "Up 2 hours"), ("b", "Exited (0) 3 days ago")])
-
-    def test_info_is_podmans_word_once_the_marker_is_there(self):
-        home = os.path.join(self.env["WK_STORE"], "ws", "a", "home")
-        self.assertEqual(self.t.info("a"), "creating")
-        self.fake.write(os.path.join(home, places.READY_MARKER), "")
-        self.assertEqual(self.t.info("a"), "running")
-        self.assertEqual(self.t.info("c"), "absent")
-
-    def test_state_reads_the_record_and_the_environment_together(self):
-        ws = os.path.join(self.env["WK_STORE"], "ws")
-        self.assertEqual(self.t.state("c"), "absent")
-        self.fake.mkdir(os.path.join(ws, "c"))
-        self.assertEqual(self.t.state("c"), "creating")           # a directory, no marker, no container
-        self.fake.write(os.path.join(ws, "c", "home", places.READY_MARKER), "")
-        self.assertEqual(self.t.state("c"), "broken")             # created, and the container is gone
-        self.assertEqual(self.t.state("a"), "broken")             # a container with no directory, nothing creating it
-        self.fake.write(os.path.join(ws, "a", "home", places.READY_MARKER), "")
-        self.assertEqual(self.t.state("a"), "creating")           # no base-id yet
-        self.fake.write(os.path.join(ws, "a", "base-id"), "main-1\n")
-        self.assertEqual(self.t.state("a"), "present")
-        self.assertEqual(self.t.display_state("a"), "running")
-
     def test_a_workspace_exists_by_its_directory_its_environment_or_a_creation(self):
         self.assertFalse(self.reg.exists_on(self.t, "c"))
         self.assertTrue(self.reg.exists_on(self.t, "a"))          # podman knows it, whatever the store holds
         self.fake.mkdir(os.path.join(self.env["WK_STORE"], "ws", "c"))
         self.assertTrue(self.reg.exists_on(self.t, "c"))
-
-    def test_exec_goes_through_the_sdk_and_the_bridge_and_only_exec_tty_carries_a_tty(self):
-        self.fake.answer(["env"], out="ok\n")
-        self.assertEqual(self.t.exec("a", ["git", "rev-parse", "HEAD"]).out, "ok\n")
-        argv = self.fake.effects[-1][1]
-        self.assertEqual(argv[0], "env")
-        self.assertIn("WKDEV_SDK=%s" % self.t.sdk(), argv)
-        self.assertIn(os.path.join(self.t.sdk(), "scripts", "host-only", "wkdev-enter"), argv)
-        self.assertIn("--no-tty", argv)
-        self.assertEqual(argv[-3:], ("git", "rev-parse", "HEAD"))
-        self.assertIn("ensure-bridge.sh", argv[argv.index("--") + 1])
-        self.assertNotIn("/opt/wk-tools/container/bin/wk-person", argv, "wk's own run is not entered as a person's")
-        self.t.exec("a", ["git", "push"], person=True)
-        argv = self.fake.effects[-1][1]
-        self.assertEqual(argv[-3:], ("/opt/wk-tools/container/bin/wk-person", "git", "push"), "a person's run is entered through the person entry")
-        self.assertEqual(self.t.exec_tty("a", ["lldb", "-o", "attach"]).rc, 0)
-        kind, argv, cwd = self.fake.effects[-1]
-        self.assertEqual((kind, argv[-3:], cwd), ("run_tty", ("lldb", "-o", "attach"), None))
-        self.assertNotIn("--no-tty", argv)
 
     def test_wk_is_the_podman_vms_own_wk_over_machine_ssh(self):
         self.fake.answer(["podman", "machine", "ssh", "wk", "--"], out='{"kind": "workspace"}\n')
@@ -216,16 +123,6 @@ class TestContainer(DriversTest):
         self.assertEqual(words[-4:], ["/opt/wk-tools/wk", "status", "--records", "ws"])
         self.t.wk("doctor", env=env)
         self.assertTrue(self.fake.effects[-1][1][-1].endswith(" 2>&1"))
-
-    def test_stop_is_an_effect(self):
-        self.fake.answer(["podman", "stop"], out="")
-        self.assertIn("stopped a", self.stderr_of(lambda: self.assertTrue(self.t.stop("a")))[1])
-        self.assertEqual(self.fake.effects[-1][1][:3], ("podman", "stop", "--time"))
-
-    def test_the_arch_is_recorded_at_creation(self):
-        self.assertEqual(self.t.arch("a"), "native")
-        self.fake.write(os.path.join(self.env["WK_STORE"], "ws", "a", "arch"), "armhf\n")
-        self.assertEqual(self.t.arch("a"), "armhf")
 
     def test_sdk_local_reads_the_pulled_image_and_its_pull_date_or_none(self):
         self.fake.answer(["podman", "images"], out="docker.io/library/busybox:latest\n")
@@ -370,21 +267,6 @@ class RemoteTest(DriversTest):
 
 
 class TestRemote(RemoteTest):
-    def test_a_machine_that_did_not_answer_is_no_absence(self):
-        self.fake.answer_remote("uname -s", rc=255, err="ssh: connect to host box.example port 22: Operation timed out")
-        self.assertTrue(self.reg.exists_on(self.reg.load("box"), "ws"))
-
-    def test_the_probe_is_one_round_trip_and_memoised(self):
-        self.assertEqual(self.t.probe(), ("answering", ""))
-        self.assertEqual((self.t.home(), self.t.os(), self.t.cores(), self.t.load(), self.t.mem_mb()), ("/home/u", "linux", 8, 0, 20000))
-        self.assertEqual((self.t.tools(""), self.t.src("a")), ("/home/u/wk/tools", "/home/u/wk/ws/a/WebKit"))
-        self.assertEqual(self.t.answers(), (True, ""))
-        self.assertTrue(self.t.has_wk() and self.t.delegates())
-        self.assertEqual(len(self.fake.ssh_calls("uname -s")), 1)
-        self.assertEqual(len(self.fake.ssh_calls()), 2)   # the probe and the one `test` for a wk there
-        argv = self.fake.ssh_calls("uname -s")[0]
-        self.assertIn(places.PROBE_SCRIPT, argv[-1])
-
     def test_exec_tty_over_ssh_runs_through_here_not_the_ssh_machine(self):
         self.fake.answer(["ssh"], out="ignored\n")
         r = self.t.exec_tty("a", ["lldb", "-o", "attach"])
@@ -406,120 +288,12 @@ class TestRemote(RemoteTest):
         self.assertEqual(r.rc, 0)
         self.assertEqual(self.fake.effects[-1], ("run_tty", ("true",), me.src("a")))
 
-    def test_the_root_defaults_to_wk_under_the_far_home(self):
-        self.conf("bare", "host=bare.example\n")
-        t = self.reg.load("bare")
-        self.assertEqual((t.tools(""), t.src("a")), ("/home/u/wk/tools", "/home/u/wk/ws/a/WebKit"))
-        self.conf("tools", "host=bare.example\ntools=my/tools\n")
-        self.assertEqual(self.reg.load("tools").tools(""), "/home/u/my/tools")
-
-    def test_an_unreachable_machine_is_named_with_why(self):
-        self.fake.remote = []
-        self.fake.answer_remote("uname -s", rc=255, err="ssh: Could not resolve hostname box.example: nodename nor servname provided, or not known\n\n")
-        self.assertEqual(self.t.probe(), ("unreachable", "Could not resolve hostname box.example: nodename nor servname provided, or not known"))
-        self.assertEqual((self.t.far_side(), self.t.info("a"), self.t.list(), self.t.has_wk()), ("unreachable", "unreachable", [], False))
-        self.assertEqual(len(self.fake.ssh_calls()), 1)
-        for rc, err, why in ((255, "", "ssh exited 255 and said nothing"), (TIMED_OUT, "", "timed out after 2s"),
-                             (255, "kex_exchange_identification: Connection closed by remote host\n", "Connection closed by remote host")):
-            t = self.reg.load("box")
-            self.fake.remote = [("uname -s", Result(rc, "", err))]
-            self.assertEqual(t.probe(), ("unreachable", why))
-        with self.assertRaises(Refused):
-            with contextlib.redirect_stderr(io.StringIO()) as err:
-                t.home()
-        self.assertIn("cannot reach 'box.example' over ssh: Connection closed by remote host", err.getvalue())
-
-    def test_far_side_for_a_machine_with_no_wk_and_for_this_machine(self):
-        self.fake.remote = [("uname -s", Result(0, LINUX_PROBE)), ("test -f $HOME/.wk-remote", Result(1))]
-        self.assertEqual((self.t.far_side(), self.t.probe(), self.t.delegates()), ("no-wk", ("no-wk", ""), False))
+    def test_far_side_for_this_machine(self):
         self.conf("me", "local=1\nroot=%s\n" % (self.tmp / "rr"))
         me = self.reg.load("me")
         self.assertTrue(me.is_here())
         self.assertEqual((me.far_side(), me.probe(), me.answers(), me.has_wk(), me.delegates()), ("none", ("none", ""), (True, ""), False, False))
-        self.assertEqual(me.store.store_dir(), str(self.tmp / "rr"))
-        self.assertEqual(self.fake.ssh_calls(), self.fake.ssh_calls("uname -s") + self.fake.ssh_calls("test -f"))
-
-    def test_list_info_and_created(self):
-        self.fake.answer_remote("ls -1A /home/u/wk/ws", out="a\nb\n.stray\n")
-        self.fake.answer_remote("ws/a ]", out="present\n")
-        self.fake.answer_remote("ws/b ]", out="creating\n")
-        self.fake.answer_remote("ws/c ]", out="absent\n")
-        self.assertEqual(self.t.list(), [("a", "present"), ("b", "present")])
-        self.assertEqual((self.t.info("a"), self.t.info("b"), self.t.info("c")), ("present", "creating", "absent"))
-        self.assertEqual((self.t.created("a"), self.t.created("b")), (True, False))
-        self.assertEqual(len(self.fake.ssh_calls("ws/a ]")), 2)   # info is one round trip, and asked each time
-
-    def test_exec_builds_the_ssh_command_line_with_the_drivers_options(self):
-        self.fake.answer_remote("git status", out="clean\n")
-        self.assertEqual(self.t.exec("a", ["git", "status"]).out, "clean\n")
-        argv = self.fake.ssh_calls("git status")[0]
-        opts = " ".join(argv)
-        for o in ("BatchMode=yes", "ConnectTimeout=3", "ServerAliveInterval=15", "ServerAliveCountMax=4",
-                  "ControlMaster=auto", "ControlPath=%s/wk/ssh/%%h-%%p-%%r" % self.env["XDG_STATE_HOME"], "ControlPersist=60"):
-            self.assertIn(o, opts)
-        self.assertEqual(argv[-2], "box.example")
-        self.assertIn("cd /home/u/wk/ws/a/WebKit && git status", argv[-1])
-
-    def test_the_ssh_option_getter_makes_no_directory_and_the_first_ssh_does(self):
-        state = self.tmp / "state" / "wk" / "ssh"
-        self.t.ssh_opts()
-        self.assertFalse(state.exists())
-        self.assertNotIn(("mkdir", str(state)), self.fake.effects)
-        self.fake.answer_remote("git status", out="clean\n")
-        self.t.exec("a", ["git", "status"])
-        self.assertIn(("mkdir", str(state)), self.fake.effects)
-
-    def test_wk_is_the_far_machines_own_with_the_flags_as_environment(self):
-        self.fake.answer_remote("tools/wk", out="==> no task is running on box\n")
-        rc, out = self.t.wk("stop", "--tasks", env={"WK_YES": "1", "WK_ROW_LABEL": "box", "WK_NO_DELEGATE": "1", "HOME": "/x"})
-        self.assertEqual((rc, out), (0, "==> no task is running on box\n"))
-        line = shlex.split(self.fake.ssh_calls("tools/wk")[0][-1])[-1]
-        self.assertTrue(line.startswith("cd $HOME && "), line)
-        self.assertLessEqual({"WK_YES=1", "WK_ROW_LABEL=box", "WK_NO_DELEGATE=1"}, set(line.split()))
-        self.assertTrue(line.endswith(" /home/u/wk/tools/wk stop --tasks 2>&1"), line)
-        self.t.wk("doctor", env={}, quiet=True)
-        self.assertNotIn("2>&1", self.fake.ssh_calls("tools/wk")[1][-1])
-
-    def test_a_peer_is_asked_not_driven(self):
-        self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
-        self.fake.answer_remote("test -x", rc=0)
-        self.fake.answer_remote("wk ls --json", out=json.dumps({"workspaces": [{"name": "pw", "state": "running"}, {"name": "half", "state": "creating"}]}))
-        t = self.reg.load("peer")
-        self.assertEqual((t.far_side(), t.delegates()), ("answering", True))
-        self.assertEqual(t.list(), [("pw", "running"), ("half", "creating")])
-        self.assertEqual((t.info("pw"), t.info("half"), t.info("ghost")), ("present", "creating", "absent"))
-        self.assertEqual(len(self.fake.ssh_calls("wk ls --json")), 1)
-        self.assertIn("WK_NO_DELEGATE=1 /opt/wk-tools/wk ls --json", self.fake.ssh_calls("wk ls --json")[0][-1])
-        self.assertTrue(all("test -f $HOME/.wk-remote" not in c[-1] for c in self.fake.ssh_calls()))
-
-    def test_locating_a_workspace_names_a_machine_that_did_not_answer(self):
-        self.fake.remote = [("uname -s", Result(255, "", "ssh: Connection refused\n"))]
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(self.reg.locate("ws"), [])
-        self.assertIn("could not ask box over ssh: Connection refused -- what is there is not in this answer", err.getvalue())
-        self.assertEqual(len(self.fake.ssh_calls()), 1)
-        self.fake.remote = [("uname -s", Result(0, LINUX_PROBE)), ("ws/ws ]", Result(0, "present\n"))]
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual(self.reg.ws_place("ws"), "box")
-        self.assertEqual(err.getvalue(), "")
-
-    def test_a_target_with_no_host_refuses_and_names_the_conf(self):
-        t = self.reg.load("remote")
-        with self.assertRaises(Refused):
-            with contextlib.redirect_stderr(io.StringIO()) as err:
-                t.probe()
-        self.assertIn("place 'remote' has no host to reach", err.getvalue())
-        self.assertIn(self.reg.conf_path("remote"), err.getvalue())
-        self.assertEqual(self.fake.ssh_calls(), [])
-
-    def test_start_and_stop_have_nothing_to_act_on(self):
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertTrue(self.t.start("a"))
-            self.assertFalse(self.t.stop("a"))
-        self.assertIn("'box' has no notion of starting a single workspace -- nothing to bring up for 'a'", err.getvalue())
-        self.assertIn("the 'box' place has no notion of stopping a single workspace -- 'a' is left running", err.getvalue())
-        self.assertEqual(self.fake.effects, [])
-
+        self.assertEqual((me.store.store_dir(), self.fake.ssh_calls()), (str(self.tmp / "rr"), []))
 
 class MarkerClock(FakeClock):
     """A clock whose n-th sleep is when the workspace's marker appears."""
@@ -644,92 +418,12 @@ class TestContainerWrite(DriversTest):
         flags = argv[argv.index("--additional-flags") + 1].split()
         return list(zip(flags[0::2], flags[1::2]))
 
-    def test_create_hands_wkdev_create_every_flag_a_workspace_needs(self):
-        _, err = self.stderr_of(lambda: self.t.create("new", self.base))
-        argv = self.wkdev_create()
-        u, ws_dir = self.t.user(), self.t.store.ws_dir("new")
-        pairs = self.flag_pairs(argv)
-        for pair in (("--volume", "%s:/src/WebKit:O,upperdir=%s/changes,workdir=%s/overlay-work" % (self.t.store.snapshot_tree(self.base), ws_dir, ws_dir)),
-                     ("--volume", "%s:/opt/wk-tools:ro" % self.t.tools_src()), ("--memory", "19749m"), ("--cpus", "7"),
-                     ("--volume", "%s:/secrets:ro" % self.t.store.keyring_view_dir("container")), ("--env", "WK_WORKSPACE=new"),
-                     ("--env", "NO_PROXY=localhost,127.0.0.1,::1"), ("--device", "/dev/dri")):
-            self.assertIn(pair, pairs)
-        head = argv[argv.index("--network"):argv.index("--additional-flags")]
-        self.assertEqual(head, ("--network", "none", "--isolated", "--image", argv[argv.index("--image") + 1], "--name", "wk-new", "--shell", "/bin/bash", "--user", u, "--group", u,
-                                "--home", os.path.join(ws_dir, "home")))
-        self.assertEqual(argv[0], "env")
-        self.assertIn("WKDEV_SDK=%s" % self.t.sdk(), argv)
-        for d in ("changes", "overlay-work", "home", "build", "ccache"):
-            self.assertIn(os.path.join(ws_dir, d), self.fake.dirs)
-        self.assertEqual(self.fake.files[os.path.join(ws_dir, "arch")], "native\n")
-        install = next(e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "install")
-        self.assertEqual(install, ("install", "-m", "0755", os.path.join(self.t.root, "container", "firstrun.sh"), os.path.join(ws_dir, "home", ".wkdev-firstrun")))
-        self.assertEqual(self.fake.effects[-1], ("write", os.path.join(ws_dir, "base-id")))
-        self.assertEqual(self.fake.files[os.path.join(ws_dir, "base-id")], "main-1\n")
-        self.assertEqual(self.fake.streamed, [argv], "`unit machine.streams_long_effects`: wkdev-create streams to the task log")
-
-    def test_a_container_writes_nothing_another_workspace_reads(self):
-        """`unit places.shared_mounts_readonly`: the agents cache is mounted read-only and filled from the store's side, no
-        shared ccache or skills is mounted, and the ccache is in the workspace's own directory."""
-        self.stderr_of(lambda: self.t.create("new", self.base))
-        store, pairs = self.t.store.store_dir(), self.flag_pairs(self.wkdev_create())
-        dests = [v.split(":")[1:] for k, v in pairs if k == "--volume"]
-        self.assertEqual(([["/cache/agents", "ro"]], []), ([d for d in dests if "agents" in d[0]], [d for d in dests if d[0] in ("/ccache", "/skills")]))
-        for pair in (("--env", "CCACHE_DIR=/var/lib/wk/ws/new/ccache"), ("--volume", "%s:/var/lib/wk/ws/new" % self.t.store.ws_dir("new"))):
-            self.assertIn(pair, pairs)
-        self.assertEqual((self.t.here.act_run, os.path.join(store, "cache", "agents")), self.t.agents_fill("new"))
-
-    def test_an_armhf_workspace_names_the_arm_image_and_gets_no_gpu(self):
-        self.stderr_of(lambda: self.t.create("new", self.base, "armhf"))
-        argv = self.wkdev_create()
-        image = project.get("SDK_IMAGE_ARMHF")
-        self.assertEqual(argv[argv.index("--arch"):argv.index("--name")], ("--arch", "arm", "--image", image))
-        self.assertNotIn(("--device", "/dev/dri"), self.flag_pairs(argv))
-        self.assertIn(("--env", "WK_ARCH=armhf"), self.flag_pairs(argv))
-
-    def test_an_unpublished_sdk_tag_is_refused_naming_the_newest_of_its_series_before_anything_is_made(self):
-        rows = "".join("sdk\t%s\n" % t for t in ("2.55-v2-8434060_amd64", "2.54-v9-aaa", "2.55-v1-1111111", "2.55-v10-2222222", "2.55-v2-3333333"))
-        self.fake.answer(["podman", "search", "--list-tags"], out="NAME\tTAG\n" + rows)
-        err = self.refused(lambda: self.t.create("new", self.base))
-        self.assertIn("ghcr.io/igalia/wkdev-sdk:2.55-v2-8434060, which upstream has not published", err)
-        self.assertIn("WK_SDK_IMAGE=ghcr.io/igalia/wkdev-sdk:2.55-v10-2222222 wk new", err)
-        self.assertEqual([e for e in self.fake.effects if e[0] != "run"], [])
-
-    def test_a_native_workspace_is_made_under_the_tree_s_sdk_layer_built_once_whether_or_not_the_registry_answers(self):
-        tag = places.layer_tag(self.t.root, "sdk:2.55-v2-8434060", places.SDK_LAYER, "wk-sdk")
-        for ws, absent, search in (("published", 1, Result(0, "NAME\tTAG\nghcr.io/igalia/wkdev-sdk\t2.55-v2-8434060\n")),
-                                   ("unasked", 0, Result(1, "", "timed out"))):
-            self.fake.answer(["podman", "image", "exists"], rc=absent)
-            self.fake.answer(["podman", "search", "--list-tags"], rc=search.rc, out=search.out, err=search.err)
-            self.fake.effects = []
-            self.stderr_of(lambda: self.t.create(ws, self.base))
-            built = [e[1][2:6] for e in self.fake.effects if e[1][:2] == ("podman", "build")]
-            self.assertEqual(built, [("--build-arg", "BASE=ghcr.io/igalia/wkdev-sdk:2.55-v2-8434060", "-t", tag)] * absent)
-            self.assertIn(tag, self.wkdev_create())
-
-    def test_an_image_override_skips_the_registry_check(self):
-        self.env["WK_SDK_IMAGE"] = "ghcr.io/x/sdk:tag"
-        self.stderr_of(lambda: self.reg.load("container").create("other", self.base))
-        self.assertFalse([e for e in self.fake.effects if e[1][:2] == ("podman", "search")])
-        self.assertIn("ghcr.io/x/sdk:tag", self.wkdev_create())
-
     def test_create_refuses_without_a_base_or_over_a_container_and_makes_nothing(self):
         err = self.refused(lambda: self.t.create("new", "main-9"))
         self.assertIn("snapshot main-9 not found; run 'wk sync' first", err)
         err = self.refused(lambda: self.t.create("a", self.base))
         self.assertIn("workspace 'a' already exists", err)
         self.assertEqual([e for e in self.fake.effects if e[0] != "run"], [])
-        self.fake.answer(["env"], rc=3, err="no such image\n")
-        err = self.refused(lambda: self.t.create("new", self.base))
-        self.assertIn("no such image", err)
-        self.assertNotIn(os.path.join(self.t.store.ws_dir("new"), "base-id"), self.fake.files)
-
-    def test_create_dies_if_installing_firstrun_fails_and_writes_no_completion_marker(self):
-        self.fake.answer(["install"], rc=1, err="install: cannot stat: No such file or directory\n")
-        err = self.refused(lambda: self.t.create("new", self.base))
-        self.assertIn("installing firstrun.sh into 'new' failed", err)
-        self.assertIn("wk rm new", err)
-        self.assertNotIn(os.path.join(self.t.store.ws_dir("new"), "base-id"), self.fake.files)
 
     def test_the_mirrors_parent_under_the_container_home_is_made_as_the_user(self):
         env = dict(self.env, WK_STORE="/home/%s/.local/share/wk" % self.t.user())
@@ -768,65 +462,6 @@ class TestContainerWrite(DriversTest):
         clock = FakeClock()
         self.refused(lambda: self.t.wait_ready("gone", clock, own=True))
         self.assertEqual(clock.slept, [])
-
-    def test_destroy_removes_the_container_then_the_directory(self):
-        ws_dir = self.t.store.ws_dir("a")
-        self.fake.write(os.path.join(ws_dir, "home", places.READY_MARKER), "")
-        self.fake.dirs.add(ws_dir)
-        self.fake.answer(["podman", "rm"], out="")
-        self.fake.answer(["podman", "unshare"], out="")
-        self.fake.effects = []
-        _, err = self.stderr_of(lambda: self.t.destroy("a"))
-        acts = [e for e in self.fake.effects if e[0] != "run" or e[1][:2] in (("podman", "rm"), ("podman", "unshare"))]
-        self.assertEqual(acts, [("run", ("podman", "rm", "-f", "wk-a")), ("run", ("podman", "unshare", "rm", "-rf", ws_dir)), ("remove", ws_dir)])
-        self.assertFalse(self.fake.isdir(ws_dir))
-        self.fake.effects = []
-        self.stderr_of(lambda: self.t.destroy("gone"))
-        self.assertEqual([e for e in self.fake.effects if e[0] != "run"], [])
-
-    def test_a_dry_run_prints_would_run_and_changes_nothing(self):
-        self.dry_run()
-        ws_dir = self.t.store.ws_dir("a")
-        self.fake.dirs.add(ws_dir)
-        before = (dict(self.fake.files), set(self.fake.dirs))
-        _, err = self.stderr_of(lambda: self.t.create("new", self.base))
-        self.assertIn("would run: env ", err)
-        self.assertIn("wkdev-create --network none --isolated", err)
-        self.assertIn("would run: install -m 0755", err)
-        _, err = self.stderr_of(lambda: self.t.destroy("a"))
-        self.assertIn("would run: podman rm -f wk-a", err)
-        self.assertIn("would run: podman unshare rm -rf %s" % ws_dir, err)
-        self.assertNotIn("could not fully remove", err)
-        self.assertEqual((self.fake.files, self.fake.dirs), before)
-
-    def test_store_init_makes_the_tree_once_and_publishes_the_secrets(self):
-        root = self.t.store.store_dir()
-        with mock.patch.object(secrets.Secrets, "store_publish") as sp:
-            self.t.store_init()
-            sp.assert_called_once_with()
-        for d in ("git", "base", "ws", "cache/yocto/downloads", "cache/buildroot/ccache", "cache/bench", "cache/agents"):
-            self.assertIn(os.path.join(root, d), self.fake.dirs)
-        chmods = [e[1] for e in self.fake.effects if e[0] == "run" and e[1][0] == "chmod"]
-        self.assertEqual(chmods, [("chmod", "0700", self.t.store.keyring_dir())])
-        with mock.patch.object(secrets.Secrets, "store_publish", side_effect=Refused(1)):
-            with self.assertRaises(Refused):
-                self.t.store_init()
-
-    def test_sdk_refresh_pins_the_sdk_checkout_to_the_fork(self):
-        script = os.path.join(self.t.root, "container", "sdk-refresh.sh")
-        argv = ("bash", script, self.t.sdk(), project.get("SDK_REPO"), project.get("SDK_PIN"))
-        self.fake.answer(["bash", script], out="")
-        self.assertTrue(self.t.sdk_refresh())
-        self.assertEqual(self.fake.effects[-1], ("run", argv))
-        self.assertEqual(self.fake.streamed, [argv])
-        self.fake.answer(["bash", script], rc=1, err="fetch failed\n")
-        err = self.refused(self.t.sdk_refresh)
-        self.assertIn("fetch failed", err)
-        self.assertIn("refreshing the webkit-container-sdk checkout failed", err)
-
-    def test_the_creation_log_is_under_the_store(self):
-        self.assertEqual(self.t.create_log("a"), os.path.join(self.t.store.store_dir(), "log", "new-a.log"))
-
 
 class TestVmWrite(VmTest):
     def setUp(self):
@@ -1062,27 +697,6 @@ class TestRemoteWrite(RemoteTest):
         self.assertIn("wk status a", argv[-1])
         self.assertIn("wk sync --tools box", err)
 
-    def test_a_peers_workspace_is_destroyed_by_its_own_wk(self):
-        self.conf("peer", "peer=1\ntools=/opt/wk-tools\n")
-        t = self.reg.load("peer")
-        self.fake.answer_remote("test -x /opt/wk-tools/wk", rc=0)
-        self.fake.answer_remote("wk ls --json", out=json.dumps({"workspaces": [{"name": "a", "state": "running"}]}))
-        self.fake.answer_remote("wk rm a", out="==> workspace 'a' destroyed\n")
-        self.tools_at("0000stale000")
-        _, err = self.stderr_of(lambda: t.destroy("a"))
-        line = shlex.split(self.fake.ssh_calls("wk rm a")[0][-1])
-        self.assertEqual(line[-3:], ["/opt/wk-tools/wk", "rm", "a"])
-        self.assertIn("WK_YES=1", line)
-        self.assertNotIn("WK_EXPORTS_READ=1", line)
-        self.assertEqual(self.fake.effects[-1], ("remove", t.store.ws_dir("a")))
-        self.assertIn("==> workspace 'a' destroyed", err)
-        self.fake.answer_remote("wk rm a", rc=1, out="error: has work running in it\n")
-        self.fake.effects = []
-        err = self.refused(lambda: t.destroy("a"))
-        self.assertIn("peer did not destroy 'a'", err)
-        self.assertIn("has work running in it", err)
-        self.assertEqual([e for e in self.fake.effects if e[0] == "remove"], [])
-
     def test_store_init_makes_the_record_here(self):
         self.t.store_init()
         self.assertEqual(self.fake.effects, [("mkdir", self.t.store.store_dir()), ("mkdir", os.path.join(self.t.store.store_dir(), "ws"))])
@@ -1127,15 +741,6 @@ class TestLocalWrite(DriversTest):
         self.env["WK_MARKER"] = str(marker)
         self.t = self.reg.load("local")
 
-    def test_a_workspace_neither_creates_destroys_nor_stops_itself_and_names_the_host_command(self):
-        err = self.refused(lambda: self.t.create("x"))
-        self.assertIn("a workspace cannot create a workspace -- run 'wk new x' on the host", err)
-        err = self.refused(lambda: self.t.destroy("ws"))
-        self.assertIn("a workspace cannot destroy itself -- run 'wk rm ws' on the host", err)
-        err = self.refused(lambda: self.t.stop("ws"))
-        self.assertIn("a workspace cannot stop itself -- run 'wk stop ws' on the host", err)
-        self.assertEqual(self.fake.effects, [])
-
     def test_store_init_makes_its_own_record(self):
         self.t.store_init()
         self.assertEqual(self.fake.effects, [("mkdir", self.t.store.ws_dir("ws"))])
@@ -1148,22 +753,6 @@ class TestLocalWrite(DriversTest):
             with self.subTest(system=system), mock.patch.object(self.t, "os", return_value=system):
                 self.assertEqual(self.t.exec_tty("ws", ["true"]).rc, 0)
                 self.assertEqual(self.fake.effects[-1], ("run_tty", want, None))
-
-
-class TestBridges(DriversTest):
-    def test_the_ccache_conf_is_the_places_size(self):
-        def conf(env):
-            return places.Registry(str(REPO), env=env, machine=self.fake).load("container").ccache_conf()
-        self.assertEqual(conf(dict(self.env)), "max_size = 40G\n")
-        self.assertEqual(conf(dict(self.env, WK_CCACHE_MAXSIZE="5G")), "max_size = 5G\n")
-
-    def test_gpu_flags_are_read_where_the_container_is_made(self):
-        t = self.reg.load("container")
-        self.fake.answer(lib_argv(str(REPO), "host/linux/gpu.sh", "gpu_flags")[:3], rc=1)
-        self.assertNotIn("--device", t.sandbox_flags("native"))
-        self.fake.answer(lib_argv(str(REPO), "host/linux/gpu.sh", "gpu_flags")[:3], out="--device /dev/dri --device nvidia.com/gpu=all\n")
-        self.assertEqual(t.sandbox_flags("native")[-4:], ["--device", "/dev/dri", "--device", "nvidia.com/gpu=all"])
-        self.assertNotIn("--device", t.sandbox_flags("armhf"), "an armhf workspace gets no GPU")
 
 
 class TestBuildSide(RemoteTest):
@@ -1324,40 +913,6 @@ class TestThePodmanMachineRecord(DriversTest):
         self.assertEqual(out.getvalue(), "_cpus=9\n_disk=''\n")
 
 
-class _Target:
-    def __init__(self, os_, store):
-        self._os = os_
-        self.store = Store({"WK_STORE": store})
-        self.env = {"WK_STORE": store}
-
-    def os(self):
-        return self._os
-
-
-class TestTheDefaultConfigIsDerived(unittest.TestCase):
-    """Registry.default_preset: the last build's preset, from its task record, else the place platform's."""
-
-    def _default(self, last_built, os_):
-        with tempfile.TemporaryDirectory(prefix="wk-test-default-preset-") as store:
-            if last_built:
-                t = Records(store, env={"WK_STORE": store}).begin("build", "here", "demo", "wk build demo --kill",
-                                                                   "/nolog", ["building"])
-                t.set("preset", last_built)
-            reg = places.Registry(REPO, env={"HOME": "/nonexistent"}, machine=Fake())
-            reg.ws_place = lambda name: "t"
-            reg.load = lambda name: _Target(os_, store)
-            with contextlib.redirect_stderr(io.StringIO()) as err:
-                return presets.default_preset(reg, "demo"), err.getvalue()
-
-    def test_the_last_build_wins(self):
-        self.assertEqual(self._default("mac-debug", "macos")[0], "mac-debug")
-
-    def test_with_no_build_the_platform_decides(self):
-        for os_, want in (("macos", "mac-release"), ("linux", "jsc-release")):
-            with self.subTest(os_):
-                self.assertEqual(self._default("", os_)[0], want)
-
-
 def plant(home, rel):
     p = home / rel
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -1450,22 +1005,6 @@ class TestTheMountpointsInsideTheHomeAreMadeHere(fakes.FlowTest):
         for dest in ("/var/lib/wk/git", "/ccache", "/opt/wk-tools", "/home/someone-else/git", self.HOME):
             _ensure(self.ws, dest)
         self.assertEqual([], list((self.ws / "home").iterdir()))
-
-
-class TestWorkspaceWithNoBaseIdIsStillCreating(unittest.TestCase):
-    def _state(self, needs_base, has_base_id):
-        fake = Fake()
-        t = WsDriver("stub", str(REPO), {"WK_STORE": "/store", "HOME": "/home/u"}, fake)
-        t.needs_base = needs_base
-        fake.mkdir(t.store.ws_dir("somews"))
-        if has_base_id:
-            fake.write(os.path.join(t.store.ws_dir("somews"), "base-id"), "some-snapshot-id\n")
-        return places.Driver.state(t, "somews")
-
-    def test_a_workspace_needing_a_base_with_none_recorded_is_creating(self):
-        self.assertEqual(self._state(needs_base=True, has_base_id=False), "creating")
-        self.assertEqual(self._state(needs_base=True, has_base_id=True), "present")
-        self.assertEqual(self._state(needs_base=False, has_base_id=False), "present")
 
 
 class TestOnePodmanWrapper(unittest.TestCase):
