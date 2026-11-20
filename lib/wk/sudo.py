@@ -6,7 +6,6 @@ import sys
 
 from wk import act, fleet, priv, record
 from wk.act import die, log
-from wk.store import ws_name
 
 DROPIN_FMT = "/etc/sudoers.d/zz-%s-passwd"
 TIMEOUT_MIN = "0.5"   # sudo's own default is 5 minutes, long enough for an agent to ride a person's password
@@ -160,12 +159,7 @@ def status_here(sudo, env):
 
 def main(words, on, all_flag, reg, env=None):
     env = os.environ if env is None else env
-    if reg.in_workspace():
-        die("'wk key sudo' hardens a machine you log into, and this is workspace '%s' -- a container's sudoers belong to "
-            "the image and the workspace is the blast radius anyway. Run it on the host." % ws_name(env))
     action = words[0] if words else "status"
-    if action not in ("status", "setup"):
-        die("'%s' is not a verb of wk key sudo: status or setup; see wk key -h" % action)
     if on == "":
         die("--on needs a name")
     if on:

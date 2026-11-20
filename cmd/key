@@ -62,4 +62,4 @@ def main(args, inv):
     if verb == "sudo":
         return sudo.main(words, args.value("--on"), args.flag("--all"), inv.reg, env=inv.reg.env)
     return cli.main(inv.root, verb, words[0] if words else "", rotate=args.flag("--rotate"),
-                    replace=args.flag("--replace"), paste=args.flag("--paste"))
+                    replace=args.flag("--replace"), paste=args.flag("--paste"), env=inv.reg.env, reg=inv.reg)
