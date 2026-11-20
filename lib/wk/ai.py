@@ -134,11 +134,10 @@ class Ai:
         return self.session(agent_bin, mode, args)
 
 
-def main(agent, tail, env=None, reg=None):
+def main(agent, tail, env, reg):
     env = os.environ if env is None else env
     name = store.ws_name(env)
     require_name(name)
-    reg = reg or Registry(ROOT, env, Local())
     try:
         driver = reg.load(reg.ws_place(name))
     except LookupError as e:

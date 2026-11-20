@@ -93,8 +93,7 @@ def stop_everything(reg, keep_vm):
     return 0
 
 
-def main(name, keep_vm, tasks, everywhere):
-    reg = places.Registry(ROOT)
+def main(reg, name, keep_vm, tasks, everywhere):
     try:
         if tasks:
             if keep_vm:

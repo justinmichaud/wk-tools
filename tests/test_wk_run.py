@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, as_dispatched, load_cmd
+from tests.support import as_dispatched, invocation, load_cmd, REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, presets, run  # noqa: E402
@@ -38,7 +38,7 @@ def run_on(driver, argv, preset="gtk-release"):
     reg.present.return_value = driver
     with mock.patch.object(places, "Registry", return_value=reg), \
             mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": preset}):
-        RUN.main(as_dispatched("run", argv), None)
+        RUN.main(as_dispatched("run", argv), invocation())
     return driver.exec_argv.call_args
 
 
@@ -82,7 +82,7 @@ class TestLldbGetsAPty(unittest.TestCase):
                 mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release", "WK_DRY_RUN": "1"}), \
                 contextlib.redirect_stderr(err), self.assertRaises(SystemExit) as cm:
-            RUN.main(as_dispatched("run", ["--", "x.js"]), None)
+            RUN.main(as_dispatched("run", ["--", "x.js"]), invocation())
         self.assertEqual(cm.exception.code, 0)
         self.assertIn("would run: ssh box", err.getvalue())
 

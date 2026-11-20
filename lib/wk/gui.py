@@ -44,8 +44,7 @@ def session_env(root):
     return run_env
 
 
-def main(name, opts):
-    reg = places.Registry(ROOT)
+def main(name, opts, reg):
     driver = reg.present(name)
 
     if driver.kind == "remote":

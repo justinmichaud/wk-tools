@@ -48,9 +48,8 @@ def build_cmd(suite, src, out_env, render_env, wrap, lower, port, jobs, debug_fl
     return ("cd %s && %s --%s %s --no-build %s %s" % (src, head, lower, port, flags, shlex.join(pass_args))).rstrip()
 
 
-def main(name, opts, reg=None, clock=None):
+def main(name, opts, reg, clock):
     clock = clock or Clock()
-    reg = reg or places.Registry(ROOT)
     driver = reg.present(name)
     recs = job.records_of(driver, clock, reg.machine)
 

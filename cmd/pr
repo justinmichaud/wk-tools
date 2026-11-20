@@ -30,4 +30,4 @@ COMMAND = Command(name="optional", ready=True, repos=("webkit",), default="check
 
 def main(args, inv):
     name = store.ws_name() or args.name or ""
-    return pr.main(name, args.positionals, args.flag("--draft"), args.flag("--web"))
+    return pr.main(name, args.positionals, args.flag("--draft"), args.flag("--web"), inv.reg)

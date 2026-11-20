@@ -65,8 +65,7 @@ RR_REPLAY = '{lldb_prelude}\n{trace_dir}; exec rr replay -d "$LLDB" {tail_q}'
 DIRECT_PLAIN = '{prelude}; export JSC_validateOptions=1; exec {jsc_q} --validateOptions=1 {tail_q}'
 
 
-def main(name, opts):
-    reg = places.Registry(ROOT)
+def main(name, opts, reg):
     driver = reg.present(name)
 
     preset_name, preset = presets.chosen(reg, driver, name)

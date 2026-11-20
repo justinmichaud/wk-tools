@@ -48,6 +48,6 @@ def parse(args):
 def main(args, inv):
     profile.refuse_mixed(args, ("--lldb", "--until-crash", "--max", "--rr", "--replay"))
     if profile.asked(args):
-        return profile.main(args, "run")
+        return profile.main(args, "run", inv.reg)
     name = store.ws_name()
-    return run.main(name, parse(args))
+    return run.main(name, parse(args), inv.reg)

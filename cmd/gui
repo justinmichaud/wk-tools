@@ -30,4 +30,4 @@ def parse(args):
 
 def main(args, inv):
     name = store.ws_name()
-    return gui.main(name, parse(args))
+    return gui.main(name, parse(args), inv.reg)

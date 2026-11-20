@@ -10,7 +10,7 @@ import sys
 import unittest
 
 from tests.fakes import FlowTest
-from tests.support import REPO, as_dispatched, load_cmd
+from tests.support import as_dispatched, invocation, load_cmd, REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, record, stop  # noqa: E402
@@ -64,7 +64,7 @@ class TestStopTasks(FlowTest):
         with contextlib.redirect_stderr(io.StringIO()) as err, contextlib.redirect_stdout(io.StringIO()) as out, \
                 mock.patch.object(sys, "stdin", io.StringIO()):
             try:
-                rc = STOP.main(as_dispatched("stop", ["--tasks"] + list(flags), os.environ), None)
+                rc = STOP.main(as_dispatched("stop", ["--tasks"] + list(flags), os.environ), invocation())
             except Refused as e:
                 rc = e.status
         return rc, out.getvalue() + err.getvalue()
@@ -170,5 +170,5 @@ class TestStopWorkspace(unittest.TestCase):
             with self.subTest(kind=kind):
                 t = self.Driver(kind)
                 with mock.patch.object(places, "Registry", lambda root: self.Reg(t)), mock.patch.dict(os.environ, {"WK_NAME": "ws"}):
-                    self.assertEqual(0, STOP.main(as_dispatched("stop", []), None))
+                    self.assertEqual(0, STOP.main(as_dispatched("stop", []), invocation()))
                 self.assertEqual([("stop", "ws")], t.calls)

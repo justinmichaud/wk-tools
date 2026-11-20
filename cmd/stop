@@ -28,4 +28,4 @@ COMMAND = Command(name="optional", forward=False, setup=False, needs=("podman",)
 
 
 def main(args, inv):
-    return stop.main(store.ws_name(), args.flag("--keep-vm"), args.flag("--tasks"), args.flag("--all"))
+    return stop.main(inv.reg, store.ws_name(), args.flag("--keep-vm"), args.flag("--tasks"), args.flag("--all"))

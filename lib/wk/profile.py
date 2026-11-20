@@ -130,7 +130,7 @@ def browser_target(preset, url, process, process_explicit, mode, args, outdir):
     return subject, "%s %s" % (launch_env, launch_cmd), mb_prefix
 
 
-def main(args, cmd, reg=None):
+def main(args, cmd, reg):
     name = store.ws_name()
     o = options(args)
 
@@ -148,7 +148,6 @@ def main(args, cmd, reg=None):
         die("--process only makes sense with --browser: it names which of\n"
             "    MiniBrowser's own processes (ui, web, network, gpu) to point the profiler\n"
             "    at, and without --browser there is no MiniBrowser to name one of.")
-    reg = reg or places.Registry(images.root())
 
     preset_name = store.build_preset() or presets.default_preset(reg, name)
     try:

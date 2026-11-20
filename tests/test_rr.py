@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, as_dispatched, load_cmd
+from tests.support import as_dispatched, invocation, load_cmd, REPO
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import gui, ldpath, places  # noqa: E402
@@ -56,9 +56,9 @@ class RrTest(unittest.TestCase):
                 mock.patch.dict(os.environ, dict({"WK_NAME": "ws", "WK_PRESET": preset, "WK_QUIET": "1"}, **env)):
             if mod is GUI:
                 with mock.patch.object(gui, "is_macos", return_value=False), mock.patch.object(gui, "session_env", return_value=""):
-                    mod.main(as_dispatched("gui", argv), None)
+                    mod.main(as_dispatched("gui", argv), invocation())
             else:
-                mod.main(as_dispatched("run", argv), None)
+                mod.main(as_dispatched("run", argv), invocation())
         args, kw = driver.exec_argv.call_args
         return args[1][2], kw["tty"]
 
@@ -98,7 +98,7 @@ class TestRecordAndReplay(RrTest):
                 mock.patch("os.execvp", side_effect=AssertionError("ran it")), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws", "WK_PRESET": "gtk-release", "WK_DRY_RUN": "1"}), \
                 contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(SystemExit):
-            RUN.main(as_dispatched("run", ["--rr", "--", "x.js"]), None)
+            RUN.main(as_dispatched("run", ["--rr", "--", "x.js"]), invocation())
         self.assertIn("would run: ssh box 'rr record'", err.getvalue())
         driver.exec.assert_not_called()
 

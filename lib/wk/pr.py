@@ -347,10 +347,9 @@ def _load(reg, name, usage):
     return reg.present(name)
 
 
-def main(name, words, draft, web):
+def main(name, words, draft, web, reg):
     """`wk pr`'s verbs: `words` is the dispatcher's positionals, the verb first."""
     verb = words[0]
-    reg = places.Registry(ROOT)
     if verb == "rebase":
         return pr_rebase(_load(reg, name, "wk pr rebase [<workspace>]; run inside a workspace, or name one"), name)
     if verb == "open":
