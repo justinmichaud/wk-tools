@@ -338,17 +338,6 @@ NEW_PLAN = ["checking", "wipe", "base", "create", "init", "agents", "fetch", "re
 class Flow(WorkspaceTest):
     """`wk <argv>` typed into a world: (exit status, stderr), with that world's effects only the command's."""
 
-    def make_world(self, **kw):
-        return self.ahead(super().make_world(**kw))
-
-    @staticmethod
-    def ahead(w):
-        """A record the world writes is after the front's floor, so a wait ends on its first look.
-        TODO: cmd/new and cmd/rm build Records on the real clock, not the dispatcher's; then this goes, and the waits'
-        sleeps (WK_NEW_TIMEOUT, WK_KILL_WAIT, WK_READY_WAIT) are the world's to count."""
-        w.clock.t = time.time() + 60
-        return w
-
     def typed(self, *argv, w=None):
         w = w or self.w
         w.effects = []
@@ -481,7 +470,7 @@ class TestNewDetaches(Flow):
                 pid = super().spawn(argv, log)
                 self.pids.discard(pid)
                 return pid
-        rc, err = self.new(w=self.ahead(DiesAtOnce(self.tmp)))
+        rc, err = self.new(w=DiesAtOnce(self.tmp))
         self.assertEqual((rc, said(err)), (1, "error: the process creating 'ws' is gone without having said how it ended."))
 
     def test_the_wait_gives_up_after_wk_new_timeout_and_undoes_nothing(self):
@@ -497,7 +486,7 @@ class TestNewDetaches(Flow):
                 pid = super().spawn(argv, log)
                 self.files[log] = "driver says hello\n"
                 return pid
-        w = self.ahead(Says(self.tmp))
+        w = Says(self.tmp)
         self.ended(0, w)
         self.assertEqual(self.new(w=w)[1].splitlines()[0], "driver says hello")
 
@@ -601,7 +590,7 @@ class TestNewKill(Flow):
             def kill(self, pid, sig=signal.SIGTERM):
                 self.effect(("kill", pid, int(sig)))
                 return True
-        w = self.ahead(Immortal(self.tmp))
+        w = Immortal(self.tmp)
         w.env["WK_KILL_WAIT"] = "0"
         w.begin()
         w.pids.add(4242)

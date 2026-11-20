@@ -25,7 +25,7 @@ COMMAND = Command(name="required", takes=("[<name>...]",), lifecycle=True, forwa
 
 def main(args, inv):
     reg = inv.reg
-    records = record.Records(machine=reg.machine)
+    records = record.Records(machine=reg.machine, clock=inv.clock)
     try:
         if args.flag("--all"):
             return workspace.rm_all(reg, records)

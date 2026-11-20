@@ -59,7 +59,7 @@ def main(args, inv):
             raise Refused(rc)
         workspace.zed_after(reg.machine, inv.root, name, opts)
         return 0
-    records = record.Records(machine=reg.machine)
+    records = record.Records(machine=reg.machine, clock=inv.clock)
     if opts["detached"]:
         return detached(reg, records, name, opts)
     return workspace.new_front(reg, records, name, opts, pr)
