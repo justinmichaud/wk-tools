@@ -113,6 +113,12 @@ class Machine:
     def have(self, tool):
         return self.run(list(HAVE) + [tool]).ok
 
+    def read_or(self, path, default=""):
+        try:
+            return self.read(path)
+        except OSError:
+            return default
+
     def _would(self, verb, what):
         if act.dry_run():
             sys.stderr.write("would %s%s: %s\n" % (verb, self._where(), what))

@@ -303,11 +303,15 @@ class Registry:
             return machine_driver(name, self.root, self.env, self.machine, self._conf(name), self.conf_path(name))
         return {"container": Container, "vm": Vm, "local": LocalWorkspace}.get(kind, Remote)(name, self.root, dict(self.env), self.machine)
 
-    def present(self, name):
+    def driver_of(self, name):
+        """The driver of the place workspace `name` lives on; a name or place nothing knows is refused."""
         try:
-            driver = self.load(self.ws_place(name))
+            return self.load(self.ws_place(name))
         except LookupError as e:
             act.die(str(e))
+
+    def present(self, name):
+        driver = self.driver_of(name)
         if driver.info(name) == "absent":
             act.die(no_such_workspace(name))
         return driver
