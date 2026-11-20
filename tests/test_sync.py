@@ -780,15 +780,17 @@ class TestTheFetch(SyncTest):
 
     def test_the_script_is_one_fetch_and_the_report_names_the_mirror(self):
         rc, err = self.fetch("one")
-        self.assertEqual(rc, 0)
         self.assertIn("  %-24s ok  (/mirror/container/WebKit.git)" % "one", err)
         script = next(e[1][-1] for e in self.w.effects if e[1][:1] == ("exec",))
-        self.assertIn("cd /src/WebKit || exit 1", script)
-        self.assertIn("git fetch --all --prune --quiet", script)
-        self.assertIn("url./mirror/container/WebKit.git.insteadOf", script)
-        self.assertIn("CHECK /src/WebKit /mirror/container/WebKit.git", script)
-        self.assertNotIn("github.com", script)
+        for part in ("cd /src/WebKit || exit 1", "git fetch --all --prune --quiet", "url./mirror/container/WebKit.git.insteadOf",
+                     "CHECK /src/WebKit /mirror/container/WebKit.git"):
+            self.assertIn(part, script)
+        self.assertEqual((rc, "github.com" in script), (0, False))
         self.assertIn("fetching in 1 workspace(s) -- origin wpe fork forkwpe", err)
+
+    def test_a_dry_run_prints_the_fetch_and_judges_nothing(self):
+        self.dry_run()
+        self.assertEqual(self.fetch("one")[0], 0)
 
     def test_the_listing_is_in_the_order_asked_for_not_finished_in(self):
         def slow(argv):
@@ -799,9 +801,8 @@ class TestTheFetch(SyncTest):
         rc, err = self.fetch("slow", "gone", "bad")
         rows = [l.split()[0] for l in err.splitlines() if l.startswith("  ") and not l.startswith("    ")]
         self.assertEqual(rows, ["slow", "gone", "bad"])
-        self.assertIn("absent -- skipped", err)
-        self.assertIn("bad" + " " * 22 + "FAILED (continuing)", err)
-        self.assertIn("1 workspace(s) did not fetch", err)
+        for part in ("absent -- skipped", "bad" + " " * 22 + "FAILED (continuing)", "1 workspace(s) did not fetch"):
+            self.assertIn(part, err)
         self.assertEqual(rc, 1)
 
     def test_they_run_at_once(self):

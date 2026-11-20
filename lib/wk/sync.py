@@ -419,9 +419,9 @@ class Sync:
             script = clone_fetch_and_check_script(src, origin, push)
         with stage(self.clock, "workspace fetch %s" % ws):
             r = driver.act_exec(ws, ["sh", "-c", script])
-        lines = r.out.splitlines()
-        said = kv.kv(r.out)
-        problems = ["    - %s" % l[len("problem: "):] for l in lines if l.startswith("problem: ")]
+        if act.dry_run():
+            return "ok", ""
+        said, problems = kv.kv(r.out), ["    - %s" % l[len("problem: "):] for l in r.out.splitlines() if l.startswith("problem: ")]
         if said.get("fetch") != "0":
             return "failed", "  %-24s FAILED (continuing)\n%s" % (ws, "".join(p + "\n" for p in problems + notes))
         if said.get("from") == "mirror":
