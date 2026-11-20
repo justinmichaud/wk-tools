@@ -516,9 +516,9 @@ class FakeDriver:
 
 
 @functools.lru_cache(maxsize=None)
-def bench_lib(argv):
-    """This tree's bench libraries, run for real: a reading of them is a pure function of its arguments."""
-    return Local().run(list(argv))
+def bench_lib(argv, path=os.environ.get("PATH", "")):
+    """This tree's bench libraries, run for real on the PATH this process began with: a pure function of its arguments."""
+    return Local().run(["/usr/bin/env", "PATH=" + path] + list(argv))
 
 
 class BenchHere(World):
