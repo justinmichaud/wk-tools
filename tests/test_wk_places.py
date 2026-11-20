@@ -219,7 +219,7 @@ class TestContainer(DriversTest):
 
     def test_stop_is_an_effect(self):
         self.fake.answer(["podman", "stop"], out="")
-        self.assertTrue(self.t.stop("a"))
+        self.assertIn("stopped a", self.stderr_of(lambda: self.assertTrue(self.t.stop("a")))[1])
         self.assertEqual(self.fake.effects[-1][1][:3], ("podman", "stop", "--time"))
 
     def test_the_arch_is_recorded_at_creation(self):

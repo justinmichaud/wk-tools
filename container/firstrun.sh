@@ -92,7 +92,9 @@ for f in settings.json hooks CLAUDE.md skills; do    # read-only, from the synce
 done
 
 _install_profilers() {                  # wrapped: not load-bearing
-    if sudo apt-get update -qq >/dev/null 2>&1 \
+    if dpkg -s heaptrack valgrind sysprof >/dev/null 2>&1; then
+        log "heaptrack, valgrind and sysprof-cli already present"
+    elif sudo apt-get update -qq >/dev/null 2>&1 \
        && sudo apt-get install -y --no-install-recommends heaptrack valgrind sysprof >/dev/null 2>&1; then
         log "heaptrack, valgrind and sysprof-cli installed"
     else

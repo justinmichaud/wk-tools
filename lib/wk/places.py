@@ -222,10 +222,8 @@ class Registry:
 
     def walk(self):
         """The places a listing covers: WK_PLACE's, this workspace's, the ones here when another wk asked, else all."""
-        if dispatch_place(self.env):
-            return dispatch_place(self.env).split()
-        if self.in_workspace():
-            return [self.default()]
+        if dispatch_place(self.env) or self.in_workspace():
+            return (dispatch_place(self.env) or self.default()).split()
         if self.env.get("WK_NO_DELEGATE"):
             return self.here()
         return self.all()
@@ -803,6 +801,9 @@ class Container(Driver):
         return ["env", "%sSDK=%s" % (p, self.sdk()), "%sCONTAINER_UID=%d" % (p, os.getuid()), "%sCONTAINER_GID=%d" % (p, os.getgid()),
                 "%sCONTAINER_USER=%s" % (p, self.user()), p + "CONTAINER_SHELL=/bin/bash"]
 
+    def sdk_script(self, *rel):
+        return self.sdk_env() + [os.path.join(self.sdk(), "scripts", *rel)]
+
     def sdk_local(self):
         """The pulled SDK image and its pull date, or None with none pulled; sdk_upstream's registry tags, or None past `timeout`."""
         r = self.machine.run(self.podman() + ["images", "--format", "{{.Repository}}:{{.Tag}}"])
@@ -867,9 +868,7 @@ class Container(Driver):
         if not self.is_here():
             env = {k: v for k, v in os.environ.items() if k != "WK_DRY_RUN"}
             return Ssh.podman(self.podman_machine()).argv(self.wk_cmd(["enter", ws, *([] if person else ["--own"]), "--", *argv], env)), None
-        cmd = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_ENTER")), "--quiet", "--name", self.ctr(ws)]
-        if not tty:
-            cmd.append("--no-tty")
+        cmd = self.sdk_script("host-only", project.get("SDK_ENTER")) + ["--quiet", "--name", self.ctr(ws)] + ([] if tty else ["--no-tty"])
         return cmd + ["--exec", "--", BRIDGE, *(self.person_entry(ws) if person else []), *argv], None
 
     def person_entry(self, ws):
@@ -902,10 +901,15 @@ class Container(Driver):
 
     def start(self, ws):
         secrets.Secrets(self.root, self.env, self.machine).push_converge_machine()
-        return self.machine.act_run(self.podman() + ["start", self.ctr(ws)]).ok
+        return self._said(self.podman() + ["start", self.ctr(ws)], "%s is up" % ws)
 
     def stop(self, ws):
-        return self.machine.act_run(self.podman() + ["stop", "--time", "30", self.ctr(ws)]).ok
+        return self._said(self.podman() + ["stop", "--time", "30", self.ctr(ws)], "stopped %s" % ws)
+
+    def _said(self, argv, done):
+        r = self.machine.act_run(argv)
+        act.info(done) if r.ok else act.warn(r.err.strip())
+        return r.ok
 
     def tools_src(self):
         return self.env.get("WK_TOOLS_SRC") or (TOOLS if in_vm(self.env) else self.root)
@@ -993,7 +997,7 @@ class Container(Driver):
         return self.env.get("WK_SDK_IMAGE")
 
     def sdk_tag(self):
-        r = self.machine.run(self.sdk_env() + [os.path.join(self.sdk(), "scripts", "helpers", "print-sdk-version")])
+        r = self.machine.run(self.sdk_script("helpers", "print-sdk-version"))
         if not (r.ok and r.out.strip()):
             act.die("the SDK checkout %s names no image version: %s\n    ./setup refreshes it" % (self.sdk(), r.err.strip() or "no output"))
         tag, published = r.out.strip(), self.sdk_upstream()   # a registry that cannot be asked is left to the pull's own failure
@@ -1017,7 +1021,7 @@ class Container(Driver):
 
     def create_argv(self, ws, base, arch, repo, image):
         u = self.user()
-        argv = self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_CREATE")), "--network", "none", "--isolated"]
+        argv = self.sdk_script("host-only", project.get("SDK_CREATE")) + ["--network", "none", "--isolated"]
         if arch != "native":
             argv += ["--arch", "arm"]
         return argv + ["--image", image, "--name", self.ctr(ws), "--shell", "/bin/bash", "--user", u, "--group", u,
@@ -1077,12 +1081,9 @@ class Container(Driver):
         return None
 
     def enter_argv(self, ws):
-        """Spelled out rather than the SDK enter script's own login shell: without the token/keyring
-        bridge, the PR tool reports a locked macOS Keychain instead of a missing token."""
-        return (self.sdk_env() + [os.path.join(self.sdk(), "scripts", "host-only", project.get("SDK_ENTER")),
-                                  "--name", self.ctr(ws), "--exec", "--",
-                                  BRIDGE,
-                                  "/usr/bin/env", "USER=%s" % self.user(), *self.person_entry(ws), "/bin/bash", "--login"], None)
+        """Not the SDK enter script's own login shell: without the bridge the PR tool reports a locked Keychain, not a missing token."""
+        return (self.sdk_script("host-only", project.get("SDK_ENTER")) + ["--name", self.ctr(ws), "--exec", "--", BRIDGE,
+                "/usr/bin/env", "USER=%s" % self.user(), *self.person_entry(ws), "/bin/bash", "--login"], None)
 
     def _cp(self, src, dest):
         r = self.machine.act_run(self.podman() + ["cp", src, dest])

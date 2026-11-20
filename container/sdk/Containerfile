@@ -1,9 +1,16 @@
-# The SDK image with the Swift toolchain built for its own Ubuntu: the one it ships is built for
-# 24.04, and its ld.lld (first on PATH) cannot load libxml2.so.2 on 26.04, so no link uses lld.
-# TODO: goes with the image upstream publishes from webkit-container-sdk's swift-ubuntu2604 change.
 ARG BASE
 FROM ${BASE}
 USER root
+# What container/firstrun.sh would otherwise install into every new workspace over the proxy (95 s of a 204 s `wk new`).
+RUN apt-get update -qq && \
+    apt-get install -y --no-install-recommends heaptrack valgrind sysprof ubuntu-dbgsym-keyring nodejs npm && \
+    . /etc/os-release && \
+    printf 'deb http://ddebs.ubuntu.com %s main restricted universe multiverse\n' \
+        "$VERSION_CODENAME" "$VERSION_CODENAME-updates" "$VERSION_CODENAME-proposed" > /etc/apt/sources.list.d/ddebs.list && \
+    apt-get update -qq
+# The Swift toolchain built for the image's own Ubuntu: the one it ships is built for 24.04, and its
+# ld.lld (first on PATH) cannot load libxml2.so.2 on 26.04, so no link uses lld.
+# TODO: goes with the image upstream publishes from webkit-container-sdk's swift-ubuntu2604 change.
 ARG SWIFT_VERSION=6.4.2
 RUN case "$(uname -m)" in x86_64) arch="" ;; aarch64) arch="-aarch64" ;; esac && \
     rm -rf /opt/swift && mkdir -p /opt/swift && \
