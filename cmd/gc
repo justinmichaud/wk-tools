@@ -21,7 +21,7 @@ COMMAND = Command(where="host", destructive=True, group="sources", opts=(
 
 def main(args, inv):
     flags = tuple(f for f in PURGES if args.flag(f))
-    g = gc.Gc(inv.root, inv.reg)
+    g = gc.Gc(inv.root, inv.reg, inv.clock)
     if args.flag("--rows"):
         if flags:
             die("--rows prints what 'wk gc' would take, and takes no --purge flag")
