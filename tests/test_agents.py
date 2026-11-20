@@ -1,25 +1,20 @@
 """The coding agents a workspace is made with: container/agents.sh run against stand-in curl, node and npm, and
-lib/wk/agents.py's install over a recorded workspace."""
-import contextlib
+`wk new`'s install of them, typed into a world whose workspace answers the script and whose LiteLLM endpoint lists models."""
 import io
 import json
 import os
 import shlex
 import shutil
 import subprocess
-import sys
 import unittest
+import urllib.error
 from unittest import mock
 
-from tests.fakes import WsDriver
-from tests.support import REPO
+from tests.fakes import FlowTest, Result
+from tests.support import NO_GITHUB, REPO
+from tests.test_wk_workspace import Flow, World, said
 
-sys.path.insert(0, str(REPO / "lib"))
-import credcheck  # noqa: E402
-from wk import agents  # noqa: E402
-from wk.act import Refused  # noqa: E402
-from wk.machine import Result  # noqa: E402
-from tests.fakes import Fake, FlowTest  # noqa: E402
+SCRIPT = "container/agents.sh"
 
 LINK = 'mkdir -p "$HOME/.local/bin" && ln -s "$OK_BIN" "$HOME/.local/bin/%s"'
 CLAUDE_INSTALLER = ('v="$1"; mkdir -p "$HOME/.local/share/claude/versions" "$HOME/.local/bin" && cp "$OK_BIN" "$HOME/.local/share/claude/versions/$v" '
@@ -53,7 +48,7 @@ class TestTheScript(FlowTest):
         path.chmod(0o755)
 
     def script(self, *args, **env):
-        return subprocess.run([shutil.which("bash"), str(REPO / agents.SCRIPT), *args], env=dict(self.env, **env),
+        return subprocess.run([shutil.which("bash"), str(REPO / SCRIPT), *args], env=dict(self.env, **env),
                               capture_output=True, text=True, timeout=60)
 
     def run_script(self, *args, **env):
@@ -93,7 +88,7 @@ class TestTheScript(FlowTest):
 
     def test_two_creations_at_once_fetch_once_and_the_second_waits_for_the_artifact(self):
         (other := self.tmp / "home2").mkdir()
-        procs = [subprocess.Popen([shutil.which("bash"), str(REPO / agents.SCRIPT), "fetch"], env=dict(self.env, CURL_SLEEP="1", HOME=h),
+        procs = [subprocess.Popen([shutil.which("bash"), str(REPO / SCRIPT), "fetch"], env=dict(self.env, CURL_SLEEP="1", HOME=h),
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for h in (str(self.home), str(other))]
         self.assertEqual([("", 0), ("", 0)], [(p.communicate(timeout=60)[0], p.returncode) for p in procs])
         self.assertEqual(1, len(self.curls()), self.log())
@@ -170,124 +165,135 @@ class TestTheScript(FlowTest):
         self.assertEqual([], [l for l in self.log() if "find" in l])
 
 
-class Workspace:
-    """`run` as agents.install calls it: every argv kept, answered by the first key found in its last word."""
-
-    def __init__(self, answers):
-        self.answers, self.argvs = answers, []
-
-    def __call__(self, argv):
-        self.argvs.append(argv)
-        for key, r in self.answers.items():
-            if key in argv[-1]:
-                return r
-        return Result(0)
+FETCH = "export WK_AGENTS_CACHE=%s WK_CLAUDE_VERSION=2.1.308"
+CONFIG = "python3 /opt/wk-tools/claude/workspace-config.py /src/WebKit"
+ENDPOINT = NO_GITHUB + "/v1"   # WK_LITELLM_API, as tests.support sets it
+FAILED = "error: could not install the coding agents in 'ws' (claude=failed pi=?)."
 
 
-class TestInstall(unittest.TestCase):
+class Endpoint:
+    """The LiteLLM endpoint: /model/info lists `listed`, a completion answers 200 for a model in `callable` and 404 for
+    another; `down` is no answer at all. Each request lands in `asked` as (method, path, bearer)."""
+
+    def __init__(self):
+        self.listed, self.callable, self.down, self.asked = [], set(), False, []
+
+    def open(self, req, timeout=None):
+        path = req.full_url[len(ENDPOINT):]
+        self.asked.append((req.get_method(), path, req.get_header("Authorization")))
+        if self.down:
+            raise urllib.error.URLError("refused")
+        if path != "/model/info" and json.loads(req.data)["model"] not in self.callable:
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b"{}"))
+        r = io.BytesIO(json.dumps({"data": [{"model_name": m, "model_info": {"mode": "chat"}} for m in self.listed]}).encode())
+        r.status, r.headers = 200, {}
+        return r
+
+
+class Installs(World):
+    """`wk new`'s machine: the agents cache is filled on the store's side as `fill` says, the script in the workspace
+    answers `install` and Claude's start-up answers `config`; a LiteLLM key is stored when `key` is set."""
+
+    def __init__(self, tmp, **kw):
+        self.fill, self.install, self.config, self.key = Result(0), Result(0, "claude=installed\npi=installed\n"), Result(0), None
+        super().__init__(tmp, **kw)
+        self.react(["bash", "-lc"], lambda a, f: f.fill)
+        self.react(["python3", os.path.join(str(REPO), "lib", "secretfile.py")],
+                   lambda a, f: Result(0, f.key) if f.key else Result(int(a[2] == "present")))
+        self.bash.update({"rm -f ": Result(0), "umask 077": Result(0)})
+
+    def _in_ws(self, argv, f):
+        return f.install if argv[-1].startswith("export WK_AGENTS_CACHE=") else f.config if argv[-1] == CONFIG else super()._in_ws(argv, f)
+
+
+class AgentsTest(Flow):
+    world_class = Installs
+
     def setUp(self):
-        self.ws, self.store = Workspace({"claude.ai/install.sh": Result(0, "claude=present\npi=installed\n")}), Workspace({})
-        self.stored = False
-        for p in (mock.patch.object(agents.Secrets, "cred_stored", side_effect=lambda name: self.stored),
-                  mock.patch.object(agents.Secrets, "cred_read", return_value="sk-placeholder\n")):
-            p.start()
-            self.addCleanup(p.stop)
+        super().setUp()
+        self.endpoint = Endpoint()
+        p = mock.patch("urllib.request.build_opener", lambda *handlers: self.endpoint)
+        p.start()
+        self.addCleanup(p.stop)
+        self.cache = os.path.join(self.w.env["WK_STORE"], "cache", "agents")
+        self.models = '"%s/pi/models.json"' % self.cache
 
-    def install(self):
-        err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            try:
-                agents.install(str(REPO), {}, Fake(), self.ws, "demo", "/opt/wk-tools", "/src/WebKit", "/cache/agents", (self.store, "/s/agents"))
-                status = 0
-            except Refused as e:
-                status = e.status
-        return status, err.getvalue()
+    def asked(self):
+        """The install's runs: the store side's fill by its first line and verb, its models.json writes, the workspace's by first line."""
+        runs = [e[1] for e in self.w.effects if e[0] == "run"]
+        return ([("fill", a[2].split("\n")[0]) + a[3:] if a[:2] == ("bash", "-lc") else ("store", a[2]) if a[:2] == ("bash", "-c") else ("in ws", a[-1].split("\n")[0])
+                 for a in runs if a[:2] == ("bash", "-lc") or a[:2] == ("bash", "-c") and "/pi/models.json" in a[2] or a[0] == "env" and (CONFIG == a[-1] or "WK_AGENTS_CACHE" in a[-1])])
 
-    def test_the_start_up_answers_are_recorded_for_the_checkout_after_the_install(self):
-        status, err = self.install()
-        self.assertEqual(0, status, err)
-        self.assertIn("pi installed in 'demo'", err)
-        self.assertEqual(("fetch", True), (self.store.argvs[0][-1], self.store.argvs[0][2].startswith("export WK_AGENTS_CACHE=/s/agents ")))
-        self.assertTrue(self.ws.argvs[0][-1].startswith("export WK_AGENTS_CACHE=/cache/agents WK_CLAUDE_VERSION=%s\n" % agents.CLAUDE_VERSION))
-        self.assertEqual("python3 /opt/wk-tools/claude/workspace-config.py /src/WebKit", self.ws.argvs[1][-1])
 
-    def test_a_failed_install_refuses_naming_the_rerun(self):
-        self.ws.answers["claude.ai/install.sh"] = Result(1, "claude=failed\n")
-        status, err = self.install()
-        self.assertEqual(1, status, err)
-        self.assertIn("could not install the coding agents in 'demo' (claude=failed pi=?)", err)
-        self.assertIn("'wk new demo' destroys the half-made workspace and tries again", err)
-        self.assertEqual(1, len(self.ws.argvs))
+class TestTheInstall(AgentsTest):
+    def test_claude_is_fetched_on_the_stores_side_installed_from_its_cache_and_its_answers_recorded_after(self):
+        rc, err = self.detach()
+        self.assertEqual((rc, self.asked()[:3]), (0, [("fill", FETCH % self.cache, SCRIPT, "fetch"), ("in ws", FETCH % "/cache/agents"), ("in ws", CONFIG)]))
+        self.assertIn("==> pi installed in 'ws'", err.splitlines())
 
-    def test_a_failed_install_carries_the_scripts_own_error_text(self):
-        self.ws.answers["claude.ai/install.sh"] = Result(1, "claude=failed\ncurl said so\n", "curl: (22) The requested URL returned error: 401\n")
-        status, err = self.install()
-        self.assertEqual(1, status, err)
-        self.assertIn("(claude=failed pi=?).\n    curl said so\n    curl: (22) The requested URL returned error: 401\n", err)
-        self.assertNotIn("\n    claude=failed", err)
+    def test_a_failed_fetch_or_install_refuses_with_the_scripts_own_words_and_names_the_rerun(self):
+        self.w.install = Result(1, "claude=failed\ncurl said so\n", "curl: (22) The requested URL returned error: 401\n")
+        rc, err = self.detach()
+        lines = err.splitlines()
+        self.assertEqual((rc, said(err), lines[lines.index(FAILED) + 1:lines.index(FAILED) + 3], [a[0] for a in self.asked()]),
+                         (1, FAILED, ["    curl said so", "    curl: (22) The requested URL returned error: 401"], ["fill", "in ws"]))
+        self.assertIn("    'wk new ws' destroys the half-made workspace and tries again.", lines)
+        self.w.fill = Result(1, "claude=failed\n")
+        rc, err = self.detach()
+        self.assertEqual((rc, said(err), [a[0] for a in self.asked()]), (1, FAILED, ["fill"]))
 
-    def test_answers_that_cannot_be_recorded_refuse(self):
-        self.ws.answers["workspace-config.py"] = Result(1, "", "not readable as JSON")
-        status, err = self.install()
-        self.assertEqual(1, status, err)
-        self.assertIn("could not record Claude's start-up answers in 'demo'", err)
-        self.assertIn("not readable as JSON", err)
+    def test_answers_that_cannot_be_recorded_refuse_with_why(self):
+        self.w.config = Result(1, "", "not readable as JSON")
+        rc, err = self.detach()
+        self.assertEqual((rc, said(err), "    not readable as JSON" in err.splitlines()),
+                         (1, "error: could not record Claude's start-up answers in 'ws', and every session there", True))
 
-    def test_no_node_is_said_and_is_not_a_refusal(self):
-        self.ws.answers["claude.ai/install.sh"] = Result(0, "claude=present\npi=no-node v20.11.1\n")
-        status, err = self.install()
-        self.assertEqual(0, status, err)
-        self.assertIn("no pi in 'demo': it needs node >= 22.19 and npm, and found node v20.11.1", err)
+    def test_too_old_a_node_is_said_and_is_not_a_refusal(self):
+        self.w.install = Result(0, "claude=present\npi=no-node v20.11.1\n")
+        rc, err = self.detach()
+        self.assertEqual((rc, "  no pi in 'ws': it needs node >= 22.19 and npm, and found node v20.11.1" in err.splitlines()), (0, True))
 
-    def models_written(self, served):
-        self.stored = True
-        with mock.patch.object(credcheck, "litellm_models", side_effect=served), \
-                mock.patch.object(credcheck, "litellm_callable", side_effect=lambda key, ids: (ids[1:] or [None])[0]):
-            status, err = self.install()
-        self.assertEqual([], [a for a in self.ws.argvs if a[1] == "-c"])
-        return status, err, [a[-1] for a in self.store.argvs if "printf" in a[-1]], [a for a in self.store.argvs if a[-1] == 'rm -f "/s/agents/pi/models.json"']
+    def test_a_dry_run_prints_the_install_and_runs_nothing_in_the_workspace(self):
+        rc, err = self.new("--dry-run")
+        self.assertEqual((rc, [a for a in self.asked() if a[0] == "in ws"]), (0, []))
+        self.assertIn("would run in ws: bash -lc '%s'" % CONFIG, err.splitlines())
 
-    def test_pi_is_pointed_at_the_models_the_key_may_call(self):
-        status, err, writes, _ = self.models_written(lambda key: ["glm-5p3-flash", "gpt-oss-120b"])
-        self.assertEqual(0, status, err)
-        words = shlex.split(writes[0])
-        provider = json.loads(words[words.index("printf") + 2])["providers"]["litellm"]
-        self.assertEqual((credcheck.LITELLM_ENDPOINT, "openai-completions", "$LITELLM_API_KEY"),
-                         (provider["baseUrl"], provider["api"], provider["apiKey"]))
-        self.assertEqual([{"id": "gpt-oss-120b"}, {"id": "glm-5p3-flash"}], provider["models"])
-        self.assertIn("umask 077", writes[0])
-        self.assertTrue(writes[0].endswith('> "/s/agents/pi/models.json".$$ && mv -f "/s/agents/pi/models.json".$$ "/s/agents/pi/models.json"'))
 
-    def test_an_endpoint_where_no_model_answers_writes_nothing_and_names_the_check(self):
-        status, err, writes, removed = self.models_written(lambda key: ["m-404"])
-        self.assertEqual((0, [], 1), (status, writes, len(removed)), err)
-        self.assertIn("'wk key check'", err)
+class TestPisModels(AgentsTest):
+    """`unit agents.models_per_machine`: each `wk new` recomputes the machine's one pi models.json from the stored LiteLLM key."""
 
-    def test_an_endpoint_that_does_not_answer_writes_nothing(self):
-        def down(key):
-            raise credcheck.Unreachable("URLError: refused")
-        status, err, writes, removed = self.models_written(down)
-        self.assertEqual((0, [], []), (status, writes, removed), err)
-        self.assertIn("URLError: refused", err)
-        self.assertIn("left as it was", err)
+    def written(self, key="sk-placeholder\n"):
+        self.w.key = key
+        rc, err = self.detach()
+        self.assertEqual(rc, 0, err)
+        return [a[1] for a in self.asked() if a[0] == "store"], err.splitlines()
 
-    def test_with_no_key_it_says_which_command_stores_one(self):
-        status, err = self.install()
-        self.assertEqual((0, 1), (status, len([a for a in self.store.argvs if a[-1] == 'rm -f "/s/agents/pi/models.json"'])), err)
-        self.assertIn("wk key set litellm", err)
+    def test_pi_is_pointed_at_the_models_the_key_may_call_the_callable_first(self):
+        self.endpoint.listed, self.endpoint.callable = ["glm-5p3-flash", "gpt-oss-120b"], {"gpt-oss-120b"}
+        (write,), lines = self.written()
+        words = shlex.split(write)
+        self.assertEqual(json.loads(words[words.index("printf") + 2]), {"providers": {"litellm": {
+            "baseUrl": ENDPOINT, "api": "openai-completions", "apiKey": "$LITELLM_API_KEY", "models": [{"id": "gpt-oss-120b"}, {"id": "glm-5p3-flash"}]}}})
+        self.assertEqual(write.split(" && ")[:2] + write.split(" && ")[-1:], ['mkdir -p "%s/pi"' % self.cache, "umask 077", "mv -f %s.$$ %s" % (self.models, self.models)])
+        self.assertEqual(self.endpoint.asked, [("GET", "/model/info", "Bearer sk-placeholder")] + [("POST", "/chat/completions", "Bearer sk-placeholder")] * 2)
+
+    def test_where_no_model_answers_the_file_goes_and_where_nothing_answers_it_stays(self):
+        self.endpoint.listed = ["m-404"]
+        writes, lines = self.written()
+        self.assertEqual((writes, "    so pi has nothing to call: 'wk key check' says what the endpoint makes of the key" in lines), (["rm -f " + self.models], True))
+        self.w, self.endpoint.down = self.make_world(), True
+        writes, lines = self.written()
+        self.assertEqual((writes, "    so pi's models.json is left as it was" in lines), ([], True))
+
+    def test_with_no_key_the_file_goes_and_it_says_which_command_stores_one(self):
+        writes, lines = self.written(key=None)
+        self.assertEqual((writes, self.endpoint.asked), (["rm -f " + self.models], []))
+        self.assertIn("  no LiteLLM key on this machine ('wk key set litellm'), so pi in 'ws' asks you to /login", lines)
 
     def test_a_present_pi_still_recomputes_the_machines_file(self):
-        self.ws.answers["claude.ai/install.sh"] = Result(0, "claude=present\npi=present\n")
-        self.assertEqual(1, len(self.models_written(lambda key: ["m", "n"])[2]))
-
-
-class TestADryRun(unittest.TestCase):
-    def test_it_prints_the_install_and_runs_nothing_in_the_workspace(self):
-        t, err = WsDriver("container", str(REPO), {}, Fake()), io.StringIO()
-        with mock.patch.dict(os.environ, {"WK_DRY_RUN": "1"}), contextlib.redirect_stderr(err):
-            t.install_agents("demo")
-        self.assertEqual([], t.machine.effects)
-        self.assertIn("would run in demo: bash -lc 'python3 /opt/wk-tools/claude/workspace-config.py /src/WebKit'", err.getvalue())
+        self.w.install = Result(0, "claude=present\npi=present\n")
+        self.endpoint.listed, self.endpoint.callable = ["m"], {"m"}
+        self.assertEqual(len(self.written()[0]), 1)
 
 
 if __name__ == "__main__":
