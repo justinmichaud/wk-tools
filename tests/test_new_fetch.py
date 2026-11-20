@@ -1,532 +1,429 @@
-"""What a fresh workspace's checkout is: on a branch, tracking it, and as current as the machine's mirror."""
-import contextlib
-import io
+"""What a fresh workspace's checkout is -- on a branch, tracking it, wired to the mirror and as current as it -- typed as
+`wk sync` and `wk new` into worlds whose git runs for real in scratch repositories."""
 import os
+import shutil
 import subprocess
-import sys
 import time
-import types
 import unittest
 from pathlib import Path
 
+from tests import test_sync
+from tests.fakes import Result
 from tests.support import REPO, GitMirror, bash, git_commit, git_run, scratch_dir
+from tests.test_wk_workspace import WK, Flow, World, said
 
-sys.path.insert(0, str(REPO / "lib"))
-from wk import git, places, secrets, sync, workspace  # noqa: E402
-from wk.clock import Clock  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from wk.store import Snapshots, Store  # noqa: E402
-
-
-def _forks():
-    return list(secrets.forks())
-
-# Nothing here may reach github.com: the wiring points the four remotes at
-# their real URLs and rewrites them to a local mirror, so a fetch that ignored
-# the rewrite would clone WebKit for real. Port 1 refuses at once.
-OFFLINE = {"http_proxy": "http://127.0.0.1:1", "https_proxy": "http://127.0.0.1:1",
-           "GIT_TERMINAL_PROMPT": "0"}
+# Nothing here may reach github.com: the wiring names the upstreams' real URLs and rewrites them to the mirror, so a
+# fetch that ignored the rewrite would go there. Port 1 refuses at once.
+OFFLINE = {"http_proxy": "http://127.0.0.1:1", "https_proxy": "http://127.0.0.1:1", "GIT_TERMINAL_PROMPT": "0"}
+SRC = "/src/WebKit"
+ALIAS = "git@github-webkit:justinmichaud/WebKit.git"
+URLS = ["https://github.com/WebKit/WebKit.git", "https://github.com/WebPlatformForEmbedded/WPEWebKit.git",
+        "https://github.com/justinmichaud/WebKit.git", "https://github.com/justinmichaud/WPEWebKit.git"]
 
 
-class MirrorFixture(unittest.TestCase):
-    """support.GitMirror, and helpers to publish snapshots from it."""
-
-    def setUp(self):
-        self._scratch = scratch_dir(prefix="wk-new-fetch-")
-        self.tmp = self._scratch.__enter__()
-        self.addCleanup(self._scratch.__exit__, None, None, None)
-        m = GitMirror(self.tmp)
-        self.upstream, self.seed, self.mirror, self.sha1 = m.upstream, m.seed, m.mirror, m.sha1
-        self.mirror_fetch, self.advance_upstream = m.fetch, m.advance
-
-    def clone_snapshot(self, dest):
-        """What the publish's `git clone <mirror> <tree>` leaves behind, with origin pointed at the upstream the
-        way git.wiring_script does."""
-        git_run("clone", "-q", str(self.mirror), str(dest), cwd=self.tmp)
-        git_run("remote", "set-url", "origin", str(self.upstream), cwd=dest)
-        return dest
-
-    def status_line(self, tree):
-        return git_run("status", "-sb", cwd=tree).stdout.splitlines()[0]
-
-    def head(self, tree, rev="HEAD"):
-        return git_run("rev-parse", rev, cwd=tree).stdout.strip()
-
-    def checkout(self, tree, branch="origin/main"):
-        """lib/wk/sync.py's snapshot_checkout, run for real: why it refused, or ""."""
-        reg = places.Registry(REPO, env=dict(os.environ, WK_MIRROR_BRANCHES="main"))
-        return sync.Sync(reg, Clock(), None, "here").snapshot_checkout(str(tree), branch)
-
-    def wire(self, tree, mirror=None, branches=None):
-        m = str(self.mirror if mirror is None else mirror)
-        script = git.wiring_script(str(tree), m, _forks(), (branches or "main").split())
-        out = subprocess.run(["sh", "-c", script], cwd=str(tree),
-                             capture_output=True, text=True)
-        assert out.returncode == 0, out.stdout + out.stderr
-        return script
-
-    def check(self, tree, mirror=None, branches=None):
-        m = str(self.mirror if mirror is None else mirror)
-        script = git.wiring_check_script(str(tree), m, _forks(), (branches or "main").split())
-        return subprocess.run(["sh", "-c", script], cwd=str(tree),
-                              capture_output=True, text=True)
-
-    def config(self, tree, *args):
-        return git_run("config", *args, cwd=tree, check=False).stdout.strip()
+def real(argv, env=None):
+    cp = subprocess.run(argv, capture_output=True, text=True, env=dict(os.environ, **OFFLINE, **(env or {})))
+    return Result(cp.returncode, cp.stdout, cp.stderr)
 
 
-class TestSnapshotCheckout(MirrorFixture):
-    def test_a_published_snapshot_is_on_a_branch_tracking_the_one_it_came_from(self):
-        tree = self.clone_snapshot(self.tmp / "base1")
-        self.assertEqual(self.checkout(tree), "")
-        self.assertEqual(self.status_line(tree), "## main...origin/main")
-        self.assertEqual(
-            git_run("symbolic-ref", "--short", "HEAD", cwd=tree).stdout.strip(), "main")
-        self.assertEqual(
-            git_run("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}",
-                 cwd=tree).stdout.strip(), "origin/main")
-        self.assertEqual(self.head(tree), self.sha1)
-
-    def test_the_next_snapshot_resets_the_branch_forward_even_from_a_detached_one(self):
-        first = self.clone_snapshot(self.tmp / "base1")
-        git_run("checkout", "-q", "--detach", "origin/main", cwd=first)
-        sha2 = self.advance_upstream()
-
-        second = self.tmp / "base2"
-        subprocess.run(["cp", "-al", str(first), str(second)], check=True,
-                       capture_output=True)
-        git_run("remote", "set-url", "origin", str(self.mirror), cwd=second)
-        git_run("fetch", "--all", "--prune", "-q", cwd=second)
-        git_run("remote", "set-url", "origin", str(self.upstream), cwd=second)
-        self.assertEqual(self.checkout(second), "")
-        self.assertEqual(self.head(second, "refs/heads/main"), sha2,
-                         "the snapshot's own branch did not follow the mirror")
-        self.assertEqual(self.status_line(second), "## main...origin/main")
-
-    def test_a_release_branch_keeps_its_own_name(self):
-        git_run("branch", "-q", "wpe-2.46", cwd=self.seed)
-        git_run("push", "-q", "origin", "wpe-2.46", cwd=self.seed)
-        git_run("config", "--add", "remote.origin.fetch",
-             "+refs/heads/wpe-2.46:refs/heads/wpe-2.46", cwd=self.mirror)
-        self.mirror_fetch()
-        tree = self.clone_snapshot(self.tmp / "base-release")
-        self.assertEqual(self.checkout(tree, "origin/wpe-2.46"), "")
-        self.assertEqual(self.status_line(tree), "## wpe-2.46...origin/wpe-2.46")
-
-    def test_a_branch_that_is_not_remote_tracking_is_refused_by_name(self):
-        tree = self.clone_snapshot(self.tmp / "base-bad")
-        self.checkout(tree)
-        for branch in ("main", self.sha1, "nosuch/branch"):
-            why = self.checkout(tree, branch)
-            self.assertIn("<remote>/<branch>", why, branch)
-            self.assertIn("origin/main", why)
+def problems(err):
+    """What `wk sync` names under a workspace or a snapshot, one line per fault."""
+    return [l[len("    - "):] for l in err.splitlines() if l.startswith("    - ")]
 
 
-class WorkspaceFixture(MirrorFixture):
-    """A snapshot published from the mirror, plus a workspace checkout that is a copy of it -- what a container's
-    overlay is, without the overlay."""
+class Box(test_sync.Host):
+    """The podman VM whose store holds a real mirror (support.GitMirror: its upstreams are local repositories): git,
+    `cp -al` and the snapshot's wiring and check run for real, and a workspace in `co` has its checkout there -- a copy
+    of the snapshot, as its overlay is -- every script and git argv in it run for real; `git_env` is their environment."""
+
+    def __init__(self, tmp, **kw):
+        super().__init__(tmp, **kw)
+        self.up = GitMirror(self.tmp)
+        os.makedirs(os.path.dirname(self.mirror))
+        os.rename(str(self.up.mirror), self.mirror)
+        self.up.mirror = Path(self.mirror)
+        self.dirs.add(self.mirror)
+        self.co, self.git_env = {}, {}
+        self.effects = []
+
+    def mkdir(self, path):
+        super().mkdir(path)
+        if path in self.dirs:
+            os.makedirs(path, exist_ok=True)
+
+    def remove(self, path):
+        super().remove(path)
+        if path not in self.dirs:
+            shutil.rmtree(path, True)
+
+    def _git(self, argv, f):
+        r = real(argv, self.git_env)
+        if argv[1] == "clone" and r.ok:
+            f.dirs.update({argv[-1], argv[-1] + "/.git"})
+        return r
+
+    def _cp(self, argv, f):
+        super()._cp(argv, f)
+        return real(argv)
+
+    def _sh(self, text):
+        if test_sync.kind_of(text) in ("check", "wire"):
+            return real(["sh", "-c", text])
+        return super()._sh(text)
+
+    def in_ws(self, ws, argv):
+        co = self.co.get(ws)
+        if co is None or (argv[:2] == ["sh", "-c"] and test_sync.kind_of(argv[2]) == "setup"):
+            return super().in_ws(ws, argv)
+        return real([a.replace(SRC, str(co)) for a in argv], self.git_env)
+
+    def tree(self, bid=test_sync.STAMP):
+        return Path(self.snapshot(bid)) / "WebKit"
+
+    def workspace(self, name="ws"):
+        """Workspace `name`, made from the snapshot just published."""
+        self.make(name)
+        self.co[name] = self.tmp / name
+        subprocess.run(["cp", "-a", str(self.tree()), str(self.co[name])], check=True)
+        return self.co[name]
+
+
+def status(tree):
+    return git_run("status", "-sb", cwd=tree).stdout.splitlines()[0]
+
+
+def config(tree, *args):
+    return git_run("config", *args, cwd=tree, check=False).stdout.strip()
+
+
+class BoxFlow(test_sync.Flow):
+    world_class = Box
+
+    def publish(self, w=None):
+        return self.sync("--tools", "container", w=w)
+
+
+class TestASnapshotIsPublishedOnItsBranch(BoxFlow):
+    def test_the_first_is_on_main_tracking_origin_main_at_the_mirrors_head(self):
+        rc, err = self.publish()
+        tree = self.w.tree()
+        self.assertEqual((rc, status(tree), git_run("rev-parse", "HEAD", cwd=tree).stdout.strip()), (0, "## main...origin/main", self.w.up.sha1))
+
+    def test_the_next_resets_the_branch_forward_even_from_a_detached_one(self):
+        self.publish()
+        git_run("checkout", "-q", "--detach", "origin/main", cwd=self.w.tree())
+        sha2 = self.w.up.advance()
+        self.w.clock.t += 60
+        rc, err = self.publish()
+        second = self.w.tree(time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(self.w.clock.t)))
+        self.assertIn("==> snapshotting %s -> %s" % (test_sync.STAMP, second.parent.name), err.splitlines())
+        self.assertEqual((rc, status(second), git_run("rev-parse", "refs/heads/main", cwd=second).stdout.strip()), (0, "## main...origin/main", sha2))
+
+    def test_a_release_branch_keeps_its_own_name_and_tracks_it_whatever_git_would_set_up_itself(self):
+        (self.tmp / "gitconfig").write_text("[branch]\n\tautoSetupMerge = false\n")
+        self.w.git_env["GIT_CONFIG_GLOBAL"] = str(self.tmp / "gitconfig")
+        up = self.w.up
+        git_run("branch", "-q", "wpe-2.46", cwd=up.seed)
+        git_run("push", "-q", "origin", "wpe-2.46", cwd=up.seed)
+        git_run("config", "--add", "remote.origin.fetch", "+refs/heads/wpe-2.46:refs/heads/wpe-2.46", cwd=up.mirror)
+        up.fetch()
+        self.w.env.update(WK_MIRROR_BRANCHES="main wpe-2.46", WK_BRANCH="origin/wpe-2.46")
+        rc, err = self.publish()
+        self.assertEqual((rc, status(self.w.tree())), (0, "## wpe-2.46...origin/wpe-2.46"))
+        self.assertIn("==> checked out on branch wpe-2.46 (tracking origin/wpe-2.46)", err.splitlines())
+
+    def test_a_branch_that_is_not_remote_tracking_is_refused_by_name_and_nothing_is_left(self):
+        for branch in ("main", self.w.up.sha1, "nosuch/branch"):
+            self.w.env["WK_BRANCH"] = branch
+            rc, err = self.publish()
+            self.assertEqual((rc, said(err), self.w.tree().exists()), (1, "error: '%s' is not a branch this mirror carries: a snapshot is published from a" % branch, False), branch)
+
+    def test_the_hard_linked_next_one_leaves_the_last_clean_though_every_ctime_moved(self):
+        self.publish()
+        first = self.w.tree()
+        git_run("update-index", "--refresh", "-q", cwd=first, check=False)
+        time.sleep(1.1)   # git compares ctime to the second
+        self.w.up.advance()
+        self.w.clock.t += 60
+        self.publish()
+        dirty = [git_run(*c, "diff-files", "--name-only", cwd=first).stdout.split() for c in ([], ["-c", "core.trustctime=true"])]
+        self.assertEqual(dirty, [[], ["a"]], "trusting ctime, the same link stat-dirties the file")
+
+
+class WorkspaceFlow(BoxFlow):
+    """A snapshot published and workspace `ws` made from it."""
 
     def setUp(self):
         super().setUp()
-        self.base = self.clone_snapshot(self.tmp / "base")
-        self.wire(self.base)
-        assert self.checkout(self.base) == ""
-        self.ws = self.tmp / "ws"
-        subprocess.run(["cp", "-a", str(self.base), str(self.ws)], check=True,
-                       capture_output=True)
+        self.publish()
+        self.ws = self.w.workspace()
 
-    def run_fetch(self):
-        return subprocess.run(["sh", "-c", sync.fetch_script(str(self.ws), "")], cwd=str(self.tmp),
-                              capture_output=True, text=True,
-                              env={**os.environ, **OFFLINE})
+    def row(self, err):
+        return next(l for l in err.splitlines() if l.startswith("  %-24s " % "ws"))
 
 
-class TestWsFetchScript(WorkspaceFixture):
+class TestTheFetch(WorkspaceFlow):
     def test_it_reads_the_mirror_although_the_remotes_name_github(self):
-        sha2 = self.advance_upstream()
-        cp = self.run_fetch()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(self.head(self.ws, "refs/remotes/origin/main"), sha2)
-        self.assertEqual(self.config(self.ws, "remote.origin.url"),
-                         "https://github.com/WebKit/WebKit.git",
-                         "git-webkit reads this to find the project; the rewrite "
-                         "must not have replaced it")
+        sha2 = self.w.up.advance()
+        rc, err = self.sync("ws")
+        self.assertEqual((rc, self.row(err)), (0, "  %-24s ok  (%s)" % ("ws", self.w.mirror)))
+        self.assertEqual((git_run("rev-parse", "origin/main", cwd=self.ws).stdout.strip(), config(self.ws, "remote.origin.url")), (sha2, URLS[0]))
 
     def test_no_tags_are_followed(self):
-        git_run("tag", "some-release", self.sha1, cwd=self.seed)
-        git_run("push", "-q", "origin", "some-release", cwd=self.seed)
-        git_run("fetch", "-q", "--tags", "origin", "refs/heads/main:refs/heads/main",
-             cwd=self.mirror)
-        self.advance_upstream()
-        git_run("tag", "-d", "some-release", cwd=self.ws, check=False)
-
-        cp = self.run_fetch()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertEqual(git_run("for-each-ref", "refs/tags", cwd=self.ws).stdout, "")
+        up = self.w.up
+        git_run("tag", "some-release", up.sha1, cwd=up.seed)
+        git_run("push", "-q", "origin", "some-release", cwd=up.seed)
+        git_run("fetch", "-q", "--tags", "origin", "refs/heads/main:refs/heads/main", cwd=up.mirror)
+        up.advance()
+        self.assertEqual((self.sync("ws")[0], git_run("for-each-ref", "refs/tags", cwd=self.ws).stdout), (0, ""))
 
     def test_origin_is_narrowed_to_the_branches_the_mirror_carries(self):
-        for extra in ("safari-1-branch", "safari-2-branch"):
-            git_run("branch", "-q", extra, cwd=self.seed)
-        git_run("push", "-q", "origin", "safari-1-branch", "safari-2-branch", cwd=self.seed)
-        git_run("fetch", "-q", "--prune", "origin", "+refs/heads/*:refs/heads/*",
-             cwd=self.mirror)
+        up = self.w.up
+        git_run("branch", "-q", "safari-1-branch", cwd=up.seed)
+        git_run("push", "-q", "origin", "safari-1-branch", cwd=up.seed)
+        git_run("fetch", "-q", "--prune", "origin", "+refs/heads/*:refs/heads/*", cwd=up.mirror)
+        self.assertEqual(self.sync("ws")[0], 0)
+        refs = git_run("for-each-ref", "--format=%(refname)", "refs/remotes/origin", cwd=self.ws).stdout.split()
+        self.assertEqual(("refs/remotes/origin/main" in refs, "refs/remotes/origin/safari-1-branch" in refs), (True, False))
 
-        cp = self.run_fetch()
-        self.assertEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        refs = git_run("for-each-ref", "--format=%(refname)", "refs/remotes/origin",
-                    cwd=self.ws).stdout.split()
-        self.assertIn("refs/remotes/origin/main", refs)
-        self.assertNotIn("refs/remotes/origin/safari-1-branch", refs)
-
-    def test_a_ref_the_mirror_cannot_answer_fails_the_script(self):
-        git_run("config", "--add", "remote.origin.fetch",
-             "+refs/heads/webkitglib/9.9:refs/remotes/origin/webkitglib/9.9",
-             cwd=self.ws)
-        cp = self.run_fetch()
-        self.assertNotEqual(cp.returncode, 0, cp.stdout + cp.stderr)
-        self.assertIn("couldn't find remote ref", cp.stderr)
-        self.assertIn("from=mirror", cp.stdout,
-                      "which source it read is still reported")
-
-class TestWiringWithNoMirror(MirrorFixture):
-    """A checkout on a machine that keeps no mirror -- a build box cloning from the reference its admins refresh
-    (Remote.mirror_dir) -- is wired to the upstreams themselves, and still never asks origin for more than the
-    branches this tooling carries."""
-
-    def test_no_fetch_is_rewritten_and_origin_is_still_narrowed(self):
-        tree = self.clone_snapshot(self.tmp / "no-mirror")
-        self.wire(tree, mirror="")
-        self.assertEqual(self.config(tree, "--get-regexp", r"^url\..*\.insteadof$"), "")
-        self.assertEqual(
-            git_run("remote", "get-url", "--push", "fork", cwd=tree).stdout.strip(),
-            "git@github-webkit:justinmichaud/WebKit.git")
-        self.assertEqual(self.config(tree, "--get-all", "remote.origin.fetch"),
-                         "+refs/heads/main:refs/remotes/origin/main")
-        self.assertEqual(self.config(tree, "--get-all", "remote.wpe.fetch"),
-                         "+refs/heads/*:refs/remotes/wpe/*")
-        self.assertEqual(self.config(tree, "remote.wpe.tagOpt"), "--no-tags")
-
-    def test_re_wiring_it_with_a_mirror_leaves_one_rewrite_per_remote(self):
-        tree = self.clone_snapshot(self.tmp / "regrown")
-        self.wire(tree, mirror="/gone/WebKit.git")
-        self.wire(tree)
-        self.assertEqual(
-            self.config(tree, "--get-all", f"url.{self.mirror}.insteadOf").split(),
-            ["https://github.com/WebKit/WebKit.git",
-             "https://github.com/WebPlatformForEmbedded/WPEWebKit.git",
-             "https://github.com/justinmichaud/WebKit.git",
-             "https://github.com/justinmichaud/WPEWebKit.git"])
-        self.assertEqual(self.config(tree, "--get-regexp", r"url\./gone/"), "")
-        self.assertEqual(self.config(tree, "--get-all", "remote.origin.fetch"),
-                         "+refs/heads/main:refs/remotes/origin/main")
+    def test_a_ref_the_mirror_cannot_answer_fails_it(self):
+        git_run("config", "--add", "remote.origin.fetch", "+refs/heads/webkitglib/9.9:refs/remotes/origin/webkitglib/9.9", cwd=self.ws)
+        rc, err = self.sync("ws")
+        self.assertEqual((rc, self.row(err)), (1, "  %-24s FAILED (continuing)" % "ws"))
 
 
-class TestTheWiringCheck(MirrorFixture):
-    """wiring_check_script: what `wk sync` reads back from a checkout and `--fix` re-asserts against."""
+class TestTheWiringReadBack(WorkspaceFlow):
+    """Each fetch reads the checkout's wiring back, and `--fix` re-asserts it."""
 
-    def test_a_freshly_wired_checkout_passes(self):
-        tree = self.clone_snapshot(self.tmp / "wired")
-        self.wire(tree)
-        out = self.check(tree)
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+    def test_a_published_checkout_is_wired_to_the_mirror_with_the_forks_recorded_on_github(self):
+        rc, err = self.sync("ws")
+        self.assertEqual((rc, problems(err)), (0, []))
+        self.assertEqual((config(self.ws, "--get-all", "url.%s.insteadOf" % self.w.mirror).split(), config(self.ws, "remote.fork.url"),
+                          config(self.ws, "remote.fork.pushurl"), git_run("remote", "get-url", "--push", "fork", cwd=self.ws).stdout.strip()),
+                         (URLS, URLS[2], "", ALIAS))
+        for row in git_run("config", "--get-regexp", "remote.+url", cwd=self.ws).stdout.splitlines():
+            self.assertRegex(row.split(" ", 1)[1], r"^(https://github\.com/|no-push://)", "git-webkit reads any other host as a GitHub of its own")
 
-    def test_a_checkout_wired_before_this_is_named_fault_by_fault(self):
-        tree = self.clone_snapshot(self.tmp / "old")
-        self.wire(tree)
-        git_run("config", "--replace-all", "remote.origin.fetch",
-             "+refs/heads/*:refs/remotes/origin/*", cwd=tree)
-        git_run("config", "--unset", "remote.wpe.tagOpt", cwd=tree)
-        git_run("config", "--remove-section", f"url.{self.mirror}", cwd=tree)
+    def test_a_checkout_wired_before_this_is_named_fault_by_fault_and_fix_converges_it(self):
+        git_run("config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*", cwd=self.ws)
+        git_run("config", "--unset", "remote.wpe.tagOpt", cwd=self.ws)
+        git_run("config", "--remove-section", "url.%s" % self.w.mirror, cwd=self.ws)
+        git_run("config", "--unset", "core.trustctime", cwd=self.ws)
+        git_run("config", "remote.fork.pushurl", ALIAS, cwd=self.ws)
+        rc, err = self.sync("ws")
+        self.assertEqual((rc, self.row(err)), (1, "  %-24s FAILED (continuing)" % "ws"), "its fetch went to github.com")
+        for fault in ["origin asks for +refs/heads/*:refs/remotes/origin/*", "wpe follows tags", "git trusts ctime here", "fork records %s as a push URL" % ALIAS] + [
+                "%s is not rewritten to %s" % (r, self.w.mirror) for r in ("origin", "wpe", "fork", "forkwpe")]:
+            self.assertTrue([p for p in problems(err) if p.startswith(fault)], fault)
+        rc, err = self.sync("ws", "--fix")
+        self.assertEqual((rc, problems(err)), (0, []))
+        self.assertEqual(self.sync("ws")[0], 0)
 
-        out = self.check(tree)
-        self.assertNotEqual(out.returncode, 0, out.stdout)
-        self.assertIn("origin asks for +refs/heads/*:refs/remotes/origin/*", out.stdout)
-        self.assertIn("wpe follows tags", out.stdout)
-        for remote in ("origin", "wpe", "fork", "forkwpe"):
-            self.assertIn(f"problem: {remote} is not rewritten to {self.mirror}",
-                          out.stdout)
+    def test_a_mirror_without_a_branch_the_checkout_asks_for_is_its_one_fault(self):
+        self.w.env["WK_MIRROR_BRANCHES"] = "main webkitglib/9.9"
+        rc, err = self.sync("ws", "--fix")
+        self.assertEqual((rc, self.row(err), problems(err)[-1:]), (1, "  %-24s FAILED (continuing)" % "ws", [
+            "the mirror %s carries no refs/heads/webkitglib/9.9, which origin asks it for -- every fetch in here fails on it; 'wk sync --mirror' on the machine that keeps it" % self.w.mirror]))
+        self.assertEqual(len(problems(err)), 1, "the branch the mirror does carry is not a fault")
 
-    def test_a_mirror_without_a_branch_this_tree_declares_is_a_fault_of_its_own(self):
-        tree = self.clone_snapshot(self.tmp / "gap")
-        self.wire(tree, branches="main webkitglib/9.9")
-        out = self.check(tree, branches="main webkitglib/9.9")
-        self.assertNotEqual(out.returncode, 0, out.stdout)
-        self.assertIn(f"the mirror {self.mirror} carries no refs/heads/webkitglib/9.9",
-                      out.stdout)
-        self.assertIn("wk sync --mirror", out.stdout)
-        self.assertEqual(out.stdout.count("problem:"), 1,
-                         "the branch the mirror does carry is not a fault")
-
-    def test_a_checkout_that_trusts_ctime_is_a_fault(self):
-        tree = self.clone_snapshot(self.tmp / "ctime")
-        self.wire(tree)
-        git_run("config", "--unset", "core.trustctime", cwd=tree)
-        out = self.check(tree)
-        self.assertNotEqual(out.returncode, 0, out.stdout)
-        self.assertIn("problem: git trusts ctime here", out.stdout)
-
-    def test_a_checkout_with_no_mirror_is_checked_against_the_upstreams(self):
-        tree = self.clone_snapshot(self.tmp / "no-mirror-check")
-        self.wire(tree, mirror="")
-        out = self.check(tree, mirror="")
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-
-
-class TestHowAForkIsPushedTo(MirrorFixture):
-    ALIAS = "git@github-webkit:justinmichaud/WebKit.git"
-    RECORDED = "https://github.com/justinmichaud/WebKit.git"
-
-    def test_the_recorded_url_is_github_com_and_the_push_resolves_to_the_alias(self):
-        tree = self.clone_snapshot(self.tmp / "push-wired")
-        self.wire(tree)
-        self.assertEqual(self.config(tree, "--get", "remote.fork.url"),
-                         self.RECORDED)
-        self.assertEqual(self.config(tree, "--get", "remote.fork.pushurl"), "",
-                         "an explicit pushurl is what makes git skip the rewrite")
-        self.assertEqual(
-            git_run("remote", "get-url", "--push", "fork", cwd=tree).stdout.strip(),
-            self.ALIAS, "git applies pushInsteadOf when it resolves a push")
-
-    def test_no_remote_url_names_a_host_git_webkit_would_read_as_another_github(self):
-        tree = self.clone_snapshot(self.tmp / "push-hosts")
-        self.wire(tree)
-        rows = git_run("config", "--get-regexp", "remote.+url", cwd=tree).stdout.splitlines()
-        self.assertTrue(rows)
-        for row in rows:
-            url = row.split(" ", 1)[1]
-            if url.startswith("no-push://"):
-                continue
-            self.assertRegex(url, r"^(https://github\.com/|git@github\.com:)", row)
-
-    def test_a_checkout_carrying_the_alias_in_its_push_url_is_named_and_converged(self):
-        tree = self.clone_snapshot(self.tmp / "push-old")
-        self.wire(tree)
-        git_run("config", "remote.fork.pushurl", self.ALIAS, cwd=tree)
-        git_run("config", "--remove-section", f"url.{self.ALIAS}", cwd=tree)
-
-        out = self.check(tree)
-        self.assertNotEqual(out.returncode, 0, out.stdout)
-        self.assertIn(f"problem: fork records {self.ALIAS} as a push URL",
-                      out.stdout)
-
-        self.wire(tree)
-        out = self.check(tree)
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-
-
-class TestTheStaleRewritesTheWiringClearsFirst(MirrorFixture):
-    """The wiring rewrites URLs through `url.<base>.insteadOf`, so a mirror that moves leaves a section pointing
-    at a path that is gone."""
-
-    def test_local_rewrites_go_and_a_global_one_stays(self):
-        tree = self.clone_snapshot(self.tmp / "stale")
+    def test_fix_clears_stale_local_rewrites_and_keeps_a_global_one(self):
         gitconfig = self.tmp / "global-gitconfig"
-        gitconfig.write_text(
-            "[url \"/somewhere/else.git\"]\n\tinsteadOf = https://example.invalid/x.git\n")
-        env = dict(os.environ, GIT_CONFIG_GLOBAL=str(gitconfig))
-
+        gitconfig.write_text('[url "/somewhere/else.git"]\n\tinsteadOf = https://example.invalid/x.git\n')
+        self.w.git_env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
         for stale in ("/gone/one.git", "/gone/two.git"):
-            git_run("config", "--local", "--add", f"url.{stale}.insteadOf",
-                 "https://github.com/WebKit/WebKit.git", cwd=tree)
-        git_run("config", "--local", "url.git@old-alias:x/y.git.pushInsteadOf",
-             "git@github.com:x/y.git", cwd=tree)
-
-        script = git.wiring_script(str(tree), str(self.mirror), _forks(), ["main"])
-        run = subprocess.run(["sh", "-c", script], cwd=str(tree), env=env,
-                             capture_output=True, text=True)
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
-
-        local = subprocess.run(
-            ["git", "config", "--local", "--name-only", "--get-regexp", r"^url\."],
-            cwd=str(tree), env=env, capture_output=True, text=True).stdout
-        for gone in ("/gone/one.git", "/gone/two.git", "old-alias"):
-            self.assertNotIn(gone, local)
-        self.assertIn(str(self.mirror), local)
-        self.assertEqual(
-            subprocess.run(["git", "config", "--global", "--get",
-                            "url./somewhere/else.git.insteadOf"],
-                           cwd=str(tree), env=env, capture_output=True,
-                           text=True).stdout.strip(),
-            "https://example.invalid/x.git")
+            git_run("config", "--local", "--add", "url.%s.insteadOf" % stale, URLS[0], cwd=self.ws)
+        git_run("config", "--local", "url.git@old-alias:x/y.git.pushInsteadOf", "git@github.com:x/y.git", cwd=self.ws)
+        self.assertEqual(self.sync("ws", "--fix")[0], 0)
+        local = git_run("config", "--local", "--name-only", "--get-regexp", r"^url\.", cwd=self.ws).stdout
+        self.assertEqual([g for g in ("/gone/", "old-alias", self.w.mirror) if g in local], [self.w.mirror])
+        self.assertIn("/somewhere/else.git", gitconfig.read_text())
 
 
-class TestWhatFirstRunSaysAboutTheMirror(unittest.TestCase):
-    """container/firstrun.sh wires the checkout from `python3 -m wk.git wiring-script` and the mirror the place
+_FIRSTRUN = (REPO / "container" / "firstrun.sh").read_text()
+FIRSTRUN = _FIRSTRUN[_FIRSTRUN.index("_git_py() {"):_FIRSTRUN.index("    _setup=$(_git_py pr-tool-setup-script")] + "fi\n"
+HARNESS = "set -u\nSRC=%s\nWK_TOOLS=%s\nlog()  { printf '[firstrun] %%s\\n' \"$*\"; }\nwarn() { printf '[firstrun] warning: %%s\\n' \"$*\"; }\n"
+
+
+def firstrun(src, mirror="", git_py=None):
+    """container/firstrun.sh's wiring block, lifted from the file and run (the half below it is `git-webkit setup`): what it said."""
+    block = FIRSTRUN if git_py is None else FIRSTRUN.replace(FIRSTRUN.split("\n", 1)[0], "_git_py() { %s; }" % git_py)
+    cp = bash(HARNESS % (src, REPO) + block, env=dict(OFFLINE, WK_MIRROR=mirror, WK_MIRROR_BRANCHES="main"))
+    assert cp.returncode == 0, cp.stdout + cp.stderr
+    return cp.stdout + cp.stderr
+
+
+class TestWhatFirstRunWires(unittest.TestCase):
+    """container/firstrun.sh wires the checkout through `python3 -m wk.git wiring-script` with the mirror the place
     hands it in WK_MIRROR."""
 
-    # The wiring half of the block, taken from the file and run: the half below
-    # it is `git-webkit setup`, which needs the injector.
-    _FIRSTRUN = (REPO / "container" / "firstrun.sh").read_text()
-    BLOCK = _FIRSTRUN[_FIRSTRUN.index('if [ -d "$SRC/.git" ]'):
-                      _FIRSTRUN.index("    _setup=$(_git_py pr-tool-setup-script")]
-
-    HARNESS = """
-set -u
-SRC=%s
-log()  { printf '[firstrun] %%s\\n' "$*"; }
-warn() { printf '[firstrun] warning: %%s\\n' "$*"; }
-_git_py() { %s; }
-"""
-
-    def _run(self, wiring_body, mirror=""):
+    def stub(self, git_py, mirror=""):
         with scratch_dir(prefix="wk-firstrun-") as d:
             (d / ".git").mkdir()
-            cp = bash(self.HARNESS % (repr(str(d)), wiring_body)
-                      + self.BLOCK + "\nfi\n", env={"WK_MIRROR": mirror} if mirror else None)
-            self.assertEqual(0, cp.returncode, cp.stdout + cp.stderr)
-            return cp.stdout + cp.stderr
+            return firstrun(d, mirror, git_py)
 
     def test_a_wiring_that_failed_is_a_warning_that_names_it(self):
-        out = self._run("return 1")
+        out = self.stub("return 1")
         self.assertIn("wk.git wiring-script failed", out)
         self.assertIn("could not wire the checkout's remotes", out)
 
     def test_no_mirror_on_the_target_is_stated_and_is_not_a_warning(self):
-        out = self._run("printf 'true\\n'")
-        self.assertIn("no mirror on this place", out)
-        self.assertNotIn("warning", out)
-        self.assertIn("fetches read github.com", out)
+        out = self.stub("printf 'true\\n'")
+        self.assertEqual(("no mirror on this place" in out, "warning" in out, "fetches read github.com" in out), (True, False, True))
 
     def test_a_mirror_is_named_in_the_line_that_says_what_was_wired(self):
-        out = self._run("printf 'true\\n'", mirror="/mirror/WebKit.git")
-        self.assertIn("fetches read /mirror/WebKit.git", out)
-        self.assertNotIn("warning", out)
+        out = self.stub("printf 'true\\n'", mirror="/mirror/WebKit.git")
+        self.assertEqual(("fetches read /mirror/WebKit.git" in out, "warning" in out), (True, False))
+
+    def test_with_no_mirror_nothing_is_rewritten_and_origin_is_still_narrowed(self):
+        with scratch_dir(prefix="wk-firstrun-") as d:
+            m = GitMirror(d)
+            git_run("clone", "-q", str(m.mirror), "co", cwd=d)
+            firstrun(d / "co")
+            co = d / "co"
+            self.assertEqual((config(co, "--get-regexp", r"^url\..*\.insteadof$"), git_run("remote", "get-url", "--push", "fork", cwd=co).stdout.strip(),
+                              config(co, "--get-all", "remote.origin.fetch"), config(co, "--get-all", "remote.wpe.fetch"), config(co, "remote.wpe.tagOpt")),
+                             ("", ALIAS, "+refs/heads/main:refs/remotes/origin/main", "+refs/heads/*:refs/remotes/wpe/*", "--no-tags"))
+
+    def test_re_wiring_it_with_a_mirror_leaves_one_rewrite_per_remote(self):
+        with scratch_dir(prefix="wk-firstrun-") as d:
+            m = GitMirror(d)
+            git_run("clone", "-q", str(m.mirror), "co", cwd=d)
+            co = d / "co"
+            firstrun(co, "/gone/WebKit.git")
+            firstrun(co, str(m.mirror))
+            self.assertEqual((config(co, "--get-all", "url.%s.insteadOf" % m.mirror).split(), config(co, "--get-regexp", r"url\./gone/"),
+                              config(co, "--get-all", "remote.origin.fetch")), (URLS, "", "+refs/heads/main:refs/remotes/origin/main"))
 
 
-class StoreFixture(MirrorFixture):
-    """A $WK_STORE with published snapshots under base/<id>/, the way `wk sync` leaves them: the tree, the
-    `branch` it was published from, and the `sha` completion marker written last."""
+class Made(World):
+    """A host making container workspace `ws` from snapshots that are real clones of a real mirror: git in a snapshot,
+    and the probe and the fast-forward in `ws`'s checkout `co` (a copy of the snapshot it is made from, as its overlay
+    is), run for real; the `wk sync ws` the creation runs fetches `co` from the mirror, then does `meanwhile(co)`."""
 
-    def setUp(self):
-        super().setUp()
-        self.store = self.tmp / "store"
-        (self.store / "base").mkdir(parents=True)
+    def __init__(self, tmp, **kw):
+        self.up = None
+        super().__init__(tmp, **kw)
+        self.up = GitMirror(self.tmp)
+        self.co = self.tmp / "co"
+        self.publish("main-1")
+        self.meanwhile = lambda co: None
+        self.react([WK, "sync", "ws"], self.fetched)
+        self.effects = []
 
-    def publish(self, bid, detached=False, branch_file="origin/main"):
-        d = self.store / "base" / bid
-        d.mkdir()
-        tree = self.clone_snapshot(d / "WebKit")
-        self.wire(tree)
-        if detached:
-            git_run("checkout", "-q", "--detach", "origin/main", cwd=tree)
+    def fetched(self, argv, f):
+        r = real(["git", "-C", str(self.co), "fetch", "-q", "origin"])
+        self.meanwhile(self.co)
+        return r
+
+    def publish(self, bid, on_branch=True, branch="origin/main", tracks=True):
+        super().publish(bid)
+        if self.up is None:
+            return
+        tree = self.driver.store.snapshot_tree(bid)
+        shutil.rmtree(tree, True)
+        git_run("clone", "-q", str(self.up.mirror), tree, cwd=self.tmp)
+        if not on_branch:
+            git_run("checkout", "-q", "--detach", "HEAD", cwd=tree)
+        if not tracks:
+            git_run("branch", "--unset-upstream", cwd=tree)
+        d = os.path.dirname(tree)
+        self.files[os.path.join(d, "sha")] = git_run("rev-parse", "HEAD", cwd=tree).stdout
+        if branch:
+            self.files[os.path.join(d, "branch")] = branch + "\n"
         else:
-            assert self.checkout(tree) == ""
-        if branch_file is not None:
-            (d / "branch").write_text(branch_file + "\n")
-        (d / "sha").write_text(self.head(tree) + "\n")
-        return d
+            del self.files[os.path.join(d, "branch")]
 
-    def bases(self):
-        return Snapshots(Store({"WK_STORE": str(self.store)}), Local())
+    def _git(self, argv, f):
+        return real(argv)
 
+    def wkdev_create(self, argv, f):
+        lower = next(f for f in argv[argv.index("--additional-flags") + 1].split() if ":O,upperdir=" in f)
+        subprocess.run(["cp", "-a", lower.split(":")[0], str(self.co)], check=True)
+        return super().wkdev_create(argv, f)
 
-class TestBaseVerify(StoreFixture):
-    """Snapshots.verify, which `wk new` asks before overlaying a workspace on a snapshot and Snapshots.current asks
-    before offering one."""
-
-    def test_a_snapshot_on_its_branch_verifies(self):
-        self.publish("20260101T000000Z")
-        self.assertEqual(self.bases().verify("20260101T000000Z"), "", "nothing is said about a good one")
-
-    def test_a_detached_snapshot_is_refused_and_names_wk_sync(self):
-        self.publish("20260101T000000Z", detached=True)
-        why = self.bases().verify("20260101T000000Z")
-        self.assertIn("is not on branch main", why)
-        self.assertIn("wk sync", why)
-
-    def test_a_snapshot_that_records_no_branch_is_refused(self):
-        self.publish("20260101T000000Z", branch_file=None)
-        self.assertIn("does not record the branch", self.bases().verify("20260101T000000Z"))
-
-    def test_a_branch_that_tracks_nothing_is_refused(self):
-        d = self.publish("20260101T000000Z")
-        git_run("branch", "--unset-upstream", cwd=d / "WebKit")
-        self.assertIn("tracking origin/main", self.bases().verify("20260101T000000Z"))
-
-    def test_current_base_skips_one_it_would_refuse(self):
-        self.publish("20260101T000000Z")
-        self.publish("20260102T000000Z", detached=True)
-        self.assertEqual(self.bases().current(), "20260101T000000Z")
-
-    def test_a_store_of_only_detached_snapshots_offers_none(self):
-        self.publish("20260102T000000Z", detached=True)
-        self.assertEqual(self.bases().current(), "")
+    def _in_ws(self, argv, f):
+        if SRC in argv[2:] and (argv[2] == "git" or "wsbase=" in argv[4]):
+            return real([a.replace(SRC, str(self.co)) for a in argv[2:]])
+        return super()._in_ws(argv, f)
 
 
-class TestAHardLinkedSnapshotStaysClean(MirrorFixture):
-    """The publish hard-links the last snapshot, and link() moves the ctime of every file -- in that snapshot and
-    in every workspace overlaid on it."""
+class MadeFlow(Flow):
+    world_class = Made
 
-    def link_every_file(self, tree):
-        dest = self.tmp / "links"
-        dest.mkdir()
-        for i, f in enumerate(p for p in Path(tree).iterdir() if p.is_file()):
-            os.link(f, dest / str(i))
+    def made(self, *argv):
+        rc, err = self.detach(*argv)
+        return rc, said(err) if rc else err.splitlines()[-2]
 
-    def stat_dirty(self, tree, *config):
-        return git_run(*config, "diff-files", "--name-only", cwd=tree).stdout.split()
-
-    def test_linking_the_files_dirties_nothing_in_a_wired_checkout(self):
-        tree = self.clone_snapshot(self.tmp / "linked")
-        self.wire(tree)
-        git_run("update-index", "--refresh", "-q", cwd=tree, check=False)
-        time.sleep(1.1)   # git compares ctime to the second
-        self.link_every_file(tree)
-        self.assertEqual(self.stat_dirty(tree), [])
-        self.assertEqual(self.stat_dirty(tree, "-c", "core.trustctime=true"), ["a"],
-                         "the contrast: trusting ctime, the same link stat-dirties the file")
+    def head(self):
+        return git_run("rev-parse", "HEAD", cwd=self.w.co).stdout.strip()
 
 
-class TestNewCheckoutScript(WorkspaceFixture):
-    """`wk new`'s fast-forward and its report, run against the workspace checkout copied off the snapshot."""
+class TestTheSnapshotItIsMadeFrom(MadeFlow):
+    """A snapshot is verified before a workspace is overlaid on it, and the newest one that verifies is the one taken."""
 
-    def _run(self):
-        """workspace.report_checkout over this host's own checkout: what it said, and the probe after it."""
-        driver = types.SimpleNamespace(src=lambda ws: str(self.ws), exec=lambda ws, argv: Local().run(argv))
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            workspace.report_checkout(driver, "ws")
-        return err.getvalue(), git.probe(Local().run, str(self.ws))
+    def test_a_snapshot_off_its_branch_or_not_tracking_it_or_recording_none_is_refused_naming_wk_sync(self):
+        for bid, kw, line in (("main-2", dict(on_branch=False), "error: snapshot main-2 is not on branch main tracking origin/main (HEAD is"),
+                              ("main-3", dict(tracks=False), "error: snapshot main-3 is not on branch main tracking origin/main (HEAD is"),
+                              ("main-4", dict(branch=""), "error: snapshot main-4 does not record the branch it was published from,")):
+            self.w.publish(bid, **kw)
+            rc, err = self.detach("--base", bid)
+            self.assertEqual((rc, said(err), self.w.co.exists()), (1, line, False), bid)
+            self.assertIn("wk sync", err)
 
-    def test_a_snapshot_behind_the_mirror_is_fast_forwarded_onto_it(self):
-        sha2 = self.advance_upstream()
-        self.run_fetch()
-        said, got = self._run()
-        self.assertIn("'ws' is on main at %s, 1 commit(s) on from its snapshot (origin/main)" % got["head"], said)
-        self.assertEqual((got["branch"], got["tracks"], got["behind"]), ("main", "origin/main", "0"))
-        self.assertEqual(self.head(self.ws), sha2)
-        self.assertEqual(
-            git_run("status", "--porcelain", cwd=self.ws).stdout, "",
-            "the fast-forward left the tree dirty")
+    def test_the_newest_it_would_not_refuse_is_taken_and_none_is_offered_when_every_one_is_refused(self):
+        self.w.publish("main-2", on_branch=False)
+        self.assertEqual((self.detach()[0], self.w.files[os.path.join(self.w.ws_dir(), "base-id")]), (0, "main-1\n"))
+        w = self.make_world()
+        w.publish("main-1", on_branch=False)
+        self.assertEqual(said(self.detach(w=w)[1]), "error: no snapshot this machine can build a workspace from:  wk sync")
 
-    def test_a_current_checkout_moves_nothing_and_says_so(self):
-        said, got = self._run()
-        self.assertIn("up to date with origin/main", said)
-        self.assertEqual(self.head(self.ws), self.sha1)
 
-    def test_the_index_is_refreshed_before_the_person_runs_git_status(self):
-        self.assertNotEqual(git_run("diff-files", "--name-only", cwd=self.ws).stdout, "")
-        self._run()
-        self.assertEqual(git_run("diff-files", "--name-only", cwd=self.ws).stdout, "")
+class TestTheCheckoutItReports(MadeFlow):
+    """`wk new`'s last word: the checkout fast-forwarded onto what its branch tracks, and where it is."""
 
-    def test_a_detached_checkout_reports_the_sha_and_nothing_else(self):
-        git_run("checkout", "-q", "--detach", "HEAD", cwd=self.ws)
-        said, got = self._run()
-        self.assertIn("is not on a branch (detached at %s)" % got["head"], said)
-        self.assertEqual(got["branch"], "")
+    def test_a_snapshot_behind_the_mirror_is_fast_forwarded_onto_it_and_left_clean(self):
+        sha2 = self.w.up.advance()
+        rc, line = self.made()
+        self.assertEqual((rc, line, self.head()), (0, "==> 'ws' is on main at %s, 1 commit(s) on from its snapshot (origin/main)" % sha2[:7], sha2))
+        self.assertEqual(git_run("status", "--porcelain", cwd=self.w.co).stdout, "")
 
-    def test_a_branch_with_no_upstream_stops_there(self):
-        git_run("checkout", "-q", "-b", "eng/local", cwd=self.ws)
-        said, got = self._run()
-        self.assertIn("'ws' is on 'eng/local', which tracks nothing", said)
-        self.assertEqual((got["tracks"], got["upstream"]), ("", "origin/main"))
+    def test_a_current_one_moves_nothing_and_its_index_is_refreshed(self):
+        rc, line = self.made()
+        self.assertEqual((rc, line, self.head()), (0, "==> 'ws' is on main at %s, up to date with origin/main" % self.w.up.sha1[:7], self.w.up.sha1))
+        self.assertEqual(git_run("diff-files", "--name-only", cwd=self.w.co).stdout, "", "git status in there would re-read every file")
+
+    def test_one_detached_or_on_a_branch_tracking_nothing_is_named(self):
+        for change, line in ((("checkout", "-q", "--detach"), "warning: 'ws' is not on a branch (detached at %s), so 'git status',"),
+                             (("checkout", "-q", "-b", "eng/local"), "warning: 'ws' is on 'eng/local', which tracks nothing -- 'git pull' and")):
+            w = self.make_world()
+            w.meanwhile = lambda co: git_run(*change, cwd=co)
+            rc, err = self.detach(w=w)
+            self.assertEqual((rc, line.replace("%s", w.up.sha1[:7]) in err.splitlines()), (0, True), change)
 
     def test_a_diverged_branch_is_left_where_it_is(self):
-        self.advance_upstream()
-        self.run_fetch()
-        mine = git_commit(self.ws, "mine")
-        said, _ = self._run()
-        self.assertIn("have diverged, so the checkout is left where", said)
-        self.assertEqual(self.head(self.ws), mine)
+        self.w.up.advance()
+        self.w.meanwhile = lambda co: git_commit(co, "mine")
+        rc, err = self.detach()
+        self.assertIn("warning: 'main' in 'ws' and origin/main have diverged, so the checkout is left where", err.splitlines())
+        self.assertEqual(git_run("log", "-1", "--format=%s", cwd=self.w.co).stdout.strip(), "mine")
+
+
+class TestNoMirror(unittest.TestCase):
+    """Not reachable from the CLI: every place's driver names a mirror (only the abstract Driver names none), so no
+    command line checks a checkout against none; a checkout firstrun.sh wired with no mirror passes the check made for it."""
+
+    def test_a_checkout_with_no_mirror_is_checked_against_the_upstreams(self):
+        import sys
+        sys.path.insert(0, str(REPO / "lib"))
+        from tests.fakes import Fake
+        from wk import git, places, secrets
+        self.assertEqual(places.Driver("demo", str(REPO), {}, Fake("here")).mirror_dir(), "")
+        with scratch_dir(prefix="wk-no-mirror-") as d:
+            m = GitMirror(d)
+            git_run("clone", "-q", str(m.mirror), "co", cwd=d)
+            firstrun(d / "co")
+            cp = real(["sh", "-c", git.wiring_check_script(str(d / "co"), "", list(secrets.forks()), ["main"])])
+            self.assertEqual(cp.rc, 0, cp.out + cp.err)
 
 
 if __name__ == "__main__":
