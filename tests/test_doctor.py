@@ -212,7 +212,7 @@ FAULTS = (
     (dropped("base"), "-- snapshot -> wk sync"),
     (dropped("pi-hosts"), "-- pi-hosts populated -> wk machine setup rpi5 / rpi4  (skip if no Pi devices)"),
     (lambda w: w.sockets.clear(), "-- fleet-request broker reachable from workspaces -> ./setup --stage broker  (macOS: it also publishes the socket into the VM)"),
-    (lambda w: w.tags.append("2.53-v12-c"), "-- SDK image 2.53-v11-b is behind upstream's 2.53-v12-c -> WK_SDK_IMAGE=%s:2.53-v12-c wk new ..." % SDK),
+    (lambda w: w.tags.append("2.53-v12-c"), "-- SDK image 2.53-v11-b is behind upstream's 2.53-v12-c -> a newer SDK_PIN (lib/wk/project.json): the fork's wk branch on upstream's 2.53-v12-c"),
     (lambda w: w.mtimes.update({str(REPO / UNITS["wk-push.service"]): 3.0}), "-- push service running -> ./setup   (restarts it on the program in the tree now)"),
     (lambda w: w.executable.discard(BOOT), "-- wk-boot-priv (wk boot (arming the firmware, restarting a machine)) -> " + QUIESCE),
     (lambda w: setattr(w, "listing", w.listing.replace(BOOT, BOOT + "-old")),
