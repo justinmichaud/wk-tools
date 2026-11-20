@@ -5,11 +5,10 @@ what a plain run may: what loses no work -- unreferenced snapshots, abandoned pa
 skills no container mounts, tart's image cache down to its budget, dangling images, a killed selftest's workspaces.
 The rest is named with the flag or command that takes it. 'wk doctor' shows the same rows.
 """
-from wk import gc, images, places
+from wk import gc
 from wk.act import die
 from wk.decl import Command, Opt
 
-ROOT = images.root()
 PURGES = ("--purge-mirror", "--purge-builds", "--purge-rubble", "--purge-images")
 COMMAND = Command(where="host", destructive=True, group="sources", opts=(
     Opt("--purge-mirror", "the mirror and every snapshot ('wk sync' refetches); refused while a workspace or guest exists"),
@@ -22,7 +21,7 @@ COMMAND = Command(where="host", destructive=True, group="sources", opts=(
 
 def main(args, inv):
     flags = tuple(f for f in PURGES if args.flag(f))
-    g = gc.Gc(ROOT, places.Registry(ROOT))
+    g = gc.Gc(inv.root, inv.reg)
     if args.flag("--rows"):
         if flags:
             die("--rows prints what 'wk gc' would take, and takes no --purge flag")

@@ -13,19 +13,18 @@ that machine's own `wk`, asked from here.
 """
 import os
 
-from wk import images, places, record, sshalias, store, workspace
+from wk import record, sshalias, store, workspace
 from wk.act import Refused, die
 from wk.decl import Command, Opt
 from wk.machine import Local
 
-ROOT = images.root()
 COMMAND = Command(name="required", takes=("[<name>...]",), lifecycle=True, forward=False, destructive=True,
                   group="workspaces", opts=(
                       Opt("--all", "every workspace on every place and machine", sets=dict(where="host", name="none", takes=())),))
 
 
 def main(args, inv):
-    reg = places.Registry(ROOT)
+    reg = inv.reg
     records = record.Records(machine=reg.machine)
     try:
         if args.flag("--all"):

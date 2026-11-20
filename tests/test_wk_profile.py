@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from tests.fakes import FakeRegistry, WsDriver
-from tests.support import REPO, as_dispatched, load_cmd
+from tests.support import REPO, as_dispatched, invocation, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import ldpath, profile  # noqa: E402
@@ -233,7 +233,7 @@ class TestRunAndTestHandItOver(ProfileTest):
     def test_both_commands_reach_the_one_profiler(self):
         for cmd in ("run", "test"):
             with self.subTest(cmd=cmd), mock.patch.object(profile, "main", return_value=0) as main:
-                load_cmd(cmd).main(as_dispatched(cmd, ["--profile=samply", "--", "x.js"], os.environ), None)
+                load_cmd(cmd).main(as_dispatched(cmd, ["--profile=samply", "--", "x.js"], os.environ), invocation())
                 args, which = main.call_args[0][:2]
                 self.assertEqual((which, args.value("--profile"), args.tail), (cmd, "samply", ["x.js"]))
 
@@ -243,7 +243,7 @@ class TestRunAndTestHandItOver(ProfileTest):
                                 ("test", ["--profile=bytecode", "--layout"], "--profile runs on its own; drop --layout")):
             with self.subTest(cmd=cmd, argv=argv), self.assertRaises(Refused), \
                     contextlib.redirect_stderr(io.StringIO()) as err:
-                load_cmd(cmd).main(as_dispatched(cmd, argv, os.environ), None)
+                load_cmd(cmd).main(as_dispatched(cmd, argv, os.environ), invocation())
             self.assertIn(said, err.getvalue())
 
 

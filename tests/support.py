@@ -18,6 +18,7 @@ import string
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -200,12 +201,10 @@ def as_dispatched(cmd, argv, env=None):
     return args
 
 
-def command_argv(name, *words):
-    """argv that runs cmd/<name>'s function on `words` with its workspace already resolved (WK_NAME), as the dispatcher calls it."""
-    code = ("import sys; sys.path.insert(0, sys.argv[1]); from wk import act, decl; m = decl.load(sys.argv[2], sys.argv[3])\n"
-            "try:\n    sys.exit(m.main(decl.parse(sys.argv[3], m.COMMAND, sys.argv[4:], True)[1], None) or 0)\n"
-            "except act.Refused as e:\n    sys.exit(e.status)\n")
-    return [sys.executable, "-c", code, str(REPO / "lib"), str(REPO), name, *words]
+def invocation(reg=None, clock=None):
+    """The dispatcher's Invocation as a command's main reads it: this tree's root, a registry and a clock."""
+    from wk import clock as wk_clock, places
+    return types.SimpleNamespace(root=str(REPO), reg=reg or places.Registry(REPO), clock=clock or wk_clock.Clock())
 
 
 def run_here(*args, env=None, **kw):
@@ -310,7 +309,6 @@ def guest_step(env, step, ws="demo", secrets=None):
     clean environment is the whole of os.environ, so stubs first on its PATH stand in for tart. `secrets` patches
     Secrets methods (`{"bugzilla_user": fn}`). A CompletedProcess's returncode and stderr."""
     import io
-    import types
     from unittest import mock
     sys.path.insert(0, str(REPO / "lib"))
     from wk import act, guest, places

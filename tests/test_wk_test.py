@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes import FakeProc, FlowTest, JobWorld
-from tests.support import REPO, as_dispatched, load_cmd
+from tests.support import REPO, as_dispatched, invocation, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import job, record, testcmd  # noqa: E402
@@ -42,7 +42,7 @@ class TestTest(FlowTest):
         w = w or self.w
         os.environ["WK_NAME"] = "ws"
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = CMD.main(as_dispatched("test", argv, os.environ), None, w.reg, w.clock)
+            rc = CMD.main(as_dispatched("test", argv, os.environ), invocation(w.reg, w.clock))
         return rc, err.getvalue()
 
     def refused(self, w=None, *argv, status=None):
@@ -50,7 +50,7 @@ class TestTest(FlowTest):
         os.environ["WK_NAME"] = "ws"
         with self.assertRaises(Refused) as cm:
             with contextlib.redirect_stderr(io.StringIO()) as err:
-                CMD.main(as_dispatched("test", argv, os.environ), None, w.reg, w.clock)
+                CMD.main(as_dispatched("test", argv, os.environ), invocation(w.reg, w.clock))
         if status is not None:
             self.assertEqual(cm.exception.status, status, err.getvalue())
         return err.getvalue()

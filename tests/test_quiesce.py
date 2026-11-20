@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from tests.support import REPO, WkTest, as_dispatched, bash, func_body, load_cmd, requires_machine
+from tests.support import REPO, WkTest, as_dispatched, bash, func_body, invocation, load_cmd, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import decl, fleet, quiet  # noqa: E402
@@ -319,8 +319,8 @@ class TestTheCommand(QuiesceTest):
     def test_bare_is_status_and_anything_else_is_refused(self):
         m = load_cmd("quiesce")
         with mock.patch.object(m.quiet, "Quiesce") as q, mock.patch.object(m.act, "terminate_as_interrupt"):
-            m.main(as_dispatched("quiesce", []), None)
-            m.main(as_dispatched("quiesce", ["on"]), None)
+            m.main(as_dispatched("quiesce", []), invocation())
+            m.main(as_dispatched("quiesce", ["on"]), invocation())
         self.assertEqual(["status", "on"], [c[0] for c in q.return_value.method_calls])
         for bad, said in ((["up"], "unknown verb: up"), (["on", "off"], "unexpected argument: off")):
             with self.subTest(argv=bad), self.assertRaises(decl.Usage) as e:

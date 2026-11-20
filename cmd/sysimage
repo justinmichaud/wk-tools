@@ -34,10 +34,8 @@ image workspace there (e.g. <builder>-<image-preset>-<arm>).
 """
 import sys
 
-from wk import images, places
-from wk.clock import Clock
+from wk import images
 from wk.decl import Command, Opt
-from wk.machine import Local
 from wk.sysimage import cli
 
 SPEC = ("<image-preset>",)
@@ -79,11 +77,10 @@ COMMAND = Command(where="host", outside=True, values="presets", group="hosts", s
 
 
 def main(args, inv):
-    reg = places.Registry(images.root(), machine=Local())
     verb, spec = args.positionals[0], (args.positionals[1:] or [""])[0]
-    s = cli.Sysimage(reg, Clock())
+    s = cli.Sysimage(inv.reg, inv.clock)
     if verb == "presets":
-        sys.stdout.write(images.listing(reg.env))
+        sys.stdout.write(images.listing(inv.reg.env))
         return 0
     if verb in ("ls", "list"):
         return s.ls(args.flag("--continued"))

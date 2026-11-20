@@ -8,37 +8,36 @@ A shell here is yours: it pushes and commits, and an agent session started in it
 import os
 import sys
 
-from wk import images, places, session, store
+from wk import places, session, store
 from wk.act import die, log, warn
 from wk.decl import Command, Opt
 from wk.machine import is_linux
 
-ROOT = images.root()
 COMMAND = Command(name="required", ready=True, tail="rest", group="workspaces", opts=(
     Opt("--zed", "open the workspace in Zed instead of a shell"),
     Opt("--own", "run the command as wk's own run, not a shell of yours: nothing it starts can publish")))
 
 
-def session_display_warning(env):
+def session_display_warning(root, env):
     if not places.session_socket_present(env):
         warn("no benchmark session running; GPU-accelerated tests fall back to software rendering")
         log("  start one with:  wk quiesce session on")
     else:
-        session.here(ROOT, env).mode_warn()
+        session.here(root, env).mode_warn()
 
 
 def main(args, inv):
     name, cmd = store.ws_name(), args.tail
     if args.flag("--own") and not cmd:
         die("--own takes a command: a shell is always your own")
-    reg = places.Registry(ROOT)
+    reg = inv.reg
     if args.flag("--zed"):
-        return reg.machine.exec([os.path.join(ROOT, "wk"), "zed", name])
+        return reg.machine.exec([os.path.join(inv.root, "wk"), "zed", name])
     driver = reg.present(name)
     if cmd:
         argv, cwd = driver.exec_argv(name, cmd, tty=sys.stdin.isatty() and sys.stdout.isatty(), person=not args.flag("--own"))
         return reg.machine.exec(argv, cwd)
     if is_linux():
-        session_display_warning(os.environ)
+        session_display_warning(inv.root, os.environ)
     argv, cwd = driver.enter_argv(name)
     return reg.machine.exec(argv, cwd)

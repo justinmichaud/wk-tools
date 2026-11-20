@@ -13,7 +13,7 @@ import unittest
 from unittest import mock
 
 from tests.fakes import FakeRegistry, WsDriver
-from tests.support import REPO, as_dispatched, load_cmd
+from tests.support import REPO, as_dispatched, invocation, load_cmd
 from tests.test_doctor_wall import _Wall
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -95,7 +95,7 @@ class _Flow(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             try:
-                status = CMD.main(as_dispatched("ai", list(argv)), None, env=self.env, reg=self.reg)
+                status = CMD.main(as_dispatched("ai", list(argv)), invocation(self.reg))
             except Refused as e:
                 status = e.status
         os.environ.pop("WK_FORCE", None)

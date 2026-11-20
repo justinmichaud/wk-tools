@@ -9,13 +9,11 @@ Inside a workspace it is asked of the host through the request broker.
 """
 import os
 
-from wk import act, images, record
+from wk import act, record
 from wk.act import Refused, die
 from wk.boot import cli, eeprom, pi
 from wk.decl import Command, Opt
-from wk.places import Registry
 
-ROOT = images.root()
 ACTIONS = ("--status", "--diag", "--keep", "--back", "--disarm", "--boot-order")
 COMMAND = Command(where="host", takes=("<machine>",), broker=True, values="--list", group="hosts", opts=(
     Opt("--status", "what mode it is in, and why", sets=dict(readonly=True)),
@@ -31,27 +29,27 @@ COMMAND = Command(where="host", takes=("<machine>",), broker=True, values="--lis
 
 def main(args, inv):
     if args.flag("--list"):
-        print(cli.listing(ROOT, os.environ))
+        print(cli.listing(inv.root, os.environ))
         return 0
     chosen = [a for a in ACTIONS if args.flag(a) or args.value(a) is not None]
     if len(chosen) > 1:
         inv.usage_die("one of %s at a time" % ", ".join(chosen))
     action = chosen[0][2:] if chosen else "arm"
     name = args.positionals[0]
-    if Registry(ROOT).in_workspace():
-        return cli.broker(ROOT, name, action, args.value("--system") or "", os.environ)
-    conf = cli.load_conf(ROOT, name, os.environ)
+    if inv.reg.in_workspace():
+        return cli.broker(inv.root, name, action, args.value("--system") or "", os.environ)
+    conf = cli.load_conf(inv.root, name, os.environ)
     if conf is None:
         die("unknown machine '%s' (wk boot --list)" % name)
     act.terminate_as_interrupt()
     held = None
     if action in ("arm", "back"):   # the two that move the board out from under whatever is measuring on it
         records = record.Records(env=os.environ)
-        held = record.hold(records, lambda r: record.fleet_holders(r, record.fleet_stores(ROOT, os.environ, records.machine)),
+        held = record.hold(records, lambda r: record.fleet_holders(r, record.fleet_stores(inv.root, os.environ, records.machine)),
                            name, "boot", name, "kill %d" % os.getpid(), "", ["%s %s" % (action, name)], os.getpid(), os.environ)
     rc = 1
     try:
-        boot = cli.Boot(ROOT, conf, cli.driver_for(ROOT, conf))
+        boot = cli.Boot(inv.root, conf, cli.driver_for(inv.root, conf))
         boot.gate()
         if action == "boot-order":
             if conf["driver"] not in pi.DRIVERS:

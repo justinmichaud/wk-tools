@@ -66,7 +66,7 @@ class Invocation:
     """One command line: its module, the table its verbs and options make, its Args, and the words a far wk is handed."""
 
     def __init__(self, cmd, words):
-        self.cmd, self.words, self.place = cmd, list(words), ""
+        self.cmd, self.words, self.place, self.root, self.clock = cmd, list(words), "", str(ROOT), clock.Clock()
         self.module = decl.load(ROOT, cmd)
         self.table = self.module.COMMAND
         rest = [w for w in self.words if w not in decl.HELP]
@@ -82,6 +82,10 @@ class Invocation:
             explain(cmd, self.module, "  this command line is refused, as above\n" if rest else "")
         if self.args.help:
             explain(cmd, self.module, self.preview() if rest else "")
+
+    @property
+    def reg(self):
+        return registry()
 
     def refused(self, why, line=""):
         if why.startswith("unexpected argument") and in_workspace():

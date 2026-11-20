@@ -8,7 +8,7 @@ import sys
 import types
 import unittest
 
-from tests.support import REPO, WkTest, as_dispatched, load_cmd, scratch_dir
+from tests.support import REPO, WkTest, as_dispatched, invocation, load_cmd, scratch_dir
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.act import Refused  # noqa: E402
@@ -350,7 +350,7 @@ class TestTheCommand(WkTest):
 def wk(cmd, *argv):
     """`wk <cmd> <argv>` run in this process through the command's table, as the dispatcher runs it."""
     from tests.test_bench_report import in_process
-    return in_process(lambda: load_cmd(cmd).main(as_dispatched(cmd, list(argv)), None))
+    return in_process(lambda: load_cmd(cmd).main(as_dispatched(cmd, list(argv)), invocation()))
 
 
 class TestThroughTheCLI(WkTest):

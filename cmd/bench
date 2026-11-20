@@ -44,13 +44,10 @@ port runs MiniBrowser, a JSCOnly port the jsc shell.
   WK_BENCH_MAX_LOAD=<n>                  1-minute load above which preflight calls it busy (4)
   WK_STALL_SECONDS=<s>, WK_ABORT_SECONDS=<s>   silence before a warning (900) and before the run is given up on (5400)
 """
-from wk import images, places, store
+from wk import store
 from wk.bench import cli
-from wk.clock import Clock
 from wk.decl import Command, Opt
-from wk.machine import Local
 
-ROOT = images.root()
 PRESET = Opt("--preset", "the build preset", value="<preset>")
 COUNT, TIMEOUT = Opt("--count", "iterations per run", value="<n>"), Opt("--timeout", "seconds one iteration may take", value="<s>")
 TASK = Opt("--task", "record into an existing task (run: restart a one-run task, only if its run is not ok yet)", value="<task>")
@@ -129,13 +126,12 @@ def report_args(args):
 
 
 def run(args, reg, clock):
-    return cli.run(ROOT, reg, words(args), cli.options(args, preset=store.build_preset()), args.flag("--kill"), clock)
+    return cli.run(reg.root, reg, words(args), cli.options(args, preset=store.build_preset()), args.flag("--kill"), clock)
 
 
 def main(args, inv):
-    reg = places.Registry(ROOT, machine=Local())
     verb, word = args.positionals[0], (args.positionals[1:] or [""])[0]
-    bench = cli.Bench(ROOT, reg, Clock())
+    bench = cli.Bench(inv.root, inv.reg, inv.clock)
     if verb == "ls":
         return bench.ls(args.flag("--continued"))
     if verb in ("report", "compare"):
@@ -148,7 +144,7 @@ def main(args, inv):
     if verb == "seed":
         return bench.seed(store.ws_name() or args.name, word, bool(store.ws_name()))
     if verb == "run":
-        return run(args, reg, Clock())
+        return run(args, inv.reg, inv.clock)
     if verb in ("deploy", "ab"):
         opts = cli.options(args, plans=args.values("--plan"), preset=store.build_preset())
         return bench.deploy(store.ws_name(), word, opts) if verb == "deploy" else bench.ab(word, opts, args.flag("--kill"))

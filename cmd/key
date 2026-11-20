@@ -36,15 +36,10 @@ For another workstation or `wk status` to call:
 when stored and when reported: one that cannot do its job is refused, one that reaches further is kept with that reach
 named, one no network could judge is kept as unverified.
 """
-import os
-
-from wk import images, sudo
+from wk import sudo
 from wk.decl import Command, Opt
 from wk.key import cli
-from wk.machine import Local
-from wk.places import Registry
 
-ROOT = images.root()
 ROTATE = Opt("--rotate", "turn every credential over instead of reusing the ones that work")
 COMMAND = Command(where="host", needs=("gh", "gh-auth"), default="check", group="sources", subs={
     "check": dict(readonly=True), "setup": dict(destructive=True, opts=(ROTATE,)),
@@ -62,10 +57,9 @@ COMMAND = Command(where="host", needs=("gh", "gh-auth"), default="check", group=
 })
 
 
-def main(args, inv, env=None, reg=None):
+def main(args, inv):
     verb, words = args.positionals[0], args.positionals[1:]
     if verb == "sudo":
-        return sudo.main(words, args.value("--on"), args.flag("--all"),
-                         reg or Registry(ROOT, os.environ if env is None else env, Local()), env=env)
-    return cli.main(ROOT, verb, words[0] if words else "", rotate=args.flag("--rotate"),
+        return sudo.main(words, args.value("--on"), args.flag("--all"), inv.reg, env=inv.reg.env)
+    return cli.main(inv.root, verb, words[0] if words else "", rotate=args.flag("--rotate"),
                     replace=args.flag("--replace"), paste=args.flag("--paste"))

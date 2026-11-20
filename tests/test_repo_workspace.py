@@ -246,7 +246,7 @@ class TestReaders(WorkspaceTest):
         from tests.support import load_cmd
         self.w.make(base=False)
         self.w.mark()
-        self.assertEqual(TOOLS, load_cmd("ls").base_of(self.w.driver, "ws"))
+        self.assertEqual(TOOLS, load_cmd("ls").base_of(str(REPO), self.w.driver, "ws"))
 
 
 class TestStatus(WorkspaceTest):

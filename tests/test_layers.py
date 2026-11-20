@@ -2,7 +2,6 @@
 import os
 import subprocess
 import sys
-import tempfile
 import unittest
 from unittest import mock
 
@@ -20,8 +19,7 @@ class TestZedStripsTheDispatchersVariables(unittest.TestCase):
     def test_without_reading_common_sh(self):
         zed = load_cmd("zed")
         seen = {}
-        with tempfile.TemporaryDirectory() as empty, mock.patch.object(zed, "ROOT", empty), \
-                mock.patch.object(zed.Local, "exec", lambda self, argv, env: seen.update(env=env)), \
+        with mock.patch.object(zed.Local, "exec", lambda self, argv, env: seen.update(env=env)), \
                 mock.patch.dict(os.environ, {"WK_NAME": "a", "WK_PRESET": "Debug", "KEEP": "1"}):
             zed.exec_clean(["zed", "url"])
         self.assertNotIn("WK_NAME", seen["env"])

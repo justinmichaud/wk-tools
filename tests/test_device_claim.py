@@ -10,7 +10,7 @@ from unittest import mock
 
 from tests.fakes import FakeDriver
 from tests.fakes import FlowTest
-from tests.support import REPO, as_dispatched, load_cmd
+from tests.support import REPO, as_dispatched, invocation, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import act, record  # noqa: E402
@@ -41,7 +41,7 @@ class ClaimTest(FlowTest):
         out = io.StringIO()
         with mock.patch.dict(os.environ, self.env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
             try:
-                rc = load_cmd(cmd).main(as_dispatched(cmd, list(argv), os.environ), None)
+                rc = load_cmd(cmd).main(as_dispatched(cmd, list(argv), os.environ), invocation())
             except act.Refused as e:
                 rc = e.status
         return rc or 0, out.getvalue()

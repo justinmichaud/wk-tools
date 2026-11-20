@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from tests.fakes import Fake, FakeClock, FakeDriver, FakeRegistry
-from tests.support import BLIND_FLEET, REPO, WkTest, as_dispatched, clean_env, fake_workspace, load_cmd, requires_container_place, run
+from tests.support import BLIND_FLEET, REPO, WkTest, as_dispatched, clean_env, fake_workspace, invocation, load_cmd, requires_container_place, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import dispatch, fleet, git, places, record, status, statusview  # noqa: E402
@@ -89,8 +89,8 @@ class TestWait(unittest.TestCase):
                 return iter(())
         with mock.patch.object(cmd, "Walk", FlakyWalk), mock.patch.object(cmd, "wait", return_value=0), \
                 mock.patch.dict(os.environ, {"WK_NAME": "ws"}), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(0, cmd.main(as_dispatched("status", ["--wait", "--records"]), None))
-            self.assertEqual(4, cmd.main(as_dispatched("status", ["--records"]), None))
+            self.assertEqual(0, cmd.main(as_dispatched("status", ["--wait", "--records"]), invocation()))
+            self.assertEqual(4, cmd.main(as_dispatched("status", ["--records"]), invocation()))
 
 
 class TaskTest(WkTest):
@@ -220,7 +220,7 @@ def status_cmd(env, *argv):
     out = io.StringIO()
     with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
         try:
-            rc = CMD.main(as_dispatched("status", list(argv)), None)
+            rc = CMD.main(as_dispatched("status", list(argv)), invocation())
         except Refused as e:
             rc = e.status
     return rc, out.getvalue()

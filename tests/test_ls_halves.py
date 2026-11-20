@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 from tests.fakes import FakeDriver, FakeRegistry
-from tests.support import REPO, as_dispatched, fake_workspace, load_cmd
+from tests.support import REPO, as_dispatched, fake_workspace, invocation, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from tests.fakes import Fake  # noqa: E402
@@ -22,9 +22,8 @@ class TestOneTable(unittest.TestCase):
         by_name = {d.name: d for d in drivers}
         reg = FakeRegistry({}, Fake(), lambda name, env: by_name[name], names=list(by_name))
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(ls.places, "Registry", lambda root: reg), \
-                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            ls.main(as_dispatched("ls", argv), None)
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            ls.main(as_dispatched("ls", argv), invocation(reg))
         return out.getvalue(), err.getvalue()
 
     def test_every_answering_place_s_rows_are_merged_and_a_silent_one_named(self):
@@ -49,7 +48,7 @@ class TestInsideAWorkspace(unittest.TestCase):
     def listed(self, ws, *argv):
         out = io.StringIO()
         with mock.patch.dict(os.environ, ws.env()), contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            ls.main(as_dispatched("ls", list(argv)), None)
+            ls.main(as_dispatched("ls", list(argv)), invocation())
         return out.getvalue()
 
     def test_base_and_changes_are_not_applicable(self):

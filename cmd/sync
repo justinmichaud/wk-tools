@@ -27,13 +27,11 @@ workspace, and so is one in the snapshot every new workspace starts from.
   0  everything in scope was brought up to date and is wired right
   1  something did not take, did not fetch, or is wired wrong (above)
 """
-from wk import images, places, store, sync, workspace
+from wk import store, sync, workspace
 from wk.act import die
-from wk.clock import Clock
 from wk.decl import Command, Opt
 from wk.lock import Lock
 
-ROOT = images.root()
 USAGE = "usage: wk sync [<workspace>|--mirror|--on <place|machine>|--all|--tools [<place|machine>]] [--fix]"
 COMMAND = Command(where=lambda args, reg: sync.where(reg.in_workspace(), args), name="optional", needs=("git",),
                   group="sources", opts=(
@@ -76,7 +74,6 @@ def parse(args, name=""):
 
 
 def main(args, inv):
-    reg = places.Registry(ROOT)
+    reg, clock = inv.reg, inv.clock
     scope, name, place, fix = parse(args, store.ws_name())
-    clock = Clock()
     return sync.Sync(reg, clock, Lock(reg.store, reg.machine, clock), scope, name, place, fix).run()

@@ -17,21 +17,20 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 
-from wk import fleet, images, places, record
+from wk import fleet, places, record
 from wk.act import die, log, warn
 from wk.decl import Command, Opt
 from wk.machine import Local
 
-ROOT = images.root()
 COMMAND = Command(forward=False, readonly=True, group="workspaces", opts=(
     Opt("--json", "one JSON document ({\"workspaces\": [...]}), the table's columns lower-cased; nothing else on stdout"),))
 FORMAT = "%-20s %-18s %-10s %-8s %-8s %8s"
 NOT_APPLICABLE = "n/a"
 FIELDS = ("name", "place", "state", "base", "arch", "changes")
 
-def base_of(driver, ws):
+def base_of(root, driver, ws):
     repo = driver.repo(ws)
-    return places.image_base(ROOT, ws) or (repo.name if not repo.snapshot else None) or places.git_base(driver, ws) or "?"
+    return places.image_base(root, ws) or (repo.name if not repo.snapshot else None) or places.git_base(driver, ws) or "?"
 
 
 def col(label, place):
@@ -43,21 +42,21 @@ def changes_of(driver, ws):
     return r.out.split("\t")[0].strip() if r.ok and r.out.strip() else "-"
 
 
-def row(driver, ws, label):
+def row(root, driver, ws, label):
     state = driver.display_state(ws)
     inside = driver.kind == "local"
-    base = NOT_APPLICABLE if inside else base_of(driver, ws)
+    base = NOT_APPLICABLE if inside else base_of(root, driver, ws)
     size = NOT_APPLICABLE if inside else changes_of(driver, ws)
     arch = driver.arch(ws)
     return dict(zip(FIELDS, (ws, col(label, driver.name), state, base, arch, size)))
 
 
-def rows_of(answer, label):
+def rows_of(root, answer, label):
     """A place with no wk of its own is read from here; any other answers for itself."""
     if answer.side in ("none", "no-wk"):
         driver = answer.driver
         with ThreadPoolExecutor(max_workers=8) as pool:
-            return list(pool.map(lambda ws: row(driver, ws, label), driver.workspaces()))
+            return list(pool.map(lambda ws: row(root, driver, ws, label), driver.workspaces()))
     if answer.side == "unknown":
         die(answer.why)
     if answer.why or answer.rc:
@@ -73,9 +72,9 @@ def rows_of(answer, label):
 def main(args, inv):
     as_json = args.flag("--json")
     label = record.row_label(os.environ)
-    reg = places.Registry(ROOT)
+    reg = inv.reg
     answers = fleet.each(reg, ["ls", "--json"])
-    rows = [r for a in answers for r in rows_of(a, label)]
+    rows = [r for a in answers for r in rows_of(inv.root, a, label)]
     if as_json:
         print(json.dumps({"workspaces": rows}))
         return 0

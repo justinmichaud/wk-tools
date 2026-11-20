@@ -12,7 +12,7 @@ from unittest import mock
 
 from tests import fakes
 from tests.fakes import FakeRegistry
-from tests.support import REPO, WkTest, as_dispatched, bash, clean_env, load_cmd
+from tests.support import REPO, WkTest, as_dispatched, bash, clean_env, invocation, load_cmd
 from tests.test_push_service import Proc
 
 sys.path.insert(0, str(REPO / "lib"))
@@ -790,7 +790,7 @@ class TestTheCommand(WkTest):
     def test_it_answers_where_it_runs(self):
         for words, env, want in ((["demo", "--gpu"], {}, "workspace"), (["--all"], {}, "local"), (["pi"], self.machines(), "local")):
             args = decl.parse("doctor", DOCTOR_CMD.COMMAND, words)[1]
-            self.assertEqual(want, DOCTOR_CMD.where(args, mock.Mock(env=self.env(**env))))
+            self.assertEqual(want, DOCTOR_CMD.where(args, places.Registry(REPO, self.env(**env))))
 
     def test_each_question_is_refused_where_it_does_not_belong(self):
         marker = self.tmp / "marker"
@@ -800,7 +800,7 @@ class TestTheCommand(WkTest):
                                  (["--all"], {"WK_NAME": "demo", "WK_PLACE": "container"}, "drop the workspace name"),
                                  (["--all"], {"WK_MARKER": str(marker)}, "'wk doctor' here checks this one")):
             with self.subTest(words=words), contextlib.redirect_stderr(io.StringIO()) as err, self.assertRaises(Refused) as cm:
-                DOCTOR_CMD.main(decl.parse("doctor", DOCTOR_CMD.COMMAND, words)[1], None, env=self.env(**env))
+                DOCTOR_CMD.main(decl.parse("doctor", DOCTOR_CMD.COMMAND, words)[1], invocation(places.Registry(REPO, self.env(**env))))
             self.assertEqual(1, cm.exception.status)
             self.assertIn(said, err.getvalue())
 

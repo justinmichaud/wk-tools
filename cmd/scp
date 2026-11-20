@@ -9,11 +9,10 @@ An existing destination is asked about before it is replaced.
 import os
 import posixpath
 
-from wk import images, places, store
+from wk import store
 from wk.act import confirm, die, dry_run, info, nothing_to_ask
 from wk.decl import Command, Opt
 
-ROOT = images.root()
 COMMAND = Command(name="required", takes=("<src>", "<dst>"), here=True, destructive=True, group="workspaces", opts=(
     Opt("-r", "the source may be a directory; the destination becomes a copy of it, contents replaced rather than merged"),))
 
@@ -37,8 +36,7 @@ def main(args, inv):
         inv.usage_die("both paths are in the workspace -- exactly one side carries the ':'" if src_is_ws else
               "neither path is in the workspace -- mark that side with a leading ':', as in :Tools/foo.js")
 
-    reg = places.Registry(ROOT)
-    driver = reg.present(name)
+    driver = inv.reg.present(name)
 
     in_ws = lambda p: driver.path_kind(name, p)  # noqa: E731
     if src_is_ws:

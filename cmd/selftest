@@ -7,11 +7,9 @@ or are the live tier's purpose. A live run is refused beside another, or beside 
 import os
 import sys
 
-from wk import images
 from wk.decl import Command, Opt
 from wk.machine import here
 
-ROOT = images.root()
 COMMAND = Command(where="local", takes=("[<pattern>]",), needs=("python3",), dryrun=False, group="hosts", opts=(
     Opt("--lint", "the static rules: one pass over the tree"),
     Opt("--unit", "every test that needs no VM, machine or board"),
@@ -24,4 +22,4 @@ def main(args, inv):
     run = [f for f in ("--lint", "--unit", "--live", "-v") if args.flag(f)]
     for p in args.positionals:
         run += ["-k", p]
-    return here().run_tty([sys.executable, os.path.join(ROOT, "tests", "run.py")] + run, cwd=ROOT).rc
+    return here().run_tty([sys.executable, os.path.join(inv.root, "tests", "run.py")] + run, cwd=inv.root).rc

@@ -17,13 +17,11 @@ Privileged actions go through the sudoers-allowlisted helper (wk-quiesce-priv).
 """
 import os
 
-from wk import act, images, quiet, session
+from wk import act, quiet, session
 from wk.act import die
-from wk.clock import Clock
 from wk.decl import Command, Opt
 from wk.machine import Local, is_linux
 
-ROOT = images.root()
 BMC = Opt("--bmc", "move the session from the GPU to the BMC's `ast` chip (software-rendered; the monitor goes dark)")
 COMMAND = Command(where="host", needs=("quiesce-helper",), default="status", group="hosts", subs={
     "on": {}, "off": {}, "status": dict(readonly=True, needs=()),
@@ -36,8 +34,8 @@ def main(args, inv):
     if verb == "session":
         if not is_linux():
             die("wk quiesce session is Linux-only (macOS workspaces have no GPU to reach)")
-        s = session.Session(ROOT, Local(), Clock(), os.environ)
+        s = session.Session(inv.root, Local(), inv.clock, os.environ)
         action = args.positionals[1]
         return s.on(args.flag("--bmc")) if action == "on" else s.gdm(args.flag("--bmc")) if action == "gdm" else getattr(s, action)()
     act.terminate_as_interrupt()
-    return getattr(quiet.Quiesce(ROOT, Local(), Clock(), os.environ), verb)()
+    return getattr(quiet.Quiesce(inv.root, Local(), inv.clock, os.environ), verb)()

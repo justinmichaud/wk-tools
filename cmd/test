@@ -25,8 +25,8 @@ def parse(args):
             "kill": args.flag("--kill"), "lldb": lldb, "paths": paths, "pass": paths + args.tail, "tail": args.tail}
 
 
-def main(args, inv, reg=None, clock=None):
+def main(args, inv):
     profile.refuse_mixed(args, ("--layout", "--gpu", "--lldb", "--kill"))
     if profile.asked(args):
-        return profile.main(args, "test", reg)
-    return testcmd.main(store.ws_name(), parse(args), reg, clock)
+        return profile.main(args, "test", inv.reg)
+    return testcmd.main(store.ws_name(), parse(args), inv.reg, inv.clock)

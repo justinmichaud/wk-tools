@@ -10,12 +10,11 @@ opens it here once that has finished.
   WK_READY_WAIT=<s>    how long the detached run waits for the workspace to finish initialising (default 1800)
   WK_KILL_WAIT=<s>     how long --kill waits after TERM before KILL (default 15)
 """
-from wk import images, places, pr, project, record, repos, store, workspace
+from wk import pr, project, record, repos, store, workspace
 from wk.act import Refused, die
 from wk.decl import Command, Opt
 from wk.lock import Lock
 
-ROOT = images.root()
 COMMAND = Command(name="required", lifecycle=True, forward=False, group="workspaces", opts=(
     Opt("--on", "container, vm, or a machine in machines/ (default: container); a build box's or peer's own wk makes it",
         value="<place|machine>"),
@@ -49,7 +48,7 @@ def detached(reg, records, name, opts):
 
 
 def main(args, inv):
-    opts, name, reg = parse(args), store.ws_name(), places.Registry(ROOT)
+    opts, name, reg = parse(args), store.ws_name(), inv.reg
     if inv.vm_side():
         workspace.refuse_elsewhere(reg, name, "container", opts)   # the podman VM's own wk sees only its container
         rc = inv.forward([w for w in inv.argv if w != "--zed"])
@@ -58,7 +57,7 @@ def main(args, inv):
                 "    What it managed to say is above; a re-run destroys the rubble and retries." % name)
         if rc:
             raise Refused(rc)
-        workspace.zed_after(reg.machine, ROOT, name, opts)
+        workspace.zed_after(reg.machine, inv.root, name, opts)
         return 0
     records = record.Records(machine=reg.machine)
     if opts["detached"]:

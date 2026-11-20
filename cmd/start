@@ -8,12 +8,11 @@ started.
 """
 import sys
 
-from wk import act, dispatch, images, places, secrets, store
+from wk import act, dispatch, secrets, store
 from wk.act import die, info, log
 from wk.decl import Command
 from wk.store import Store
 
-ROOT = images.root()
 MACHINE = Store().podman_machine()
 COMMAND = Command(name="optional", forward=False, needs=("podman",), group="hosts")
 
@@ -27,7 +26,7 @@ def start_everything(reg):
             dispatch.start_podman_machine(reg.machine, "start", True)   # 'wk start' is itself the asking
         else:
             act.debug("ok: machine already running")
-    secrets.Secrets(ROOT).push_converge_machine()
+    secrets.Secrets(reg.root).push_converge_machine()
     ctr = reg.load("container")
     stopped = ctr.machine.run(ctr.podman() + ["ps", "-a", "--filter", "name=^wk-", "--filter", "status=exited",
                                               "--filter", "status=created", "--format", "{{.Names}}"], input="").out.split()
@@ -51,7 +50,7 @@ def start_everything(reg):
 
 
 def main(args, inv):
-    reg = places.Registry(ROOT)
+    reg = inv.reg
     name = store.ws_name()
     try:
         return (0 if reg.present(name).start(name) else 1) if name else start_everything(reg)

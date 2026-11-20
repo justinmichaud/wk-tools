@@ -9,10 +9,9 @@ The job count is derived from the memory available now. --dry-run prints the com
   WK_NO_COMPILATION_CACHE=1   build without Xcode's compilation cache
   WK_JOBS, WK_NICE            the job count and nice level the place half runs at
 """
-from wk import build, images, places, store
+from wk import build, store
 from wk.decl import Command, Opt
 
-ROOT = images.root()
 COMMAND = Command(name="required", takes=("<preset>",), preset="arg", ready=True, repos=("webkit",), tail="--",
                   group="workspaces", opts=(
     Opt("--list", "print the available presets and exit", sets=dict(where="local", name="none", takes=())),
@@ -39,9 +38,8 @@ def parse(args):
             "pass": args.tail, "preset": store.build_preset()}
 
 
-def main(args, inv, reg=None, clock=None):
+def main(args, inv):
     opts = parse(args)
     if opts["list"]:
         return build.list_presets()
-    reg = reg or places.Registry(ROOT)
-    return build.Build(reg, store.ws_name(reg.env), opts, args.argv(), clock).front()
+    return build.Build(inv.reg, store.ws_name(inv.reg.env), opts, args.argv(), inv.clock).front()

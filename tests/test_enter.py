@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, as_dispatched, fake_workspace, load_cmd, run
+from tests.support import REPO, WkTest, as_dispatched, fake_workspace, invocation, load_cmd, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk.act import Refused  # noqa: E402
@@ -50,21 +50,20 @@ class TestNoTerminalAsksForNone(unittest.TestCase):
         self.enter = load_cmd("enter")
         self.driver = mock.Mock(**{"info.return_value": "present", "exec_argv.return_value": (["true"], None)})
         self.reg = mock.Mock(**{"present.return_value": self.driver})
-        for p in (mock.patch.object(self.enter.places, "Registry", return_value=self.reg),
-                  mock.patch.dict(os.environ, {"WK_NAME": "ws"}), mock.patch("sys.stdin", io.StringIO(""))):
+        for p in (mock.patch.dict(os.environ, {"WK_NAME": "ws"}), mock.patch("sys.stdin", io.StringIO(""))):
             p.start()
             self.addCleanup(p.stop)
 
     def test_the_command_is_exec_argv_without_a_tty_and_replaces_this_process(self):
-        self.enter.main(as_dispatched("enter", ["git", "status"]), None)
+        self.enter.main(as_dispatched("enter", ["git", "status"]), invocation(self.reg))
         self.driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=True)
         self.reg.machine.exec.assert_called_once_with(["true"], None)
 
     def test_own_runs_the_command_as_wks_own_not_a_persons_and_takes_no_shell(self):
-        self.enter.main(as_dispatched("enter", ["--own", "--", "git", "status"]), None)
+        self.enter.main(as_dispatched("enter", ["--own", "--", "git", "status"]), invocation(self.reg))
         self.driver.exec_argv.assert_called_once_with("ws", ["git", "status"], tty=False, person=False)
         with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            self.enter.main(as_dispatched("enter", ["--own"]), None)
+            self.enter.main(as_dispatched("enter", ["--own"]), invocation(self.reg))
         self.assertIn("--own takes a command", err.getvalue())
 
 

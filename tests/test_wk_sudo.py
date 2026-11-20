@@ -6,7 +6,7 @@ from unittest import mock
 
 from tests.fakes import FakeRegistry, FakeDriver
 from tests import fakes
-from tests.support import REPO, as_dispatched, load_cmd
+from tests.support import REPO, as_dispatched, invocation, load_cmd
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import sudo  # noqa: E402
@@ -18,9 +18,9 @@ from wk.sudo import Sudo  # noqa: E402
 cmd = load_cmd("key")
 
 
-def key_sudo(argv, env=None, reg=None):
+def key_sudo(argv, reg=None):
     """`wk key sudo <argv>` as the dispatcher hands it on."""
-    return cmd.main(as_dispatched("key", ["sudo"] + argv), None, env={} if env is None else env, reg=reg or registry())
+    return cmd.main(as_dispatched("key", ["sudo"] + argv), invocation(reg or registry()))
 
 LISTING_UNSET = "User justinmichaud may run the following commands on tolken:\n    (ALL : ALL) ALL\n"
 
@@ -190,7 +190,7 @@ class TestPlaceAndAll(unittest.TestCase):
     def test_all_reports_the_local_machine_and_fans_out(self):
         local = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
         reg = registry({"box": FakeDriver("box", out="box status line\n")}, machine=local)
-        rc = key_sudo(["status", "--all"], env={}, reg=reg)
+        rc = key_sudo(["status", "--all"], reg=reg)
         self.assertEqual(rc, 0)
 
     def test_all_setup_never_sets_up_the_local_machine(self):
@@ -198,16 +198,16 @@ class TestPlaceAndAll(unittest.TestCase):
         box = Fake("box")
         box.answer(["sh", "-c"])
         reg = registry({"box": FakeDriver("box", machine=box)}, machine=local)
-        key_sudo(["setup", "--all"], env={}, reg=reg)
+        key_sudo(["setup", "--all"], reg=reg)
         self.assertFalse(any(e[0] == "run" and e[1][:2] == ("sudo", "install") for e in local.effects))
 
 
 class TestRefusesInAWorkspace(unittest.TestCase):
     def test_refuses_in_a_workspace(self):
         reg = registry({})
-        reg.in_workspace = lambda: True
+        reg.in_workspace, reg.env["WK_NAME"] = (lambda: True), "myws"
         with self.assertRaises(Refused):
-            key_sudo(["status"], env={"WK_NAME": "myws"}, reg=reg)
+            key_sudo(["status"], reg=reg)
 
 
 if __name__ == "__main__":

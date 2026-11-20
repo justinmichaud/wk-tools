@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from tests.fakes import FlowTest
-from tests.support import REPO, WkTest, as_dispatched, load_cmd, requires_container_place, run
+from tests.support import REPO, WkTest, as_dispatched, invocation, load_cmd, requires_container_place, run
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import places, record  # noqa: E402
@@ -57,7 +57,7 @@ class TestStatusNamesEachMachineOnce(FlowTest):
     def test_status_one_machine_each(self):
         out = io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
-            load_cmd("status").main(as_dispatched("status", ["--json"], os.environ), None)
+            load_cmd("status").main(as_dispatched("status", ["--json"], os.environ), invocation())
         names = [m["name"] for m in json.loads(out.getvalue()).get("machines", [])]
         self.assertTrue(names)
         self.assertEqual(len(names), len(set(names)), names)

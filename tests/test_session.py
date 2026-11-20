@@ -8,7 +8,7 @@ import sys
 import unittest
 from unittest import mock
 
-from tests.support import REPO, WkTest, as_dispatched, load_cmd, requires_machine
+from tests.support import REPO, WkTest, as_dispatched, invocation, load_cmd, requires_machine
 
 sys.path.insert(0, str(REPO / "lib"))
 from wk import fleet, quiet, session  # noqa: E402
@@ -247,7 +247,7 @@ class TestTheCommand(SessionTest):
         m = load_cmd("quiesce")
         with mock.patch.object(m, "is_linux", return_value=True), mock.patch.object(m.session, "Session") as s:
             for words in (["session"], ["session", "on", "--bmc"], ["session", "gdm", "--bmc"]):
-                m.main(as_dispatched("quiesce", words), None)
+                m.main(as_dispatched("quiesce", words), invocation())
         self.assertEqual([c[0] for c in s.return_value.method_calls], ["status", "on", "gdm"])
         self.assertEqual([c[1] for c in s.return_value.method_calls], [(), (True,), (True,)])
         self.assertIn("unknown verb: up (one of on, gdm, off, status)", self.refused(as_dispatched, "quiesce", ["session", "up"]))

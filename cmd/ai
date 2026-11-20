@@ -26,5 +26,5 @@ from wk.decl import Command
 COMMAND = Command(name="required", ready=True, tail="all", session=True, group="workspaces", subs={"claude": {}, "pi": {}})
 
 
-def main(args, inv, env=None, reg=None):
-    return ai.main(args.positionals[0], args.tail, env, reg)
+def main(args, inv):
+    return ai.main(args.positionals[0], args.tail, inv.reg.env, inv.reg)
