@@ -1417,7 +1417,7 @@ class Vm(Driver):
 
     def podman_containers(self):
         """An unreadable answer counts as busy: stopping a machine underneath something is the mistake this guards."""
-        if not self._podman_up() is not None:
+        if self._podman_up() is None:
             return 0
         r = Ssh.podman(self.podman_machine(), via=self.machine).run(["podman", "ps", "-q"])
         return len(r.out.split()) if r.ok else 1
