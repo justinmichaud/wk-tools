@@ -1,37 +1,12 @@
 """`wk scp` -- one file or one directory in or out of a workspace."""
-import json
 import os
-import sys
+import re
+import shlex
 import unittest
-from unittest import mock
 
-from tests.support import REPO, WkTest, fake_workspace, requires_tool, run, stub_path
-
-sys.path.insert(0, str(REPO / "lib"))
-from wk import places  # noqa: E402
-from wk.act import Refused  # noqa: E402
-from wk.store import Store  # noqa: E402
-from wk.machine import Local  # noqa: E402
-from tests.test_wk_places import DriversTest  # noqa: E402
-
-def _tart(kind="absent"):
-    """`tart`: one running guest whose `exec` logs its argv and answers t_path_kind's one question with <kind>."""
-    return ('#!/bin/sh\n'
-            'case "$1" in\n'
-            'list) echo \'[{"Name":"wk-demo","State":"running","Source":"local"}]\' ;;\n'
-            'exec) printf \'tart %s\\n\' "$*" >> "$WK_TEST_NET_LOG"\n'
-            f'      case "$*" in *"echo dir"*) echo {kind} ;; esac ;;\n'
-            '*) exit 1 ;;\n'
-            'esac\n')
-
-
-def _net_stub(tool, kind="absent"):
-    return (
-        '#!/bin/sh\n'
-        f'printf \'{tool} %s\\n\' "$*" >> "$WK_TEST_NET_LOG"\n'
-        f'case "$*" in *"echo dir"*) echo {kind} ;; esac\n'
-        'exit 0\n'
-    )
+from tests.fakes import Result
+from tests.support import WkTest, fake_workspace, requires_tool, run
+from tests import test_wk_workspace as wsworld
 
 
 class TestUsage(WkTest):
@@ -208,158 +183,151 @@ class TestRefusals(ScpTest):
                          "contents are replaced, not merged")
 
 
-@unittest.skipUnless(os.uname().sysname == "Darwin", "the vm place exists only on a macOS host")
-class TestTheWholeCommandOnAGuest(WkTest):
-    def _run(self, tart_body, *args):
-        log = self.tmp / "net.log"
-        log.write_text("")
-        vmstore = self.tmp / "vmstore"
-        (vmstore / "ws" / "demo").mkdir(parents=True)
-        (vmstore / "ws" / "demo" / ".wk-ready").write_text("")
-        with stub_path({"tart": tart_body, "ssh": _net_stub("ssh"),
-                        "scp": _net_stub("scp"), "rsync": _net_stub("rsync")}) as binp:
-            cp = run("scp", *args, env={
-                "PATH": f"{binp}:{os.environ['PATH']}",
-                "WK_TEST_NET_LOG": str(log),
-                "WK_PLACE": "vm",
-                "WK_VM_STORE": str(vmstore),
-                "XDG_STATE_HOME": str(self.tmp / "state"),
-            })
-        self.log = log.read_text()
-        return cp
-
-    def test_a_file_comes_out_of_a_guest(self):
-        cp = self._run(_tart(kind="file"),
-                       "demo", ":a.txt", str(self.tmp / "a.txt"))
-        self.assertEqual(cp.returncode, 0, cp.stdout)
-        self.assertIn(f"copied demo:/Users/admin/WebKit/a.txt to {self.tmp / 'a.txt'}",
-                      cp.stdout)
-        self.assertIn("tart exec -i wk-demo /bin/zsh -lc cat /Users/admin/WebKit/a.txt", self.log)
-        self.assertNotIn("ssh ", self.log, "a guest is reached through tart exec")
-
-    def test_a_probe_that_answers_nothing_is_not_an_absent_file(self):
-        cp = self._run(_tart(kind=""), "demo", ":a.txt", str(self.tmp / "a.txt"))
-        self.assertEqual(cp.returncode, 1, cp.stdout)
-        self.assertIn("could not tell what", cp.stdout)
-        self.assertNotIn("no such file", cp.stdout)
+PROBE = re.compile(r"if \[ -d (\S+) \]; then echo dir")
+SSH = ("ssh", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=4", "-o", "ControlMaster=auto", "-o",
+       "ControlPath=/state/wk/ssh/%h-%p-%r", "-o", "ControlPersist=60", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "box.example")
+PIPE_OUT, PIPE_IN = 'set -o pipefail; f=$1; shift; "$@" < /dev/null > "$f"', 'set -o pipefail; f=$1; shift; "$@" < "$f"'
 
 
-class TestContainerCopy(DriversTest):
-    """`podman cp`: a shell wrapper (wkdev-enter) corrupts a binary pipe -- 1396 bytes arrived as 1399."""
+def probe(path):
+    return "if [ -d %s ]; then echo dir; elif [ -e %s ]; then echo file; else echo absent; fi" % (path, path)
+
+
+class World(wsworld.World):
+    """Workspace `ws`'s side answers what is at a path from `there` (path: "dir" | "file", else absent; `mute` answers
+    nothing), wherever it is asked: in the container, through the guest agent, over the box's ssh or, on a box that is
+    this machine, in a shell here. Every copy succeeds."""
+
+    def __init__(self, tmp, kinds=None):
+        super().__init__(tmp, kinds)
+        self.there, self.mute = {}, False
+        self.answer(["podman", "inspect", "wk-ws", "--format", "{{.Config.WorkingDir}}"], out="/home/dev\n")
+        self.react(["podman", "exec"], self._kind)
+        self.answer(["podman", "cp"])
+        self.bash["set -o pipefail"] = Result(0)
+        if hasattr(self, "tart"):
+            self.react([self.tart, "exec"], self._kind)
+        for sh in ("sh", "/bin/sh"):
+            self.react([sh, "-c"], lambda a, f: self._ssh(["ssh", shlex.join(a)], f))
+
+    def _kind(self, argv, f):
+        m = PROBE.search(argv[-1])
+        return Result(0) if not m else Result(0, "" if f.mute else f.there.get(m.group(1), "absent") + "\n")
+
+    def _ssh(self, argv, f):
+        return self._kind(argv, f) if PROBE.search(argv[-1]) else super()._ssh(argv, f)
+
+
+class ScpFlow(wsworld.WorkspaceTest):
+    """`wk scp ws ...` typed on the host whose place `fakebox` holds workspace `ws`; `here` (shown as /here) holds a.txt
+    and tree/sub/c."""
+    world_class = World
+    KIND = "container"
 
     def setUp(self):
         super().setUp()
-        self.t = self.reg.load("container")
-        self.fake.answer(["podman", "inspect", "wk-demo", "--format", "{{.Config.WorkingDir}}"], out="/home/dev\n")
-        self.fake.answer(["podman", "cp"], out="")
+        self.w = self.make_world(kinds={"fakebox": self.KIND})
+        self.w.make("ws")
+        self.w.effects = []
+        self.here = str(self.w.tmp / "here")
+        os.makedirs(os.path.join(self.here, "tree", "sub"))
+        for rel, text in (("a.txt", "one\n"), ("tree/sub/c", "c\n")):
+            with open(os.path.join(self.here, rel), "w") as f:
+                f.write(text)
 
-    def test_push_and_pull_are_podman_cp(self):
-        self.t.push("demo", "/tmp/local.txt", "/src/WebKit/a.txt")
-        self.assertEqual(self.fake.effects[-1][1], ("podman", "cp", "/tmp/local.txt", "wk-demo:/src/WebKit/a.txt"))
-        self.t.pull("demo", "/src/WebKit/a.txt", "/tmp/out.txt")
-        self.assertEqual(self.fake.effects[-1][1], ("podman", "cp", "wk-demo:/src/WebKit/a.txt", "/tmp/out.txt"))
+    def scp(self, *argv):
+        rc, _, err = self.wk(self.w, "scp", "ws", *[a.replace("/here", self.here) for a in argv])
+        return rc, self.w.rel(err.splitlines()[0]) if err else ""
 
-    def test_push_dir_clears_the_containers_own_side_first_as_its_own_user(self):
-        self.fake.answer(["podman", "exec", "--user", "dev", "wk-demo", "/bin/sh"], out="")
-        self.t.push_dir("demo", "/tmp/tree", "/src/WebKit/tree")
-        clear, cp = self.fake.effects[-2][1], self.fake.effects[-1][1]
-        self.assertEqual(clear[:5], ("podman", "exec", "--user", "dev", "wk-demo"))
-        self.assertIn("rm -rf /src/WebKit/tree && mkdir -p /src/WebKit/tree", clear[-1])
-        self.assertEqual(cp, ("podman", "cp", "/tmp/tree/.", "wk-demo:/src/WebKit/tree"))
+    def ran(self):
+        return [self.w.rel(e) for e in self.w.effects if e[0] == "run"]
 
-    def test_pull_dir_clears_the_destination_here_first(self):
-        self.fake.mkdir("/tmp/out")
-        self.fake.write("/tmp/out/stale", "x")
-        self.t.pull_dir("demo", "/src/WebKit/tree", "/tmp/out")
-        self.assertFalse(self.fake.exists("/tmp/out/stale"))
-        self.assertEqual(self.fake.effects[-1][1], ("podman", "cp", "wk-demo:/src/WebKit/tree/.", "/tmp/out"))
-
-    def test_path_kind_asks_inside_the_container_as_its_own_user(self):
-        self.fake.answer(["podman", "exec", "--user", "dev", "wk-demo", "/bin/sh"], out="dir\n")
-        self.assertEqual(self.t.path_kind("demo", "/src/WebKit/tree"), "dir")
+    def copies(self):
+        """The effects that move or clear bytes."""
+        return [self.w.rel(e if e[0].startswith("copy") else e[:2]) for e in self.w.effects
+                if e[0] in ("act", "remove", "copy_in", "copy_tree_in") or (e[0] == "mkdir" and not e[1].endswith("/wk/ssh"))
+                or (e[0] == "run" and e[1][:2] == ("bash", "-c"))]
 
 
-class TestVmCopy(DriversTest):
-    def setUp(self):
-        super().setUp()
-        del self.env["WK_IN_VM"]
-        self.env["WK_VM_STORE"] = str(self.tmp / "vmstore")
-        (self.tmp / "bin").mkdir()
-        (self.tmp / "bin" / "tart").write_text("")
-        (self.tmp / "bin" / "tart").chmod(0o755)
-        self.env["PATH"] = str(self.tmp / "bin")
-        p = mock.patch.object(Store, "macos_host", new_callable=mock.PropertyMock, return_value=True)
-        p.start()
-        self.addCleanup(p.stop)
-        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
-        self.t = self.reg.load("vm")
-        self.fake.answer([self.t.tart(), "list"], out=json.dumps([{"Name": "wk-demo", "State": "running", "Source": "local"}]))
-        self.fake.answer([self.t.tart(), "ip"], out="1.2.3.4\n")
+class TestContainerRoute(ScpFlow):
+    """`podman cp` carries the bytes: a shell wrapper (wkdev-enter) corrupts a binary pipe -- 1396 bytes arrived as 1399."""
+
+    def test_a_file_comes_out_and_goes_in_by_podman_cp_after_asking_the_container_as_its_own_user(self):
+        self.w.there["/src/WebKit/a.txt"] = "file"
+        self.assertEqual(self.scp(":a.txt", "/here/out.txt"), (0, "==> copied ws:/src/WebKit/a.txt to /here/out.txt"))
+        self.assertIn(("podman", "exec", "--user", "dev", "wk-ws", "/bin/sh", "-c", probe("/src/WebKit/a.txt")), [r[1] for r in self.ran()])
+        self.assertEqual(self.scp("/here/a.txt", ":b.txt")[0], 0)
+        self.assertEqual(self.copies(), [("act", ("podman", "cp", "wk-ws:/src/WebKit/a.txt", "/here/out.txt")),
+                                         ("act", ("podman", "cp", "/here/a.txt", "wk-ws:/src/WebKit/b.txt"))])
+
+    def test_a_directory_going_in_clears_the_containers_side_first_as_its_own_user(self):
+        self.assertEqual(self.scp("-r", "/here/tree", ":tree")[0], 0)
+        self.assertEqual(self.copies(), [("act", ("podman", "exec", "--user", "dev", "wk-ws", "/bin/sh", "-c",
+                                                  "rm -rf /src/WebKit/tree && mkdir -p /src/WebKit/tree")),
+                                         ("act", ("podman", "cp", "/here/tree/.", "wk-ws:/src/WebKit/tree"))])
+
+    def test_a_directory_coming_out_clears_the_destination_here_first(self):
+        self.w.there["/src/WebKit/tree"] = "dir"
+        self.assertEqual(self.scp("-r", ":tree", "/here/out")[0], 0)
+        self.assertEqual(self.copies(), [("remove", "/here/out"), ("mkdir", "/here/out"),
+                                         ("act", ("podman", "cp", "wk-ws:/src/WebKit/tree/.", "/here/out"))])
+
+
+class TestGuestRoute(ScpFlow):
+    """A macOS guest: every question and every copy goes through `tart exec`, the guest agent; nothing over ssh."""
+    KIND = "vm"
+
+    def tart(self, cmd):
+        return (self.w.rel(self.w.tart), "exec", "-i", "wk-ws", "/bin/zsh", "-lc", cmd)
 
     def test_every_copy_is_a_pipe_through_tart_exec(self):
-        self.fake.answer(["bash", "-c"], out="")
-        for fn, args in ((self.t.push, ("/tmp/a", "/Users/admin/WebKit/a")), (self.t.pull, ("/Users/admin/WebKit/a", "/tmp/a")),
-                         (self.t.push_dir, ("/tmp/t", "/Users/admin/WebKit/t")), (self.t.pull_dir, ("/Users/admin/WebKit/t", "/tmp/t"))):
-            with self.subTest(fn=fn.__name__):
-                fn("demo", *args)
-                argv = self.fake.effects[-1][1]
-                self.assertEqual((argv[:2], argv[5:9]), (("bash", "-c"), (self.t.tart(), "exec", "-i", "wk-demo")))
+        self.w.there.update({"/Users/admin/WebKit/a.txt": "file", "/Users/admin/WebKit/tree": "dir"})
+        self.assertEqual(self.scp(":a.txt", "/here/out.txt"), (0, "==> copied ws:/Users/admin/WebKit/a.txt to /here/out.txt"))
+        for argv in (["/here/a.txt", ":b.txt"], ["-r", ":tree", "/here/out"], ["-r", "/here/tree", ":t"]):
+            self.assertEqual(self.scp(*argv)[0], 0, argv)
+        self.assertIn(self.tart("/bin/sh -c '%s'" % probe("/Users/admin/WebKit/a.txt")), [r[1] for r in self.ran()])
+        runs = [e[1] for e in self.copies()]
+        self.assertEqual(runs[:2], [("bash", "-c", PIPE_OUT, "bash", "/here/out.txt") + self.tart("cat /Users/admin/WebKit/a.txt"),
+                                    ("bash", "-c", PIPE_IN, "bash", "/here/a.txt") + self.tart("cat > /Users/admin/WebKit/b.txt")])
+        self.assertEqual([r[5:9] for r in runs], [self.tart("")[:4]] * 4)
+        self.assertEqual([r for r in self.ran() if r[1][0] == "ssh"], [])
 
-    def test_path_kind_asks_through_the_guest_agent(self):
-        self.fake.answer([self.t.tart(), "exec"], out="file\n")
-        self.assertEqual(self.t.path_kind("demo", "/Users/admin/WebKit/a.txt"), "file")
+    def test_a_probe_the_guest_answers_nothing_to_is_not_an_absent_file(self):
+        self.w.mute = True
+        self.assertEqual(self.scp(":a.txt", "/here/out.txt"),
+                         (1, "error: could not tell what ws:/Users/admin/WebKit/a.txt is: workspace 'ws' did not answer."))
+        self.assertEqual(self.copies(), [])
 
-    def test_a_guest_that_is_not_running_dies_naming_start(self):
-        with self.assertRaises(Refused):
-            self.t.pull("gone", "/x", "/y")
-
-
-class TestRemoteCopy(DriversTest):
-    """A build machine reached over ssh: the one pipe, through the same ssh argv `exec` uses."""
-
-    def setUp(self):
-        super().setUp()
-        del self.env["WK_IN_VM"]
-        self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
-        self.conf("box", "host=box.example\nroot=/home/u/wk\n")
-        self.reg = places.Registry(REPO, env=self.env, machine=self.fake)
-        self.t = self.reg.load("box")
-
-    def test_every_copy_is_a_pipe_through_the_boxs_own_ssh(self):
-        self.fake.answer(["bash", "-c"], out="")
-        self.t.push("demo", "/tmp/local.txt", "/wk/ws/demo/WebKit/a.txt")
-        self.assertEqual(self.fake.effects[-1][1][5:], tuple(self.t.machine.argv("cat > /wk/ws/demo/WebKit/a.txt")))
-        self.t.pull_dir("demo", "/wk/ws/demo/WebKit/tree", "/tmp/tree")
-        self.assertIn("tar -cf - -C /wk/ws/demo/WebKit/tree", self.fake.effects[-1][1][-1])
-
-    def test_path_kind_asks_over_ssh(self):
-        self.fake.answer(["ssh"], out="dir\n")
-        self.assertEqual(self.t.path_kind("demo", "/wk/ws/demo/WebKit/tree"), "dir")
+    def test_a_guest_that_is_not_running_is_refused_naming_start(self):
+        self.w.vms["wk-ws"] = "stopped"
+        self.assertEqual(self.scp(":a.txt", "/here/out.txt"), (1, "error: 'ws' is not running (wk start ws)"))
+        self.assertEqual(self.copies(), [])
 
 
-class TestRemoteLocalCopy(DriversTest):
-    def setUp(self):
-        super().setUp()
-        del self.env["WK_IN_VM"]
-        self.env["XDG_STATE_HOME"] = str(self.tmp / "state")
-        self.box = self.tmp / "box"
-        self.conf("fakebox", "kind=build\ndriver=remote\nlocal=1\nroot=%s\n" % self.box)
-        self.reg = places.Registry(REPO, env=self.env, machine=Local())
-        self.t = self.reg.load("fakebox")
+class TestBuildBoxRoute(ScpFlow):
+    """A build box: every question and every copy goes through the box's own ssh, the argv `wk exec` uses."""
+    KIND = "remote"
+    SRC = "/home/u/wk/ws/ws/WebKit"
 
-    def test_push_copies_on_a_real_filesystem(self):
-        self.box.mkdir(parents=True)
-        (self.box / "one.txt").write_bytes(b"one\n")
-        self.t.push("demo", str(self.box / "one.txt"), str(self.box / "two.txt"))
-        self.assertEqual((self.box / "two.txt").read_bytes(), b"one\n")
-        self.assertEqual(self.t.path_kind("demo", str(self.box / "one.txt")), "file")
+    def ssh(self, cmd):
+        return SSH + ("\"$SHELL\" -lc %s" % shlex.quote(cmd),)
 
-    @requires_tool("rsync")
-    def test_push_dir_copies_on_a_real_filesystem(self):
-        (self.box / "src").mkdir(parents=True)
-        (self.box / "src" / "a").write_bytes(b"a\n")
-        self.t.push_dir("demo", str(self.box / "src"), str(self.box / "dst"))
-        self.assertEqual((self.box / "dst" / "a").read_bytes(), b"a\n")
+    def test_a_file_goes_in_and_a_directory_comes_out_through_the_boxs_ssh_after_asking_over_it(self):
+        self.w.there[self.SRC + "/tree"] = "dir"
+        self.assertEqual(self.scp("/here/a.txt", ":b.txt"), (0, "==> copied /here/a.txt to ws:%s/b.txt" % self.SRC))
+        self.assertEqual(self.scp("-r", ":tree", "/here/out")[0], 0)
+        self.assertIn(self.ssh("/bin/sh -c '%s'" % probe(self.SRC + "/tree")), [r[1] for r in self.ran()])
+        (put, get) = self.copies()
+        self.assertEqual(put, ("run", ("bash", "-c", PIPE_IN, "bash", "/here/a.txt") + self.ssh("cat > %s/b.txt" % self.SRC)))
+        self.assertEqual(get[1][5:-1], SSH)
+        self.assertIn("tar -cf - -C %s/tree" % self.SRC, get[1][-1])
+
+    def test_on_a_box_that_is_this_machine_the_bytes_are_copied_here(self):
+        self.w.env["WK_REMOTE_LOCAL"] = "1"
+        self.assertEqual(self.scp("/here/a.txt", ":b.txt")[0], 0)
+        self.assertEqual(self.scp("-r", "/here/tree", ":tree")[0], 0)
+        self.assertEqual(self.copies(), [("copy_in", "/here/a.txt", self.SRC + "/b.txt"), ("copy_tree_in", "/here/tree", self.SRC + "/tree")])
+        self.assertEqual((self.w.files[self.SRC + "/b.txt"], self.w.files[self.SRC + "/tree/sub/c"]), (b"one\n", b"c\n"))
 
 
 if __name__ == "__main__":
