@@ -1417,8 +1417,8 @@ WIFI_READER = re.compile(r"etc/netplan/\*\.yaml|find-generic-password|wireless-s
 
 
 def wifi_readers():
-    roots = ("admin", "bench", "boot", "build", "cmd", "container", "host", "image", "lib", "remote", "places", "vm")
-    return [rel for rel in tracked() if rel.split("/")[0] in roots and WIFI_READER.search(text_of(rel))]
+    return [rel for rel in tracked() if WIFI_READER.search(text_of(rel)) and rel.split("/")[0] in (
+        "admin", "bench", "boot", "build", "cmd", "container", "host", "image", "lib", "remote", "places", "vm")]
 
 
 @rule()
@@ -1443,8 +1443,7 @@ COPIES_ELSEWHERE = {
 @rule()
 def one_copy_path():
     found = {rel for rel in tracked() if (rel.startswith("lib/wk/") and rel.endswith(".py") or rel.startswith("cmd/"))
-             and rel != "lib/wk/machine.py"
-             and any(COPY.search(l) and not l.lstrip().startswith("#") for l in text_of(rel).splitlines())}
+             and rel != "lib/wk/machine.py" and any(COPY.search(l) and not l.lstrip().startswith("#") for l in text_of(rel).splitlines())}
     return ["copies outside lib/wk/machine.py: " + r for r in sorted(found - set(COPIES_ELSEWHERE))] + \
         ["listed, and no longer copying: " + r for r in sorted(set(COPIES_ELSEWHERE) - found)]
 
@@ -1452,17 +1451,15 @@ def one_copy_path():
 @rule()
 def commands_ask_drivers_only_the_contract():
     """A command asks a driver nothing outside places.Driver's contract."""
-    asked = set()
-    for rel in (r for r in tracked() if r.startswith("cmd/")):
-        asked |= {a or b for a, b in re.findall(r"\bdriver\.([a-z_]+)|reg\.present\([^)]*\)\.([a-z_]+)", text_of(rel))}
+    asked = {a or b for rel in tracked() if rel.startswith("cmd/")
+             for a, b in re.findall(r"\bdriver\.([a-z_]+)|reg\.present\([^)]*\)\.([a-z_]+)", text_of(rel))}
     return sorted(asked - set(places.Driver.CONTRACT) - set(places.Driver.FIELDS))
 
 
 @rule()
 def ssh_config_forwards_no_agent():
     """dotfiles/ssh/config has no `Host *` block, keeps the gateway's, and no block forwards an agent."""
-    config = text_of("dotfiles/ssh/config")
-    blocks = dict((m.group(1).strip(), m.group(2)) for m in re.finditer(r"^Host (.+)\n((?:[ \t].*\n|\n)*)", config, re.M))
+    blocks = dict((m.group(1).strip(), m.group(2)) for m in re.finditer(r"^Host (.+)\n((?:[ \t].*\n|\n)*)", text_of("dotfiles/ssh/config"), re.M))
     return (["a Host * block"] if "*" in blocks else []) + (["no igalia.com block"] if "igalia.com" not in blocks else []) + \
         ["ForwardAgent in Host %s" % h for h, b in blocks.items() if "forwardagent" in b.lower()]
 
@@ -1471,15 +1468,22 @@ def ssh_config_forwards_no_agent():
 LIB_NAMED = re.compile(r"^\s*(?:from wk\b|import wk\b)|patch(?:\.object)?\(\s*[\"']?wk\.", re.M)
 
 
-@rule(owed_because="every unit module imports or patches a lib module today; lands module by module (PLAN step 7.13)")
+SHAPED = ("tests/test_enter.py",)   # the modules step 7.13 has landed; each one that lands is added
+
+
+@rule(owed_because="most unit modules import or patch a lib module today; lands module by module (PLAN step 7.13)")
 def test_shape():
     """A tests/test_*.py of the unit tier imports no `wk` module and patches no `wk.` name."""
     return sorted(rel for rel in tracked() if rel.startswith("tests/test_") and rel.endswith(".py")
                   and "TIER = \"live\"" not in text_of(rel) and "TIER = 'live'" not in text_of(rel) and LIB_NAMED.search(text_of(rel)))
 
 
-class Lint(unittest.TestCase):
-    pass
+@rule()
+def test_shape_held():
+    return [rel for rel in SHAPED if LIB_NAMED.search(text_of(rel))]
+
+
+Lint = type("Lint", (unittest.TestCase,), {})
 
 
 def _test(fn, owed_because):

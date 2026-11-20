@@ -6,7 +6,6 @@ import unittest
 
 from tests.support import WkTest, fake_workspace
 from tests.test_wk_workspace import WorkspaceTest
-from wk import places
 
 
 class TestRunsCommand(WkTest):
@@ -31,6 +30,9 @@ class TestRunsCommand(WkTest):
         self.assertNotIn("should-never-run", cp.stdout)
 
 
+BRIDGE = "/opt/wk-tools/container/proxy/ensure-bridge.sh"
+
+
 class TestEnterFlows(WorkspaceTest):
     """`wk enter ws ...` typed on the machine holding container workspace `ws`."""
 
@@ -46,12 +48,12 @@ class TestEnterFlows(WorkspaceTest):
 
     def test_a_command_replaces_this_process_with_the_sdk_enter_asking_no_tty_as_a_person(self):
         rc, _, argv = self.entered("ws", "git", "status")
-        self.assertEqual((rc, argv[argv.index("--name"):]), (0, ["--name", "wk-ws", "--no-tty", "--exec", "--", places.BRIDGE,
+        self.assertEqual((rc, argv[argv.index("--name"):]), (0, ["--name", "wk-ws", "--no-tty", "--exec", "--", BRIDGE,
                                                                   "/opt/wk-tools/container/bin/wk-person", "git", "status"]))
 
     def test_own_runs_the_command_as_wks_own_not_a_persons_and_takes_no_shell(self):
         rc, _, argv = self.entered("ws", "--own", "--", "git", "status")
-        self.assertEqual((rc, argv[argv.index("--exec"):]), (0, ["--exec", "--", places.BRIDGE, "git", "status"]))
+        self.assertEqual((rc, argv[argv.index("--exec"):]), (0, ["--exec", "--", BRIDGE, "git", "status"]))
         self.assertEqual(self.entered("ws", "--own"), (1, "error: --own takes a command: a shell is always your own\n", None))
 
     def test_a_dry_run_prints_the_command_and_replaces_nothing(self):
