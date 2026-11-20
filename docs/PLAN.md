@@ -1235,11 +1235,16 @@ exist.
      *Landing since 2026-11-20:* `FlowTest.wk(world, *argv)` (tests/fakes.py) types a command line into a world through the
      dispatcher and returns its exit status and streams; `tests.test_wk_workspace.Flow.typed` and `said` are the shared
      helpers; `lint.test_shape_held` holds each landed module (`SHAPED`, tests/test_lint.py). Landed: `enter`, `ls`, `scp`'s
-     routes, `run`, `gui`, rr, `test`, `zed`, `new` and `rm`, and a third of the place drivers (tests/test_places_flows.py).
+     routes, `run`, `gui`, rr, `test`, `build`, `zed`, `new` and `rm`, `sync` (one world, the old one gone), `sync --tools`, `pr`,
+     a `--repo` workspace, and every place driver a command line reaches (tests/test_places_flows.py). The tests rows moved
+     with it: workspace 5,759 to 5,195, places 4,011 to 3,905; a flow is about as long as the driver test it replaces, so the
+     rows fall by what several method tests shared, not by the conversion itself.
      Each conversion was proven by breaking the production line a test names. What the conversions found, fixed in the same
      run: commands that built a Registry, a Session or a clock of their own and so left the world (`run`, `gui`, `pr`, `stop`,
-     `status`, `test`, `ai`, `zed`, `new`, `rm`), and dry runs that refused or reported a failure over an effect that did not
-     run (`wk zed`, `wk sync <ws>`).
+     `status`, `test`, `ai`, `zed`, `new`, `rm`), a forward that was a real `execvp` (a test once became `ssh`), dry runs that
+     refused, booted or reported over an effect that did not run (`wk zed`, `wk sync <ws>`, `wk sync --tools`, `wk new --on vm`),
+     a creation that waited out its whole timeout for a container already gone, and refusals no command line reached
+     (a driver's own already-exists and snapshot checks, `cmd/sync`'s name check), which are deleted.
 8. Delete this file.
 
 ## Owed
@@ -1380,7 +1385,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | The macOS `_remote_probe_cmd`/`_remote_probe_parse` branches hold against a live macOS or BSD remote, not only captured samples | 5 | `live remote.probe_macos_bsd` |
 | `wk ls` stays read-only on a peer whose own wk does not answer: its rows are read from here, `Peer.src` asks for an editor route (`wk zed <ws> --route`), and that generates this machine's zed key and fails the listing with "could not open a route" (seen 2026-11-20 in a world whose peer answered no `has_wk`) | 3 | `unit ls.readonly_on_a_mute_peer` |
 | One command line asks a place a question once: `wk enter`, `wk run` and `wk test` on a container ask `podman inspect … {{.State.Status}}` three times (the dispatcher's existence check, its readiness wait, the command's own `reg.present`), `wk scp` asks `{{.Config.WorkingDir}}` before every probe, and a guest copy asks `tart list` two or three times (read 2026-11-20 from the recorded effects of the flow tests) | 2 | `unit dispatch.asks_once` |
-| What the flow conversions read and left unfixed: `Store.workspaces()` and `presets.default_preset` read this host's disk, not the registry's machine; a `podman ps` that does not answer lists no container and warns of nothing, and a `podman inspect` that fails reads as absent; a build box that is this machine blames ssh for a failed probe; the unknown-place refusal lists this machine's own conf; `wk rm` inside a workspace asks before it refuses, and a registry refusal there is followed by "no such workspace"; `wk start` on a build box exits 0 and `wk stop` exits 1 for the same "nothing to bring up or down" | 3 | `unit places.flow_findings` |
+| What the flow conversions read and left unfixed: `Store.workspaces()` and `presets.default_preset` read this host's disk, not the registry's machine; a `podman ps` that does not answer lists no container and warns of nothing, and a `podman inspect` that fails reads as absent; a build box that is this machine blames ssh for a failed probe; the unknown-place refusal lists this machine's own conf; `wk rm` inside a workspace asks before it refuses, and a registry refusal there is followed by "no such workspace"; `wk start` on a build box exits 0 and `wk stop` exits 1 for the same "nothing to bring up or down"; `wk gc` tells a `--repo wk-tools` workspace, which sits on no snapshot, to be removed before the snapshots; `wk new --repo wk-tools --dry-run` prints the WebKit checkout's path for its workspace config; `sync.fetch_pull_into_mirror`'s unknown-remote refusal is reached by no spec `wk pr` parses; `cmd/build` reads its workspace name from the registry's environment where every other command reads the dispatcher's | 3 | `unit places.flow_findings` |
 
 ### Decisions for the user
 
