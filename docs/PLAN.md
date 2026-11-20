@@ -148,6 +148,10 @@ release (6.4.2 ships one for 26.04), proven on an image built from it; a macOS g
 left running, a command on a stopped workspace is refused by the dispatcher naming `wk start`, and `wk stop` syncs a guest
 before `tart stop` (measured: `tart stop` cuts the power, and a file written 3 s before it was gone after).
 
+Answered 2026-11-20: the cut goes to the workspace-loop packages (places, workspace, guest, secrets, `cmd/*`) by deduplication
+alone -- a feature or flag that looks droppable is asked about here, not removed; the lld fix is a local image, one layer of the
+tree on the SDK image that `wk new` builds, and the upstream pull request is the user's to open.
+
 ## Cutting it down
 
 Measured 2026-10-21 (non-blank lines): 36k of Python core, 52k of tests, after
@@ -1343,7 +1347,7 @@ decides is a row; one still open is listed under "Decisions for the user".
 | A macOS guest's `git push` reaches the Mac's push service through the guest's forward and its own listener, and the Mac proxy sends a guest with an agent to the injector's reading socket by its address | 5 | `live push.guest_forward` |
 | Speedometer 3 under MiniBrowser runs without its `wakeLock` error: an upstream WebKit patch, landed last, after every other owed row | end | `live bench.speedometer3_wakelock[mbp]` |
 | The podman machine boots the image the tree pins (`store.MACHINE_IMAGE`), and `wk doctor` names one that does not with its re-creation | 2 | `unit doctor.TestTheStoreOnAMacHost`, `live setup.vm_image_pinned` |
-| A CMake port links with lld in a container on the image workspaces are made from. The SDK image (Ubuntu 26.04) carries the Swift toolchain built for 24.04, whose `ld.lld` needs a `libxml2.so.2` the image lacks, so WebKit's `-fuse-ld=lld` probe fails and every link is GNU `ld` (8.5 GB and more a gtk-debug link). The fix is the fork's `swift-ubuntu2604` branch, for upstream (Swift 6.4.2, built for 26.04): on an image built from it gtk-debug configured `USE_LD_LLD=ON`, linked with LLD 21 and finished in 92 min at three jobs in the 20 GB podman machine (measured 2026-11-19). Owed until the image `wk new` pulls carries it | 3 | `live build.links_with_lld` |
+| A CMake port links with lld in a container: `wk new` makes a native workspace from the SDK image under the tree's one layer (`container/sdk/Containerfile`, the Swift toolchain built for the image's own Ubuntu, whose `ld.lld` loads), built once per base and spec. Measured 2026-11-20 on a fresh workspace: `jsc-debug` configured `USE_LD_LLD=ON` and `jsc` names LLD 21 as its linker; on the same layer gtk-debug finished in 92 min at three jobs in the 20 GB podman machine (2026-11-19). The layer goes once the image upstream publishes carries the fork's `swift-ubuntu2604` change | 3 | `live build.links_with_lld` |
 | A `gtk-release` build in a container on the Mac's 20 GB podman VM finishes under the default sizing: WebCore's unified and derived sources at -O3 -g hold 14.3 GB anonymous at four jobs (measured 2026-10-21 from the cgroup's `memory.stat`; three runs killed at 3072 MB per job), so a CMake web port is sized at 4608 MB per job; the watchdog reads `anon`+`shmem`, since `memory.current` carried 2.2 GB of page cache and slab at that peak; and the OOM advice it prints changes the next run's job count from a macOS host | 3 | `live build.preset[gtk-release]` |
 | `wk run --profile --browser --process ui\|web\|network\|gpu` attaches samply to a live MiniBrowser in a workspace with a display, heaptrack and massif reach `--browser` on the CMake ports, and the fixed-wait attach holds on a slow page | 3 | `live run.browser_profile` |
 | `wk run --lldb` in a fresh workspace symbolicates glibc, Mesa and GTK frames, and `gtk-debug` runs under lldb | 3 | `live run.debug_symbols` |
@@ -1377,9 +1381,8 @@ Decisions are asked as questions, and their answers are recorded under "Decision
 - What a side's spread growing means: the report pools every subtest's values into one sd per arm and names only B
   (measured: identical noise, one of two subtests 30% faster, B's sd 42.8 against A's 26.7 is flagged). Is it each
   subtest's relative sd, or the suite row's run-to-run sd, and is a noisier A named too?
-- Until upstream's SDK image carries the Swift toolchain built for its own Ubuntu (the fork's `swift-ubuntu2604` branch, not
-  yet proposed upstream), a CMake web port still links with GNU `ld` in every workspace: open the upstream pull request and
-  wait for its image, or build the image here from the fork and make that the one `wk new` pulls?
+- The fork's `swift-ubuntu2604` branch is not proposed upstream; the tree's layer (`container/sdk/Containerfile`) stands in until an
+  upstream image carries it. Open the pull request on Igalia/webkit-container-sdk?
 - Is the JIT-dumped samply run the warmup round, labelled no measurement, or a measured leg (`JSC_useJITDump=1` has been
   seen to crash the WebKitGTK UI process, lib/wk/profile.py)?
 - Zero-touch Mac nights: decided 2026-10-22 (step 5): `WK Bench` is the firmware default, set once by hand, and
