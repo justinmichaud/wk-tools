@@ -48,14 +48,12 @@ class TestFromInside(InsideTest):
         self.assertEqual(self.session(), ("bash", "-lc", "exec env WK_AGENT=claude WK_WORKSPACE=ws",
                                           "cd /src/WebKit && exec %s --dangerously-skip-permissions" % CLAUDE))
 
-    def test_a_sandbox_failure_is_a_barrier_wk_force_crosses(self):
-        """In here every word after the agent's name is the agent's, so the barrier is crossed as `WK_FORCE=1 wk ai claude`."""
+    def test_a_sandbox_failure_is_a_barrier_force_crosses_leading_the_agents_own_words(self):
         self.w.wall["rest/version"] = "000"
         rc, err = self.ai("claude")
         self.assertEqual((rc, said(err), self.misses(err)), (1, "error: the sandbox around 'ws' is not intact (see above), and relaxed",
                                                              ["bugs.webkit.org answered '000' -- the injector is not in the path for it"]))
-        self.w.env["WK_FORCE"] = "1"
-        self.assertEqual((self.ai("claude")[0], self.w.asked[-1]), (0, "session"))
+        self.assertEqual((self.ai("claude", "--force", "-r")[0], self.w.asked[-1], self.session()[-1][-3:]), (0, "session", " -r"))
 
     def test_a_way_to_publish_is_not_forceable_and_names_the_host_side_doctor(self):
         self.w.wall["/pulls"] = "412"

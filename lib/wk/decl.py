@@ -117,7 +117,8 @@ def split(table, words, count):
     head, n, i = [], 0, 0
     while i < len(words):
         w = words[i]
-        if table.tail in ("rest", "all") and n == count and (table.tail == "all" or not w.startswith("-")):
+        mine = count == 0 and w in GLOBALS and all(h in GLOBALS for h in head)
+        if table.tail in ("rest", "all") and n == count and (table.tail == "all" or not w.startswith("-")) and not mine:
             return head, words[i:], False
         if w == "--":
             if not table.tail:

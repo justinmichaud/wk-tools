@@ -4,7 +4,7 @@ The workspace name comes first; everything after it is the agent's, verbatim.
 
   wk ai claude bb4 -r          resume, in bb4
   wk ai pi bb4 --help          pi's own help, not this one
-  wk ai claude                 in a workspace: this one, no name
+  wk ai claude                 in a workspace: this one, no name; wk's own flags lead the agent's (wk ai claude --force -r)
   wk ai claude --dry-run bb4   the session it would run
 
 The agent runs with relaxed permissions, after `wk doctor`'s checks of the workspace's boundary pass; git commits are
