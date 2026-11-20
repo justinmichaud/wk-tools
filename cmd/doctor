@@ -27,7 +27,6 @@ from wk import disk, fleet, store, tools, wall
 from wk.act import die, info, log, warn
 from wk.decl import Command, Opt
 from wk.doctor import Doctor, Report, device
-from wk.machine import Local
 
 ALLOWED = ("--all", "--probe-store", "--probe-tools", "--gpu")
 
@@ -52,7 +51,7 @@ COMMAND = Command(where=where, name="optional", readonly=True, group="hosts", op
 def about_machine(name, reg):
     info("asking machine '%s' from here" % name)
     rep = Report(sys.stderr)
-    rep.rows(device(reg.root, name, reg.env, Local()))
+    rep.rows(device(reg.root, name, reg.env, reg.machine))
     sys.stderr.write("\n")
     return rep.exit_status()
 
@@ -80,7 +79,7 @@ def workspace(reg, name, args):
 def main(args, inv):
     if args.flag("--probe-tools"):
         only(args, ("--probe-tools",), "is not asked with --probe-tools")
-        sys.stdout.write(tools.identity_text(tools.identity(inv.root, Local())))
+        sys.stdout.write(tools.identity_text(tools.identity(inv.root, inv.reg.machine)))
         return 0
     reg, env, root = inv.reg, inv.reg.env, inv.root
     named = machine_named(args.name, reg)
@@ -95,7 +94,7 @@ def main(args, inv):
         only(args, ("--gpu",), "is this machine's question, not a workspace's: drop the workspace name")
         return workspace(reg, name, args)
     only(args, ("--all", "--probe-store"), "is a workspace's question: wk doctor <workspace> --gpu")
-    doc = Doctor(root, env)
+    doc = Doctor(root, env, reg.machine)
     if args.flag("--probe-store"):
         sys.stdout.write(doc.probe_store())
         return 0
@@ -105,7 +104,7 @@ def main(args, inv):
         rep.section(title)
         rep.rows(rows)
     rep.section("wk-tools")
-    ident = tools.identity(root, Local())
+    ident = tools.identity(root, reg.machine)
     sys.stderr.write("  sha    %s\n  dirty  %s\n" % (ident["sha"], ident["dirty"]))
     disk.machine_report(root, reg)
     sys.stderr.write("\n")
