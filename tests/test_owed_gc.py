@@ -1,634 +1,594 @@
-"""lib/wk/gc.py: `wk gc` over a fake machine."""
-import contextlib
+"""`wk gc` typed into a world: what a plain run reclaims, what it names with the flag or command that takes it, what it
+keeps, its one question, the podman VM's half on a macOS host, tart's cache, and the dry run."""
 import io
 import json
 import os
-import shutil
-import sys
-import types
+import shlex
 import unittest
 from unittest import mock
 
 from tests import fakes
-from tests.support import REPO, WkTest
-
-sys.path.insert(0, str(REPO / "lib"))
-from wk import act, gc, places, pr, record, rubble  # noqa: E402
-from wk.act import Refused  # noqa: E402
-from wk.lock import Lock  # noqa: E402
-from wk.machine import Local, Result  # noqa: E402
-from wk.store import Snapshots, Store  # noqa: E402
+from tests.fakes import FakeRegistry, Result
+from tests.support import REPO
+from tests.test_wk_places import LINUX_PROBE
+from tests.test_wk_workspace import Flow, said
 
 WK = str(REPO / "wk")
+LINUX = os.uname_result(("Linux", "here", "6.8.0", "", "x86_64"))
+MAC = os.uname_result(("Darwin", "here", "25.0.0", "", "arm64"))
+SLOTS = "/var/wk/slots/"
+PUSH_REF = "refs/wk/push/box/eng/x"
+GB = 1 << 20   # in kB
 
 
 class Host(fakes.World):
-    def __init__(self, name, tmp=None, **env):
-        super().__init__(tmp, name, **env)
-        self.answer(["du", "-sk"], out="4\tx\n")
-        self.react(["ls", "-1A"], lambda a, f: Result(0, "".join(n + "\n" for n in f.listdir(a[-1]))) if a[-1] in f.dirs
-                   else Result(2, "", "no such directory"))
-        self.order = {}
-        self.react(["ls", "-1t"], lambda a, f: Result(0, "".join(n + "\n" for n in f.order.get(a[-1], []) if f.exists(os.path.join(a[-1], n)))))
-        self.react(["ls", "-1At"], lambda a, f: Result(0, "".join(n + "\n" for n in f.order.get(a[-1], []) if f.exists(os.path.join(a[-1], n)))))
+    """This host, Linux and holding the container store: podman answers from `containers`, `images`, `volumes` and
+    `mounting` (what mounts a retired tree), the mirror's git from `refs`, board rpi5's bench system over ssh from `slots`,
+    build box `box` from `box_up`; `ls -1t` lists in `order`. Every `du` counts 4 kB."""
 
-    def mkdirs(self, path):
-        while path not in ("", "/"):
-            self.dirs.add(path)
-            path = os.path.dirname(path)
-
-    def acts(self):
-        return [e[1] for e in self.effects if e[0] == "act"]
-
-
-class World(Host):
     def __init__(self, tmp):
-        super().__init__("here", tmp, WK_IN_VM="1", WK_ROOT=str(REPO))
-        self.store_dir = self.env["WK_STORE"]
-        self.store = Store(self.env)
-        self.dirs.add(os.path.join(self.store_dir, "ws"))
-        self.containers, self.images, self.volumes = set(), [], []
-        self.react(["podman", "ps"], lambda a, f: Result(0, "".join("wk-%s\tUp\n" % n for n in sorted(f.containers))))
-        self.react(["podman", "inspect"], lambda a, f: Result(0, "running\n") if a[2][3:] in f.containers else Result(125))
-        self.react(["podman", "images"], lambda a, f: Result(0, json.dumps(f.images)))
-        self.react(["podman", "image", "prune"], lambda a, f: self._keep_images(lambda i: not i.get("Dangling")))
-        self.react(["podman", "rmi"], lambda a, f: self._keep_images(lambda i: i["Id"] != a[-1]))
-        self.react(["podman", "volume", "ls"], lambda a, f: Result(0, "".join(v + "\n" for v in f.volumes)))
-        self.react(["podman", "volume", "prune"], lambda a, f: self._no_volumes())
-        self.react(["env"], self._env)
-        self.answer(["git", "-C", self.store.mirror_dir(), "for-each-ref"])
-        self.container = places.Container("container", str(REPO), self.env, self)
-        self.vm = None
-        self.remotes, self.boards, self.offline = [], [], {}
-        self.board = Host("rpi5-bench")
-        self.install = types.SimpleNamespace(staging_root=lambda: None, here=self)
-        self.board.react(["ls", "-1A"], lambda a, f: Result(0, "".join(n + "\n" for n in f.listdir(a[-1]))) if a[-1] in f.dirs
-                         else Result(0))
+        super().__init__(tmp, WK_CONTAINER_USER="u", WK_SDK="/sdk")
+        self.env.update(WK_MACHINES_DIR=str(self.tmp / "machines"), XDG_CONFIG_HOME=str(self.tmp / "config"), XDG_DATA_HOME=str(self.tmp / "data"))
+        os.makedirs(self.env["WK_MACHINES_DIR"], exist_ok=True)
+        self.store = self.env["WK_STORE"]
+        self.containers, self.images, self.volumes, self.mounting, self.refs = set(), [], [], [], set()
+        self.slots, self.box_up, self.order = set(), True, {}
+        self.answer(["du", "-sk"], out="4\tx\n")
+        self.answer(["tailscale"], rc=127)
+        self.answer(["sudo", "-n", "true"], rc=1)
+        for prefix, fn in ((["podman"], self._podman), (["env"], self._rm), (["ls"], self._ls), (["ssh"], self._ssh),
+                           (["git", "-C", self.mirror()], self._git)):
+            self.react(prefix, fn)
+        self.reg = FakeRegistry(self.env, self)
         self.effects = []
 
-    def _keep_images(self, keep):
-        self.images = [i for i in self.images if keep(i)]
-        return Result(0)
+    def p(self, rel):
+        return os.path.join(self.store, rel)
 
-    def _no_volumes(self):
-        self.volumes = []
-        return Result(0)
+    def mirror(self):
+        return self.p("git/WebKit.git")
 
-    def _env(self, argv, f):
-        if argv[2:4] == [WK, "rm"]:
-            n = argv[4]
-            f.containers.discard(n)
-            f._drop(os.path.join(self.store_dir, "ws", n))
-        return Result(0)
+    def conf(self, name, text):
+        (self.tmp / "machines" / (name + ".conf")).write_text(text)
 
-    def remove(self, path):
-        super().remove(path)
-        if path.startswith(str(self.tmp)) and not act.dry_run():
-            shutil.rmtree(path, True)
+    def made(self, *rels):
+        self.mkdirs(*(self.p(r) for r in rels))
 
-    def gc(self):
-        return FakeGc(self)
+    def mkdirs(self, *paths):
+        for path in paths:
+            while path not in ("", "/"):
+                self.dirs.add(path)
+                path = os.path.dirname(path)
 
-    def publish(self, bid, complete=True):
-        d = os.path.join(self.store.snapshots_dir(), bid)
-        self.dirs.update({self.store.snapshots_dir(), d, os.path.join(d, "WebKit")})
-        if complete:
-            self.files[os.path.join(d, "sha")] = "a" * 40 + "\n"
+    def lock(self, resource, pid):
+        path = os.path.join(self.env["WK_LOCK_DIR"], resource + "@here.lock")
+        self.files[path] = "pid=%d tok=x at=t cmd=wk" % pid
+        self.links.add(path)
+        self.pids.add(pid)
 
-    def workspace(self, name, container=True, ready=False, base="b1"):
-        d = os.path.join(self.store_dir, "ws", name)
-        self.dirs.update({d, os.path.join(d, "home")})
+    def publish(self, *bids, complete=True):
+        for bid in bids:
+            self.made("base/%s/WebKit" % bid)
+            if complete:
+                self.files[self.p("base/%s/sha" % bid)] = "a" * 40 + "\n"
+
+    def workspace(self, name, ready=True, base="b1"):
+        d = self.p("ws/" + name)
+        self.mkdirs(d + "/home")
         if base:
-            self.files[os.path.join(d, "base-id")] = base + "\n"
+            self.files[d + "/base-id"] = base + "\n"
         if ready:
-            self.files[os.path.join(d, "home", places.READY_MARKER)] = ""
-        if container:
-            self.containers.add(name)
+            self.files[d + "/home/.wk-ready"] = ""
+        self.containers.add(name)
 
-    def creation_record(self, name, pid=999999):
-        d = os.path.join(self.store_dir, "task", "new-%s-20260101T000000Z" % name)
-        for k, v in (("plan", "create"), ("kind", "new"), ("name", name), ("pid", str(pid)), ("where", "here")):
+    def record(self, root, kind, name, pid=999999, log=None):
+        d = os.path.join(root, "task", "%s-%s-20260101T000000Z" % (kind, name))
+        for k, v in (("plan", "create"), ("kind", kind), ("name", name), ("pid", str(pid)), ("where", "here")) + ((("log", log),) if log else ()):
             self.write_own(os.path.join(d, k), v + "\n")
-        return d
+        if log:
+            self.write_own(log, "")
+
+    def _podman(self, a, f):
+        a = [x for i, x in enumerate(a) if x != "-c" and a[i - 1:i] != ["-c"]]
+        if a[1] == "ps":
+            if a[4].startswith("volume="):
+                return Result(0, "".join(n + "\n" for n in f.mounting))
+            return Result(0, "".join("wk-%s\tUp\n" % n for n in sorted(f.containers)))
+        if a[1] == "inspect":
+            return Result(0, "running\n") if a[2][3:] in f.containers else Result(125, "", "no such container")
+        if a[1] == "images":
+            return Result(0, json.dumps(f.images))
+        if a[1:3] == ["image", "prune"]:
+            f.images = [i for i in f.images if not i.get("Dangling")]
+        elif a[1] == "rmi":
+            f.images = [i for i in f.images if i["Id"] != a[-1]]
+        elif a[1:3] == ["volume", "ls"]:
+            return Result(0, "".join(v + "\n" for v in f.volumes))
+        elif a[1:3] == ["volume", "prune"]:
+            f.volumes = []
+        return Result(0)
+
+    def _rm(self, a, f):
+        f.containers.discard(a[4])
+        f._drop(f.p("ws/" + a[4]))
+        return Result(0)
+
+    def _ls(self, a, f):
+        d = a[-1]
+        if a[1] in ("-1t", "-1At"):
+            return Result(0, "".join(n + "\n" for n in f.order.get(d, []) if f.exists(os.path.join(d, n))))
+        return Result(0, "".join(n + "\n" for n in f.listdir(d))) if d in f.dirs else Result(2, "", "no such directory")
+
+    def _git(self, a, f):
+        if a[3] == "update-ref":
+            f.refs.discard(a[-1])
+            return Result(0)
+        return Result(0, "".join(r + "\n" for r in sorted(f.refs)))
+
+    def _ssh(self, a, f):
+        words = shlex.split(a[-1])
+        if words[:2] == ["du", "-sk"]:
+            return Result(0, "4\t%s\n" % words[2])
+        if "rpi5-bench" in a:
+            if words[:2] == ["rm", "-rf"]:
+                f.effect(("far-remove", "rpi5-bench", words[2]))
+                f.slots.discard(os.path.basename(words[2]))
+            return Result(0, "".join(s + "\n" for s in sorted(f.slots)))
+        if not f.box_up:
+            return Result(255, "", "ssh: connect to host box.example port 22: Connection refused\n")
+        return Result(0, LINUX_PROBE)
+
+    def taken(self):
+        """What the command asked to change, in order: a removed path, an argv run, or (machine, path) removed there."""
+        return [self.rel(e[1]) if e[0] == "remove" else self.rel(" ".join(e[1])) if e[0] == "act" else e[1:]
+                for e in self.work() if e[0] in ("remove", "act", "far-remove")]
 
     def state(self):
-        locks, tmp = self.env["WK_LOCK_DIR"], str(self.tmp)
-        return (sorted(p.replace(tmp, "") for p in self.files if not p.startswith(locks)),
-                sorted(d.replace(tmp, "") for d in self.dirs if not d.startswith(locks)), sorted(self.containers), json.dumps(self.images))
+        locks = self.env["WK_LOCK_DIR"]
+        return (sorted(self.rel(p) for p in self.files if not p.startswith(locks)),
+                sorted(self.rel(d) for d in self.dirs if not d.startswith(locks) and not d.endswith("/wk/ssh")),   # ssh's ControlPath
+                sorted(self.containers), json.dumps(self.images), self.volumes, sorted(self.slots), sorted(self.refs))
 
 
-class FakeGc(gc.Gc):
-    def __init__(self, w):
-        super().__init__(REPO, types.SimpleNamespace(machine=w, env=w.env, fleet=None), w.clock)
-        self.w = w
-        self.mac_host, self.host_half, self.store_half = True, True, True
+class Mac(Host):
+    """This host a Mac: the container store is the podman VM's, whose wk answers `wk gc --rows` with `vm_rows` and the
+    rest with `vm_rc` (each ask in `vm_asked`); its machine is `vm_state`, its disk image `image_kb` big with its
+    filesystem using `used_kb`; tart, once `tart()`, lists `guests`; the bench volume is mounted at /vol."""
 
-    def container(self):
-        return self.w.container
+    def __init__(self, tmp):
+        super().__init__(tmp)
+        self.env.update(WK_VM_STORE=str(self.tmp / "vmstore"), TART_HOME="/tart", PATH=str(self.tmp / "bin"), WK_BENCH_ROOT="/vol")
+        self.vm_rows, self.vm_rc, self.vm_asked, self.vm_state, self.guests = "", 0, [], "running", []
+        self.image_kb = self.used_kb = 0
+        self.react(["podman", "machine", "inspect"], lambda a, f: Result(0, json.dumps([{"Name": "wk", "State": f.vm_state}])))
+        self.react(["podman", "machine", "ssh"], self._vm)
+        self.react(["du", "-sk"], lambda a, f: Result(0, "%d\t%s\n" % (f.image_kb if a[2].endswith(".raw") else 4, a[2])))
 
-    def vm(self):
-        return self.w.vm
-
-    def remotes(self):
-        return self.w.remotes
-
-    def boards(self):
-        return self.w.boards
-
-    def board_machine(self, dest):
-        return self.w.board
-
-    def reach(self):
-        return types.SimpleNamespace(offline=lambda n: self.w.offline.get(n, ""))
-
-    def install(self):
-        return self.w.install
-
-
-class FakeVm(places.Vm):
-    def __init__(self, w, guests):
-        env = dict(w.env, TART_HOME="/tart", WK_VM_STORE=str(w.tmp / "vmstore"))
-        super().__init__("vm", str(REPO), env, w)
-        self.guests = guests
-        w.answer(["/bin/tart", "prune"])
-        w.react(["/bin/tart", "list"], lambda a, f: Result(0, json.dumps([{"Name": g, "State": "stopped", "Source": "local"} for g in self.guests])))
+    def mirror(self):
+        return str(self.tmp / "state" / "wk" / "git" / "WebKit.git")
 
     def tart(self):
-        return "/bin/tart"
+        os.makedirs(self.env["PATH"])
+        bin = os.path.join(self.env["PATH"], "tart")
+        open(bin, "w").close()
+        os.chmod(bin, 0o755)
+        bin = os.path.realpath(bin)
+        self.answer([bin, "prune"])
+        self.react([bin, "list"], lambda a, f: Result(0, json.dumps([{"Name": g, "State": "stopped", "Source": "local"} for g in f.guests])))
+        return bin
 
-    @property
-    def store(self):
-        return Store(dict(self.env, WK_STORE=self.env["WK_VM_STORE"]))
+    def disk_image(self, image_kb, used_kb):
+        d = self.tmp / "data" / "containers" / "podman" / "machine" / "applehv"
+        d.mkdir(parents=True)
+        (d / "wk-arm64.raw").write_text("")
+        self.image_kb, self.used_kb = image_kb, used_kb
 
-
-def rubble_world(tmp):
-    """A store holding one of each kind of rubble a plain run takes."""
-    w = World(tmp)
-    for make in (_snapshot, _seed, _payload, _runner, lambda w: _board(w, "a.part"), _selftest):
-        make(w)
-    return w
-
-
-class GcTest(fakes.FlowTest):
-    def setUp(self):
-        super().setUp()
-        os.environ.update(WK_YES="1", WK_DESTRUCTIVE="1")
-        self.w = World(self.tmp)
-
-    def run_gc(self, *flags, w=None):
-        w = w or self.w
-        os.environ.pop("WK_CONFIRMED", None)
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = w.gc().run(flags)
-        return rc, err.getvalue()
-
-    def rows(self, w=None):
-        with contextlib.redirect_stderr(io.StringIO()):
-            return (w or self.w).gc().rows()
+    def _vm(self, a, f):
+        text = a[-1]
+        if text.startswith("df "):
+            return Result(0, "Used\n%d\n" % f.used_kb)
+        if "fstrim" in text:
+            return Result(0, "/: 1 GiB trimmed\n")
+        words = shlex.split(text)
+        i = next(n for n, w in enumerate(words) if w.endswith("/wk"))
+        f.vm_asked.append(" ".join([w for w in words[:i] if w == "WK_YES=1"] + [w for w in words[i + 1:] if w != "2>&1"]))
+        return Result(0, f.vm_rows) if "--rows" in words else Result(f.vm_rc, "")
 
 
-def _snapshot(w):
-    w.publish("b1")
-    w.publish("b2")
-    return lambda: os.path.join(w.store.snapshots_dir(), "b1") not in w.dirs
+BOX = "/state/wk/remote/box"
+SEED = "cache/bench/.tmp-speedometer3-aaaaaaaaaaaa"
 
 
-def _mirror(w):
-    w.publish("b1")
-    w.mkdirs(w.store.mirror_dir())
-    return lambda: w.store.mirror_dir() not in w.dirs
+def _box(w, record=None, pid=999999):
+    w.conf("box", "kind=build\nhost=box.example\nroot=/r\n")
+    if record:
+        root = str(w.tmp) + BOX
+        w.record(root, record, "a", pid, log="%s/%s.log" % (root, record))
 
 
-def _seed(w):
-    d = os.path.join(w.store.cache_dir(), "bench", ".tmp-speedometer3-aaaaaaaaaaaa")
-    w.mkdirs(d)
-    return lambda: d not in w.dirs
+def _payloads(w):
+    w.made(*("cache/bench/speedometer3-" + c * 12 for c in "ab"))
+    w.order[w.p("cache/bench")] = ["speedometer3-" + "b" * 12, "speedometer3-" + "a" * 12]
 
 
-def _payload(w):
-    seeds = os.path.join(w.store.cache_dir(), "bench")
-    for n in ("speedometer3-aaaaaaaaaaaa", "speedometer3-bbbbbbbbbbbb"):
-        w.mkdirs(os.path.join(seeds, n))
-    w.order[seeds] = ["speedometer3-bbbbbbbbbbbb", "speedometer3-aaaaaaaaaaaa"]
-    return lambda: os.path.join(seeds, "speedometer3-aaaaaaaaaaaa") not in w.dirs
+def _runners(w):
+    w.made("cache/bench-runner/new", "cache/bench-runner/old")
+    w.order[w.p("cache/bench-runner")] = ["new", "old"]
 
 
-def _runner(w):
-    d = os.path.join(w.store.cache_dir(), "bench-runner")
-    for n in ("new", "old"):
-        w.mkdirs(os.path.join(d, n))
-    w.order[d] = ["new", "old"]
-    return lambda: os.path.join(d, "old") not in w.dirs and os.path.join(d, "new") in w.dirs
-
-
-def _build_output(w):
-    d = os.path.join(w.store_dir, "cache", "yocto")
-    w.mkdirs(d)
-    return lambda: d not in w.dirs
-
-
-def _dangling_images(w):
-    w.images = [{"Id": "d1", "Dangling": True, "Size": 4096, "Containers": 0}]
-    return lambda: not w.images
-
-
-def _container_image(w):
-    w.images = [{"Id": "t1", "Names": ["ghcr.io/igalia/wkdev:old"], "Size": 4096, "Containers": 0}]
-    return lambda: not w.images
-
-
-def _dangling_volumes(w):
-    w.volumes = ["v1"]
-    return lambda: not w.volumes
-
-
-def _retired(w):
-    trees = [os.path.join(w.store_dir, d) for d in ("cache/ccache", "skills")]
-    w.dirs.update(trees)
-    return lambda: not [d for d in trees if w.exists(d)]
-
-
-def _tart_cache(w):
-    w.vm = FakeVm(w, [])
-    w.mkdirs("/tart/cache")
-    return lambda: ("/bin/tart", "prune", "--space-budget", "20") in w.acts()
-
-
-def _guest_base(w):
-    w.vm = FakeVm(w, ["wk-base"])
-    return lambda: False
-
-
-def _staged(w, which):
-    w.install = types.SimpleNamespace(staging_root=lambda: "/vol", here=w)
-    for n, done in (("20260101", True), ("20260102", True), ("20260103", False)):
-        w.mkdirs("/vol/staged/" + n)
-        if done:
-            w.files["/vol/staged/%s/stage.json" % n] = "{}"
-    return lambda: "/vol/staged/" + which not in w.dirs and "/vol/staged/20260102" in w.dirs
-
-
-def _board(w, slot):
-    w.boards = [("rpi5", {"bench_ssh": "rpi5-bench"})]
-    for n in ("a", "a.part", "a-instr"):
-        w.board.mkdirs("/var/wk/slots/" + n)
-    return lambda: "/var/wk/slots/" + slot not in w.board.dirs and "/var/wk/slots/a" in w.board.dirs
-
-
-def _box(w):
-    recs = record.Records(os.path.join(w.store_dir, "remote", "box"), clock=w.clock, machine=w, env=w.env)
-    w.remotes = [types.SimpleNamespace(name="box", answers=lambda: (True, ""), root_there=lambda: "/r", machine=Host("box"),
-                                       records=lambda clock: recs)]
-    return recs
-
-
-def _remote_mirror(w):
-    _box(w)
-    return lambda: False
-
-
-def _box_record(w, pid=999999, kind="build"):
-    t = _box(w).begin(kind, "here", "a", "wk %s a --kill" % kind, os.path.join(w.store_dir, "remote", "box", kind + ".log"),
-                      ["compile"], pid=pid)
-    w.files[t.field("log")] = ""
-    return lambda: not w.exists(str(t.path)) and not w.exists(t.field("log"))
+def _board(slot):
+    def make(w):
+        w.conf("rpi5", "kind=board\nbench_ssh=rpi5-bench\n")
+        w.slots = {"a", slot}
+    return make
 
 
 def _push_ref(w):
-    mirror, w.refs = w.store.mirror_dir(), {"refs/wk/push/box/eng/x"}
-    w.mkdirs(mirror)
-    w.react(["git", "-C", mirror, "for-each-ref"], lambda a, f: Result(0, "".join(r + "\n" for r in sorted(f.refs))))
-    w.react(["git", "-C", mirror, "update-ref"], lambda a, f: f.refs.discard(a[-1]) or Result(0))
-    return lambda: not w.refs
+    w.mkdirs(w.mirror())
+    w.refs = {PUSH_REF}
 
 
-def _half_made(w):
-    w.workspace("hm", base="")
-    return lambda: "hm" not in w.containers
-
-
-def _selftest(w):
-    w.workspace("wk-test-abc123", ready=True)
-    return lambda: "wk-test-abc123" not in w.containers
-
-
-def _creation_record(w):
-    d = w.creation_record("gone")
-    return lambda: not w.exists(d)
-
-
+RM = "env WK_PLACE=container %s rm %%s --yes" % WK
+# kind: (make, what takes it ("" a plain run), the row a plain run prints, what the run that takes it removes)
 KINDS = {
-    "snapshot": (_snapshot, ""),
-    "mirror": (_mirror, "--purge-mirror"),
-    "seed": (_seed, ""),
-    "payload": (_payload, ""),
-    "runner": (_runner, ""),
-    "build-output": (_build_output, "--purge-builds"),
-    "dangling-images": (_dangling_images, ""),
-    "container-image": (_container_image, "--purge-images"),
-    "dangling-volumes": (_dangling_volumes, ""),
-    "retired": (_retired, ""),
-    "tart-cache": (_tart_cache, ""),
-    "guest-base": (_guest_base, "wk sysimage build macos-guest-base --rm"),
-    "staged-unfinished": (lambda w: _staged(w, "20260103"), ""),
-    "staged-finished": (lambda w: _staged(w, "20260101"), "--purge-builds"),
-    "board-slot-copy": (lambda w: _board(w, "a.part"), ""),
-    "board-slot-instrumented": (lambda w: _board(w, "a-instr"), "--purge-rubble"),
-    "remote-mirror": (_remote_mirror, "wk machine rm box"),
-    "box-record": (_box_record, "--purge-rubble"),
-    "box-creation-record": (lambda w: _box_record(w, kind="new"), "--purge-rubble"),
-    "push-ref": (_push_ref, ""),
-    "half-made": (_half_made, "--purge-rubble"),
-    "selftest-ws": (_selftest, ""),
-    "creation-record": (_creation_record, ""),
+    "snapshot": (lambda w: w.publish("b1", "b2"), "", "4.0K snapshot b1, no workspace on it goes", ["/store/base/b1"]),
+    "unfinished snapshot": (lambda w: (w.publish("b1"), w.publish("b2", complete=False)), "", "4.0K snapshot b2, no workspace on it goes",
+                            ["/store/base/b2"]),
+    "mirror": (lambda w: (w.publish("b1"), w.mkdirs(w.mirror())), "--purge-mirror",
+               "8.0K the mirror and every snapshot kept -- 'wk gc --purge-mirror' takes it", ["/store/base", "/store/git/WebKit.git"]),
+    "seed": (lambda w: w.made(SEED), "", "4.0K abandoned payload seed .tmp-speedometer3-aaaaaaaaaaaa goes", ["/store/" + SEED]),
+    "payload": (_payloads, "", "4.0K superseded speedometer3 payload speedometer3-aaaaaaaaaaaa goes",
+                ["/store/cache/bench/speedometer3-aaaaaaaaaaaa"]),
+    "runner": (_runners, "", "4.0K benchmark runner tree old goes", ["/store/cache/bench-runner/old"]),
+    "build-output": (lambda w: w.made("cache/yocto"), "--purge-builds",
+                     "4.0K yocto build output /store/cache/yocto kept -- 'wk gc --purge-builds' takes it", ["/store/cache/yocto"]),
+    "dangling-images": (lambda w: w.images.append({"Id": "d1", "Dangling": True, "Size": 4096}), "",
+                        "4.0K 1 dangling container image(s) goes", ["podman image prune -f"]),
+    "container-image": (lambda w: w.images.append({"Id": "t1", "Names": ["ghcr.io/igalia/wkdev:old"], "Size": 4096, "Containers": 0}),
+                        "--purge-images", "4.0K container image ghcr.io/igalia/wkdev:old, no container on it "
+                        "kept -- 'wk gc --purge-images' takes it", ["podman rmi t1"]),
+    "dangling-volumes": (lambda w: w.volumes.append("v1"), "", "?? 1 container volume(s) no container mounts goes", ["podman volume prune -f"]),
+    "retired": (lambda w: w.made("cache/ccache", "skills"), "", "4.0K /store/cache/ccache, which no workspace made now mounts goes",
+                ["/store/cache/ccache", "/store/skills"]),
+    "board-slot-copy": (_board("a.part"), "", "4.0K rpi5: slot copy a.part, its deploy never finished goes", [("rpi5-bench", SLOTS + "a.part")]),
+    "board-slot-instrumented": (_board("a-instr"), "--purge-rubble",
+                                "4.0K rpi5: instrumented slot a-instr kept -- 'wk gc --purge-rubble' takes it", [("rpi5-bench", SLOTS + "a-instr")]),
+    "remote-mirror": (_box, "wk machine rm box", "4.0K box: its store's mirror kept -- 'wk machine rm box' takes it", []),
+    "box-record": (lambda w: _box(w, "build"), "--purge-rubble", "4.0K box: a build record of 'a' kept here, not on the box "
+                   "kept -- 'wk gc --purge-rubble' takes it", [BOX + "/task/build-a-20260101T000000Z", BOX + "/build.log"]),
+    "box-creation-record": (lambda w: _box(w, "new"), "--purge-rubble", "4.0K box: a new record of 'a' kept here, not on the box "
+                            "kept -- 'wk gc --purge-rubble' takes it", [BOX + "/task/new-a-20260101T000000Z", BOX + "/new.log"]),
+    "push-ref": (_push_ref, "", "0B %s, left in the mirror by a killed box push goes" % PUSH_REF,
+                 ["git -C /store/git/WebKit.git update-ref -d " + PUSH_REF]),
+    "half-made": (lambda w: w.workspace("hm", ready=False, base=""), "--purge-rubble", "?? workspace 'hm' on container, half-made and "
+                  "nothing creating it kept -- 'wk gc --purge-rubble' takes it", [RM % "hm"]),
+    "selftest-ws": (lambda w: w.workspace("wk-test-abc123", base="b2"), "", "?? workspace 'wk-test-abc123' on container, left by a "
+                    "selftest goes", [RM % "wk-test-abc123"]),
+    "creation-record": (lambda w: w.record(w.store, "new", "gone"), "", "?? creation record of 'gone' on container, its workspace gone goes",
+                        ["/store/task/new-gone-20260101T000000Z", "/store/log/new-gone.log"]),
 }
+
+
+def rows(err):
+    """The rows as a person reads them, their column padding closed up."""
+    return [" ".join(line.split()) for line in err.splitlines() if line[:2] == line[9:11] == "  "]
+
+
+class GcTest(Flow):
+    """`wk gc` on a Linux host (`mac`: a Mac), --yes unless `ask`."""
+
+    def make_world(self, mac=False, *kinds):
+        p = mock.patch("os.uname", return_value=MAC if mac else LINUX)
+        p.start()
+        self.addCleanup(p.stop)
+        w = (Mac if mac else Host)(self.tmp)
+        for k in kinds:
+            KINDS[k][0](w)
+        return w
+
+    def gc(self, *flags, w=None, ask=False):
+        rc, err = self.typed("gc", *flags, *(() if ask else ("--yes",)), w=w)
+        return rc, (w or self.w).rel(err)
+
+    def assertGone(self, w, removed, before):
+        """Each path `removed` names, and each board slot, is gone; what an argv took changed the world."""
+        left = [p for p in removed if isinstance(p, str) and p.startswith("/") and w.exists(str(w.tmp) + p)]
+        left += [p for _, p in (r for r in removed if isinstance(r, tuple)) if os.path.basename(p) in w.slots]
+        self.assertEqual((left, w.state() != before), ([], True))
+
+
+def rubble_world(case):
+    """A store holding one of each kind of rubble a plain run takes."""
+    return case.make_world(False, "snapshot", "seed", "payload", "runner", "board-slot-copy", "selftest-ws")
 
 
 class TestReclaimsOrNames(GcTest):
     def test_every_kind_is_taken_by_a_plain_run_or_named_with_what_takes_it(self):
-        for kind, (make, taker) in KINDS.items():
+        for kind, (_, taker, row, removed) in KINDS.items():
             with self.subTest(kind=kind):
-                w = World(self.tmp)
-                gone = make(w)
-                rc, err = self.run_gc(w=w)
-                self.assertEqual(rc, 0, err)
-                if not taker:
-                    self.assertTrue(gone(), err)
-                    continue
-                self.assertFalse(gone(), err)
-                self.assertIn("'%s' takes it" % ("wk gc " + taker if taker.startswith("--") else taker), err)
+                w = self.make_world(False, kind)
+                before = w.state()
+                rc, err = self.gc(w=w)
+                self.assertEqual((rc, [r for r in rows(err) if r == row]), (0, [row]), err)
+                if taker:
+                    self.assertEqual((w.taken(), w.state()), ([], before), err)
                 if taker.startswith("--"):
-                    rc, err = self.run_gc(taker, w=w)
+                    rc, err = self.gc(taker, w=w)
                     self.assertEqual(rc, 0, err)
-                    self.assertTrue(gone(), err)
+                self.assertEqual(w.taken(), removed, err)
+                if removed:
+                    self.assertGone(w, removed, before)
 
-    def test_a_box_record_whose_driver_still_runs_here_is_named_with_its_kill(self):
+    def test_a_box_record_whose_driver_still_runs_here_is_named_with_its_kill_and_refuses_the_flag(self):
+        _box(self.w, "build", pid=4242)
         self.w.pids.add(4242)
-        gone = _box_record(self.w, pid=4242)
-        rc, err = self.run_gc()
-        self.assertEqual(rc, 0, err)
-        self.assertIn("box: a build record of 'a' kept here, not on the box", err)
-        self.assertIn("kept -- its detached run, pid 4242, still runs here: 'kill 4242' ends it", err)
-        with self.assertRaises(Refused):
-            self.run_gc("--purge-rubble")
-        self.assertFalse(gone())
+        before, why = self.w.state(), "kept -- its detached run, pid 4242, still runs here: 'kill 4242' ends it"
+        rc, err = self.gc()
+        self.assertEqual((rc, rows(err)[0]), (0, "4.0K box: a build record of 'a' kept here, not on the box " + why))
+        rc, err = self.gc("--purge-rubble")
+        self.assertEqual((rc, said(err), self.w.taken(), self.w.state()),
+                         (1, "error: box: a build record of 'a' kept here, not on the box: " + why, [], before))
 
-    def test_wk_disk_renders_the_same_rows(self):
-        _half_made(self.w)
-        _seed(self.w)
-        lines = [rubble.line(r, (), "a plain 'wk gc' takes it") for r in self.rows()]
-        self.assertEqual(len(lines), 2)
-        self.assertTrue(any("'wk gc --purge-rubble' takes it" in l for l in lines), lines)
-        self.assertTrue(any("a plain 'wk gc' takes it" in l for l in lines), lines)
+    def test_a_box_that_does_not_answer_is_named_not_looked_at(self):
+        _box(self.w)
+        self.w.box_up = False
+        self.assertEqual(self.gc(), (0, "==> what wk left on this machine, and what takes it\n       ??  box: its store's mirror"
+                                        "                        not looked at -- box did not answer: connect to host box.example port 22: "
+                                        "Connection refused\n==> nothing to reclaim\n"))
+
+    def test_rows_prints_each_row_tab_separated_and_takes_nothing(self):
+        w = self.make_world(False, "half-made", "seed")
+        rc, out, _ = self.wk(w, "gc", "--rows")
+        self.assertEqual((rc, out.splitlines(), w.taken()), (0, [
+            "4\tseed\tabandoned payload seed .tmp-speedometer3-aaaaaaaaaaaa\t\t\tt",
+            "??\thalf-made\tworkspace 'hm' on container, half-made and nothing creating it\t--purge-rubble\t\tt"], []))
+        self.assertEqual(said(self.typed("gc", "--rows", "--purge-rubble")[1]),
+                         "error: --rows prints what 'wk gc' would take, and takes no --purge flag")
 
 
 class TestAMeasurementIsNeverRubble(GcTest):
     def task(self, *workspaces):
-        d = os.path.join(self.w.store.records_dir(), "bench", "20260101T000000Z-rpi5-a")
-        self.w.files[os.path.join(d, "task.json")] = "{}"
+        d = self.w.p("bench/20260101T000000Z-rpi5-a")
+        self.w.write_own(d + "/task.json", "{}")
         for i, ws in enumerate(workspaces):
-            self.w.files[os.path.join(d, "runs", "r%d" % i, "env.json")] = json.dumps({"workspace": ws})
-        self.w.mkdirs(os.path.join(d, "runs", "r0"))
-        return d
+            self.w.write_own(d + "/runs/r%d/env.json" % i, json.dumps({"workspace": ws}))
 
     def test_no_flag_takes_it_and_gc_names_the_move_into_its_workspace(self):
-        d = self.task("bug-238")
+        self.task("bug-238")
+        before = self.w.state()
         for flags in ((), ("--purge-rubble",), ("--purge-rubble", "--purge-builds", "--purge-images")):
             with self.subTest(flags=flags):
-                rc, err = self.run_gc(*flags)
-                self.assertEqual(rc, 0, err)
-                self.assertTrue(self.w.exists(os.path.join(d, "task.json")), err)
-                self.assertIn("mv %s %s/" % (d, os.path.join(self.w.store.ws_dir("bug-238"), "bench")), err)
+                rc, err = self.gc(*flags)
+                self.assertEqual((rc, rows(err), self.w.taken(), self.w.state()), (0, [
+                    "4.0K /store/bench/20260101T000000Z-rpi5-a: a task outside any workspace kept -- a measurement is never rubble; "
+                    "once moved into its workspace every command reads it: mkdir -p /store/ws/bug-238/bench && "
+                    "mv /store/bench/20260101T000000Z-rpi5-a /store/ws/bug-238/bench/"], [], before))
 
     def test_a_task_whose_runs_name_no_one_workspace_names_the_placeholder(self):
-        d = self.task("a", "b")
-        rc, err = self.run_gc()
-        self.assertIn("mv %s %s/" % (d, os.path.join(self.w.store.ws_dir("<workspace>"), "bench")), err)
+        self.task("a", "b")
+        self.assertIn("mv /store/bench/20260101T000000Z-rpi5-a /store/ws/<workspace>/bench/", rows(self.gc()[1])[0])
 
 
 class TestWhatAPlainRunKeeps(GcTest):
+    def kept(self, *flags, w=None):
+        """A run that takes nothing and changes nothing: its exit status and rows."""
+        w = w or self.w
+        before = w.state()
+        rc, err = self.gc(*flags, w=w)
+        self.assertEqual((w.taken(), w.state()), ([], before), err)
+        return rc, rows(err)
+
     def test_the_shared_ccache_and_skills_are_kept_while_a_container_mounts_them(self):
-        gone, _ = _retired(self.w), self.w.containers.add("old")
-        self.assertEqual((True, False), ("kept -- wk-old" in self.run_gc()[1], gone()))
+        w = self.make_world(False, "retired")
+        w.mounting = ["wk-old"]
+        self.assertEqual(self.kept(w=w)[1][0], "4.0K /store/cache/ccache, which no workspace made now mounts "
+                                               "kept -- wk-old mount it: 'wk rm' and 'wk new' remake each without it")
 
     def test_a_workspace_a_live_selftest_made_is_kept(self):
-        _selftest(self.w)
-        Lock(self.w.store, self.w, self.w.clock).hold("selftest")
-        self.w.pids.add(os.getpid())
-        rc, err = self.run_gc()
-        self.assertIn("wk-test-abc123", self.w.containers, err)
+        w = self.make_world(False, "selftest-ws")
+        w.lock("selftest", 4242)
+        self.assertEqual(self.kept(w=w), (0, ["?? workspace 'wk-test-abc123' on container, left by a selftest kept -- the live "
+                                              "'wk selftest' running here made it"]))
 
     def test_a_seed_whose_lock_is_held_is_being_made_and_kept(self):
-        gone = _seed(self.w)
-        Lock(self.w.store, self.w, self.w.clock).hold("bench-seed-speedometer3-aaaaaaaaaaaa")
-        self.w.pids.add(os.getpid())
-        self.run_gc()
-        self.assertFalse(gone())
+        w = self.make_world(False, "seed")
+        w.lock("bench-seed-speedometer3-aaaaaaaaaaaa", 4242)
+        self.assertEqual(self.kept(w=w), (0, []))
 
     def test_a_workspace_still_being_created_is_not_rubble(self):
-        _half_made(self.w)
-        self.w.creation_record("hm", pid=4242)
-        self.w.pids.add(4242)
-        rc, err = self.run_gc("--purge-rubble")
-        self.assertIn("hm", self.w.containers, err)
+        w = self.make_world(False, "half-made")
+        w.record(w.store, "new", "hm", pid=4242)
+        w.pids.add(4242)
+        self.assertEqual(self.kept("--purge-rubble", w=w), (0, []))
 
     def test_a_finished_workspace_and_its_pinned_snapshot_are_not_rubble(self):
-        self.w.publish("b1")
-        self.w.publish("b2")
-        self.w.workspace("done", ready=True, base="b1")
-        self.assertEqual([(r.kind, bool(r.why)) for r in self.rows()], [("mirror", True)])
+        self.w.publish("b1", "b2")
+        self.w.workspace("done", base="b1")
+        self.assertEqual(self.kept(), (0, ["4.0K every snapshot kept -- every workspace is overlaid on a snapshot here: 'wk rm' done first"]))
+        self.assertEqual(said(self.gc("--purge-mirror")[1]), "error: every snapshot: kept -- every workspace is overlaid on a snapshot "
+                                                             "here: 'wk rm' done first")
 
     def test_an_unpinned_workspace_keeps_every_snapshot_and_says_why(self):
-        _snapshot(self.w)
-        self.w.workspace("nopin", ready=True, base="")
-        rc, err = self.run_gc()
-        self.assertIn(os.path.join(self.w.store.snapshots_dir(), "b1"), self.w.dirs)
-        self.assertIn("nopin never recorded a snapshot", err)
+        w = self.make_world(False, "snapshot")
+        w.workspace("nopin", base="")
+        self.assertEqual(self.kept(w=w)[1][0], "4.0K snapshots kept -- nopin never recorded a snapshot, so any snapshot may be under it: "
+                                               "'wk new <name>' remakes one, 'wk rm <name>' removes it")
+
+    def test_a_push_ref_a_live_pr_open_holds_is_kept_and_named(self):
+        w = self.make_world(False, "push-ref")
+        w.lock("push-ref-box%eng%x", 4242)
+        self.assertEqual(self.kept(w=w)[1][-1], "0B %s, left in the mirror by a killed box push kept -- the 'wk pr open' (pid 4242) "
+                                                "pushing it holds it" % PUSH_REF)
 
 
 class TestWhatWasNotLookedAt(GcTest):
     def test_a_failed_image_listing_is_named_not_reported_as_nothing(self):
         self.w.answer(["podman", "images"], rc=125, err="cannot connect to podman")
-        rows = self.rows()
-        self.assertEqual([(r.kb, bool(r.why)) for r in rows if r.kind == "container-image"], [(None, True)])
-
-    def test_a_push_ref_a_live_pr_open_holds_is_kept_and_named(self):
-        _push_ref(self.w)
-        self.w.symlink("pid=4242 tok=x at=t cmd=wk", self.w.store.lock_path(pr.push_lock("refs/wk/push/box/eng/x")))
-        self.w.pids.add(4242)
-        rc, err = self.run_gc()
-        self.assertEqual(rc, 0, err)
-        self.assertEqual({"refs/wk/push/box/eng/x"}, self.w.refs)
-        self.assertIn("kept -- the 'wk pr open' (pid 4242) pushing it holds it", err)
+        self.assertEqual(rows(self.gc()[1]), ["?? container images not looked at -- 'podman images' failed: cannot connect to podman"])
 
     def test_a_failed_ref_listing_in_the_mirror_is_named(self):
-        _push_ref(self.w)
-        self.w.answer(["git", "-C", self.w.store.mirror_dir(), "for-each-ref"], rc=128, err="fatal: not a git repository")
-        rc, err = self.run_gc()
-        self.assertEqual(rc, 0, err)
-        self.assertIn("not looked at -- git for-each-ref failed: fatal: not a git repository", err)
+        w = self.make_world(False, "push-ref")
+        w.answer(["git", "-C", w.mirror(), "for-each-ref"], rc=128, err="fatal: not a git repository")
+        self.assertEqual(rows(self.gc(w=w)[1])[-1], "?? box pushes' temporary refs in the mirror not looked at -- git for-each-ref "
+                                                    "failed: fatal: not a git repository")
+
+
+class Terminal(io.StringIO):
+    def isatty(self):
+        return True
 
 
 class TestOneQuestion(GcTest):
     def test_nothing_to_take_asks_nothing(self):
-        os.environ.pop("WK_YES")
-        self.assertEqual(self.run_gc()[0], 0)
-        self.assertEqual(self.w.acts(), [])
+        rc, err = self.gc(ask=True)
+        self.assertEqual((rc, said(err), self.w.taken()), (0, "==> nothing to reclaim", []))
 
     def test_declining_changes_nothing(self):
-        os.environ.pop("WK_YES")
-        _snapshot(self.w)
-        before = self.w.state()
-        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()):
-            self.w.gc().run(())
-        self.assertEqual(self.w.state(), before)
+        w = self.make_world(False, "snapshot")
+        before = w.state()
+        rc, err = self.gc(w=w, ask=True)
+        self.assertEqual((rc, said(err), w.taken(), w.state()), (1, "error: nothing was changed", [], before))
+
+    def test_it_is_asked_once_on_a_terminal_and_a_yes_takes_every_row(self):
+        w = self.make_world(False, "snapshot", "seed")
+        with mock.patch("sys.stdin", Terminal("y\n")):
+            rc, err = self.gc(w=w, ask=True)
+        self.assertEqual((rc, err.count("[y/N]"), w.taken()), (0, 1, ["/store/base/b1", "/store/" + SEED]))
 
     def test_a_flag_refused_by_a_row_refuses_the_run_before_anything_goes(self):
-        _mirror(self.w)
-        _seed(self.w)
-        self.w.workspace("live", ready=True, base="b1")
-        before = self.w.state()
-        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()) as err:
-            self.w.gc().run(("--purge-mirror",))
-        self.assertEqual(self.w.state(), before)
-        self.assertIn("'wk rm' live first", err.getvalue())
+        w = self.make_world(False, "mirror", "seed")
+        w.workspace("live")
+        before = w.state()
+        rc, err = self.gc("--purge-mirror", w=w)
+        self.assertEqual((rc, said(err), w.taken(), w.state()), (1, "error: the mirror and every snapshot: kept -- every workspace "
+                                                                    "is overlaid on a snapshot here: 'wk rm' live first", [], before))
 
     def test_a_failing_removal_ends_none_of_the_rest(self):
-        _tart_cache(self.w)
-        self.w.answer(["/bin/tart", "prune"], rc=1)
-        gone = _seed(self.w)
-        rc, err = self.run_gc()
-        self.assertEqual(rc, 1)
-        self.assertTrue(gone(), err)
+        w = self.make_world(False, "dangling-images", "seed")
+        w.answer(["podman", "image", "prune"], rc=1)
+        rc, err = self.gc(w=w)
+        self.assertEqual((rc, said(err), w.taken(), w.exists(w.p(SEED))), (1, "==> gc complete", ["podman image prune -f", "/store/" + SEED], False))
+        self.assertIn("warning: could not reclaim 1 dangling container image(s)", err)
+
+    def test_a_dry_run_says_what_would_go_and_changes_nothing(self):
+        w = self.make_world(False, "snapshot", "board-slot-copy")
+        before = w.state()
+        rc, err = self.typed("gc", "--dry-run", w=w)
+        self.assertEqual((rc, w.state()), (0, before), err)
+        self.assertIn("would ask: remove the 2 item(s) marked 'goes' (8.0K at least)? [y/N]", err)
+        self.assertIn("would remove on rpi5-bench: /var/wk/slots/a.part", err)
 
 
 class TestTheVmHalf(GcTest):
-    def mac(self, rows, running=True):
-        g = self.w.gc()
-        g.store_half = False
-        calls = []
+    """On a Mac the podman VM's own wk answers for the container store, and tart's pulled-image cache is pruned to its
+    budget (caches only) while the golden base is named with the command that erases it."""
 
-        def wk(*args, env=None, quiet=False):
-            calls.append((args, os.environ.get("WK_YES")))
-            return (0, "".join(rubble.to_line(r) + "\n" for r in rows)) if "--rows" in args else (0, "")
-        self.w.container = types.SimpleNamespace(machine_state=lambda: "running" if running else "stopped", wk=wk, list=lambda: [],
-                                                 store_machine=self.w)
-        return g, calls
-
-    def image(self, allocated_kb, used_kb):
-        """The machine's raw image on disk, `du` counting `allocated_kb`, its filesystem using `used_kb`."""
-        d = self.w.tmp / "data" / "containers" / "podman" / "machine" / "applehv"
-        d.mkdir(parents=True)
-        (d / ("%s-arm64.raw" % self.w.store.podman_machine())).write_text("")
-        self.w.env["XDG_DATA_HOME"] = str(self.w.tmp / "data")
-        self.w.react(["du", "-sk"], lambda a, f: Result(0, "%d\t%s\n" % (allocated_kb, a[2])))
-        self.w.answer(["df", "-k", "--output=used", "/"], out="Used\n%d\n" % used_kb)
-        self.w.answer(["sudo", "fstrim", "-av"], out="/: 1 GiB trimmed\n")
+    def setUp(self):
+        super().setUp()
+        self.w = self.make_world(mac=True)
 
     def test_the_blocks_the_images_filesystem_freed_are_a_row_fstrim_takes(self):
-        g, _ = self.mac([])
-        self.image(allocated_kb=3 << 20, used_kb=1 << 20)
-        with contextlib.redirect_stderr(io.StringIO()) as err:
-            rows = [r for r in g.rows() if r.kind == "image"]
-            rc = g.run(())
-        self.assertEqual([(r.kb, r.flag, r.why) for r in rows], [(2 << 20, "", "")], err.getvalue())
-        self.assertEqual(rc, 0, err.getvalue())
-        self.assertIn(("sudo", "fstrim", "-av"), [e[1] for e in self.w.effects if e[0] == "run"])
+        self.w.disk_image(3 * GB, GB)
+        rc, err = self.gc()
+        self.assertEqual((rc, rows(err), self.w.taken()), (0, ["2.0G the podman machine's disk image, holding blocks its filesystem "
+                                                               "freed goes"], ["podman machine ssh wk -- sudo fstrim -av"]))
 
     def test_under_a_gigabyte_freed_is_no_row(self):
-        g, _ = self.mac([])
-        self.image(allocated_kb=(1 << 20) + 10, used_kb=1 << 20)
-        with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual([r for r in g.rows() if r.kind == "image"], [])
+        self.w.disk_image(GB + 10, GB)
+        rc, err = self.gc()
+        self.assertEqual((rc, rows(err), self.w.taken()), (0, [], []))
 
     def test_the_vms_rows_are_asked_once_and_its_wk_takes_them_with_the_answer(self):
-        g, calls = self.mac([rubble.row("snapshot", "snapshot b1", 4, take=lambda: None)])
-        os.environ.pop("WK_YES")
-        with mock.patch.object(act, "confirm", return_value=True) as ask, contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = g.run(())
-        self.assertEqual((rc, ask.call_count), (0, 1), err.getvalue())
-        self.assertIn("podman VM: snapshot b1", err.getvalue())
-        self.assertEqual(calls, [(("gc", "--rows"), None), (("gc", "--yes"), None)])
-        self.assertIsNone(os.environ.get("WK_YES"), "the answer reaches the VM's wk in its argv, not this process's environment")
+        self.w.vm_rows = "4\tsnapshot\tsnapshot b1\t\t\tt\n"
+        with mock.patch("sys.stdin", Terminal("y\n")):
+            rc, err = self.gc(ask=True)
+        self.assertEqual((rc, rows(err), err.count("[y/N]"), self.w.vm_asked), (0, ["4.0K podman VM: snapshot b1 goes"], 1,
+                                                                                    ["gc --rows", "gc --yes"]))
+
+    def mirror_kept(self, rc, said_, asked):
+        self.w.mkdirs(self.w.mirror())
+        before = self.w.state()
+        got, err = self.gc("--purge-mirror")
+        self.assertEqual((got, said(err), self.w.vm_asked, self.w.taken(), self.w.state()), (rc, said_, asked, [], before))
+        return err
 
     def test_the_hosts_mirror_is_kept_while_the_vm_has_a_workspace_on_it(self):
-        self.w.mkdirs(self.w.store.mirror_dir())
-        g, calls = self.mac([rubble.row("mirror", "every snapshot", 4, "--purge-mirror", lambda: None, "kept -- 'wk rm' a first")])
-        with self.assertRaises(Refused), contextlib.redirect_stderr(io.StringIO()):
-            g.run(("--purge-mirror",))
-        self.assertIn(self.w.store.mirror_dir(), self.w.dirs)
-        self.assertEqual([c[0] for c in calls], [("gc", "--rows")])
+        self.w.vm_rows = "4\tmirror\tevery snapshot\t--purge-mirror\tkept -- 'wk rm' a first\tt\n"
+        self.mirror_kept(1, "error: the mirror and every snapshot: kept -- 'wk rm' a first", ["WK_YES=1 gc --rows"])
+
+    def test_a_failing_vm_half_keeps_the_mirror_it_borrows(self):
+        self.w.vm_rows, self.w.vm_rc = "4\tsnapshot\tsnapshot b1\t\t\tt\n", 3
+        err = self.mirror_kept(3, "==> gc complete", ["WK_YES=1 gc --rows", "WK_YES=1 gc --yes --purge-mirror"])
+        self.assertIn("warning: the podman VM's half exited 3, so the mirror it borrows is kept", err)
+
+    def test_a_guest_keeps_the_mirror_it_clones_from(self):
+        self.w.tart()
+        self.w.guests = ["wk-g1"]
+        self.mirror_kept(1, "error: the mirror and every snapshot: kept -- guest(s) g1 clone from it: 'wk rm' them first", ["WK_YES=1 gc --rows"])
 
     def test_a_stopped_vm_is_named_and_keeps_the_mirror(self):
-        self.w.mkdirs(self.w.store.mirror_dir())
-        g, calls = self.mac([], running=False)
-        with contextlib.redirect_stderr(io.StringIO()):
-            rows = g.rows()
-        self.assertEqual({r.kind: bool(r.why) for r in rows}, {"mirror": True, "store": True})
+        self.w.vm_state = "stopped"
+        self.mirror_kept(1, "error: the mirror and every snapshot: not looked at -- the podman machine is stopped: 'wk start', then "
+                            "'wk gc' again", [])
+        self.assertEqual(rows(self.gc()[1]), [
+            "4.0K the mirror and every snapshot not looked at -- the podman machine is stopped: 'wk start', then 'wk gc' again",
+            "?? the container store in the podman VM not looked at -- the podman machine is stopped: 'wk start', then 'wk gc' again"])
 
-
-class TestWhatGcKeepsWhenNothingVerifies(WkTest):
-    def _bases(self, ids, complete=()):
-        store = self.tmp / "store"
-        for i in ids:
-            d = store / "base" / i
-            (d / "WebKit").mkdir(parents=True)
-            if i in complete:
-                (d / "sha").write_text("deadbeef\n")
-        (store / "ws").mkdir(parents=True, exist_ok=True)
-        return store
-
-    def _unreferenced(self, store):
-        return Snapshots(Store({"WK_STORE": str(store)}), Local()).unreferenced()
-
-    def test_the_newest_finished_snapshot_is_kept_though_none_verifies(self):
-        store = self._bases(["20260101", "20260202"], complete=["20260101", "20260202"])
-        self.assertEqual(["20260101"], self._unreferenced(store))
-
-    def test_an_unfinished_newest_one_protects_nothing_and_goes(self):
-        store = self._bases(["20260101", "20260202"], complete=["20260101"])
-        self.assertEqual(["20260202"], self._unreferenced(store))
-
-
-class TestTheCacheIsTrimmedToItsBudget(GcTest):
-    """tart's pulled-image cache is pruned to its budget (caches only), and the golden base is named with the command
-    that erases it."""
-
-    def prunes(self):
-        return [a for a in self.w.acts() if a[:2] == ("/bin/tart", "prune")]
-
-    def with_cache(self, **env):
-        self.w.env.update(env)
-        self.w.vm = FakeVm(self.w, [])
-        self.w.mkdirs("/tart/cache")
-
-    def test_it_prunes_to_the_declared_budget_or_the_default(self):
+    def test_tart_prunes_its_cache_to_the_declared_budget_or_the_default(self):
         for env, budget in (({"WK_TART_CACHE_GB": "7"}, "7"), ({}, "20")):
             with self.subTest(budget=budget):
-                self.setUp()
-                self.with_cache(**env)
-                rc, err = self.run_gc()
-                self.assertEqual((rc, self.prunes()), (0, [("/bin/tart", "prune", "--space-budget", budget)]), err)
+                w = self.make_world(mac=True)
+                w.env.update(env)
+                tart = w.tart()
+                w.mkdirs("/tart/cache")
+                rc, err = self.gc(w=w)
+                self.assertEqual((rc, rows(err), w.taken()), (0, ["4.0K tart's pulled-image cache, down to %s GB goes" % budget],
+                                                              ["%s prune --space-budget %s" % (w.rel(tart), budget)]))
 
     def test_a_failing_tart_is_reported_and_the_rest_still_goes(self):
-        self.with_cache()
-        self.w.answer(["/bin/tart", "prune"], rc=1)
-        gone = _seed(self.w)
-        rc, err = self.run_gc()
-        self.assertEqual(rc, 1)
-        self.assertTrue(gone(), err)
+        tart = self.w.tart()
+        self.w.answer([tart, "prune"], rc=1)
+        self.w.mkdirs("/tart/cache")
+        KINDS["seed"][0](self.w)
+        rc, err = self.gc()
+        self.assertEqual((rc, self.w.taken(), self.w.exists(self.w.p(SEED))),
+                         (1, ["/store/" + SEED, self.w.rel(tart) + " prune --space-budget 20"], False), err)
+        self.assertIn("warning: could not reclaim tart's pulled-image cache, down to 20 GB", err)
 
     def test_without_tart_there_is_nothing_to_trim(self):
-        self.w.vm = FakeVm(self.w, [])
-        self.w.vm.tart = lambda: None
         self.w.mkdirs("/tart/cache")
-        self.assertEqual([r.kind for r in self.rows()], [])
+        rc, err = self.gc()
+        self.assertEqual((rc, rows(err), self.w.taken()), (0, [], []))
 
     def test_the_golden_base_is_named_never_taken(self):
-        self.w.vm = FakeVm(self.w, ["wk-base"])
-        (r,) = self.rows()
-        self.assertEqual((r.kind, r.flag, r.take), ("guest-base", "wk sysimage build macos-guest-base --rm", None))
+        self.w.tart()
+        self.w.guests = ["wk-base"]
+        rc, err = self.gc("--purge-builds", "--purge-rubble", "--purge-images")
+        self.assertEqual((rc, rows(err), self.w.taken()), (0, ["4.0K golden base 'wk-base' kept -- 'wk sysimage build macos-guest-base "
+                                                               "--rm' takes it"], []))
 
+    def test_on_the_bench_volume_an_unfinished_stage_goes_and_a_finished_one_but_the_newest_is_named(self):
+        self.w.files["/etc/wk-image"] = "id=mac\n"
+        self.w.made(*("/vol/staged/2026010%d" % n for n in (1, 2, 3)))
+        for n in (1, 2):
+            self.w.files["/vol/staged/2026010%d/stage.json" % n] = "{}"
+        rc, err = self.gc()
+        self.assertEqual((rc, rows(err), self.w.taken()), (0, [
+            "4.0K finished stage 20260101 kept -- 'wk gc --purge-builds' takes it", "4.0K stage 20260103, never finished goes"],
+            ["/vol/staged/20260103"]))
+        rc, err = self.gc("--purge-builds")
+        self.assertEqual((rc, self.w.taken(), "/vol/staged/20260102" in self.w.dirs), (0, ["/vol/staged/20260101"], True))
+
+
+class TestNotReachableFromTheCli(unittest.TestCase):
+    """`wk doctor`'s disk section renders these rows with its own word for what a plain run takes; it reads this host
+    through a Doctor and a Gc it builds itself (lib/wk/disk.py machine_report), so no world reaches it."""
+
+    def test_wk_doctor_renders_the_rows_with_what_takes_each(self):
+        from wk import rubble   # noqa: E402 -- tests.support put lib on the path
+        lines = [rubble.line(rubble.row(k, "x", None, flag, lambda: None), (), "a plain 'wk gc' takes it")
+                 for k, flag in (("half-made", "--purge-rubble"), ("seed", ""))]
+        self.assertEqual([" ".join(l.split()) for l in lines], ["?? x kept -- 'wk gc --purge-rubble' takes it", "?? x a plain 'wk gc' takes it"])
 
 
 if __name__ == "__main__":

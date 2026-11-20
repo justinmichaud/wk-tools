@@ -219,13 +219,8 @@ def machine_mutations(w):
     return [re.sub(r"wk-tools-push\.\w+", "wk-tools-push", str(e).replace(str(w.tmp), "")) for e in w.fake.mutations()]
 
 
-def gc_mutations(w):
-    return [("here",) + e for e in w.mutations()] + [("board",) + e for e in w.board.mutations()]
-
-
 def gc_run(case, w):
-    os.environ.pop("WK_CONFIRMED", None)
-    quiet(w.gc().run, ("--purge-builds",))
+    quiet(case.wk, w, "gc", "--purge-builds", "--yes")
 
 
 def handover_world(case):
@@ -341,7 +336,7 @@ ROWS = {
                           machine.World.state, machine_mutations),
     "machine setup board": Row(machine.MachineTest, lambda c: c.world(conf=machine.BOARD), lambda c, w: quiet(w.machines().setup, "box"),
                                machine.World.state, machine_mutations),
-    "gc": Row(gc.GcTest, lambda c: gc.rubble_world(c.tmp), gc_run, gc.World.state, gc_mutations),
+    "gc": Row(gc.GcTest, gc.rubble_world, gc_run, gc.Host.state),
     "pr checkout": Row(prw.PrTest, lambda c: prw.fork_branch(c.tmp), lambda c, w: prw.run(c, w, "ws", "alice:eng/x"),
                        prw.World.checkout_state, prw.plan),
     "pr rebase": Row(prw.PrTest, lambda c: prw.behind(c.tmp), lambda c, w: prw.run(c, w, "rebase", "ws"), lambda w: dict(w.branches), prw.plan),
