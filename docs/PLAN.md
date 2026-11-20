@@ -1397,6 +1397,9 @@ Decisions are asked as questions, and their answers are recorded under "Decision
   - `python3 -m wk.tailnet check` and `WK_TS_API_SECRET_FILE` have no caller but a test; `wk key check` verifies that credential.
   - The per-invocation memos (`Container._machine_state`, `Remote._probed`, `Remote._has_wk`, `Peer._rows`, `Peer._routes`,
     `Vm._vm_store`) are stored copies of a recomputable fact; without them a listing repeats ssh and podman round trips.
+  - `wk new` for a container prints the SDK create script's 70-line banner, which ends by naming `wkdev-enter` and `podman logs`,
+    then nothing for the minute the first start takes. The create script streams by rule (`unit machine.streams_long_effects`: a
+    pull must show); give the fork's `wk` branch a `--quiet` for it and print the first start's own lines instead?
   - The multi-line explanations `wk gui --lldb`, `wk run --until-crash --lldb` and `wk test --lldb` print before they start
     (about 25 lines of `log`): keep, or move to `-h`?
 - podman on this Mac is 5.4.0, driving the pinned machine-os 5.8; the official installer (sudo) moves the client, and
