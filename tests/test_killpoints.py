@@ -370,7 +370,7 @@ ROWS = {
     "key ensure": key_row(lambda c: key.KeyWorld(c.tmp), lambda k: k.ensure(), minted=True),
     "key adopt": key_row(lambda c: key.KeyWorld(c.tmp), lambda k: k.adopt_verb("fork", lambda: b"KEY:taken\n"), minted=True),
     "secrets publish": Row(secrets.SecretsTest, secrets_world, lambda c, w: secrets.quiet(w.sec().publish), lambda w: w.state()),
-    "key sudo setup": Row(unittest.TestCase, lambda c: sudo._setup_fake(free_before=False, property_holds=True), sudo_run,
+    "key sudo setup": Row(unittest.TestCase, lambda c: sudo.World(), sudo_run,
                           lambda w: sorted(w.files.items())),
     "test": Row(wktest.TestTest, lambda c: wktest.World(c.tmp), wk_test, wktest.World.state,
                 dry="wk test --dry-run stops before the wk-tools push its wet run makes, so the push is not in its plan"),

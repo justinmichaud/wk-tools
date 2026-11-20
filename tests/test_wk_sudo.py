@@ -1,213 +1,206 @@
-"""`wk key sudo` (lib/wk/sudo.py, cmd/key) against Fake sudo and visudo answers."""
-
+"""`wk key sudo` typed into a world whose sudo and visudo answer as the real ones do, and whose build machines answer
+through their own wk."""
+import os
 import sys
 import unittest
-from unittest import mock
 
-from tests.fakes import FakeRegistry, FakeDriver
 from tests import fakes
-from tests.support import REPO, as_dispatched, invocation, load_cmd
+from tests.fakes import FakeDriver, FakeRegistry
+from tests.test_wk_workspace import said
 
-sys.path.insert(0, str(REPO / "lib"))
-from wk import sudo  # noqa: E402
-from wk.act import Refused  # noqa: E402
-from wk.machine import HAVE, Result  # noqa: E402
-from tests.fakes import Fake  # noqa: E402
-from wk.sudo import Sudo  # noqa: E402
-
-cmd = load_cmd("key")
-
-
-def key_sudo(argv, reg=None):
-    """`wk key sudo <argv>` as the dispatcher hands it on."""
-    return cmd.main(as_dispatched("key", ["sudo"] + argv), invocation(reg or registry()))
-
-LISTING_UNSET = "User justinmichaud may run the following commands on tolken:\n    (ALL : ALL) ALL\n"
+DROPIN = "/etc/sudoers.d/zz-justinmichaud-passwd"
+HEAD = "User justinmichaud may run the following commands on here:\n"
+UNSET = HEAD + "    (ALL : ALL) ALL\n"
+BLANKET = HEAD + "    (root) NOPASSWD: ALL\n"
+BODY = ("# Installed by 'wk key sudo setup'. Do not edit; re-run the command instead.\n"
+        "Defaults:justinmichaud timestamp_timeout=0.5\njustinmichaud ALL=(ALL:ALL) PASSWD: ALL\n")
+GROUP = "wheel" if sys.platform == "darwin" else "root"
+QUIESCE_PRIV = "/usr/local/libexec/wk-quiesce-priv"
+TMP = "/tmp/wk-sudoers.%d" % os.getpid()
+INSTALL = ("sudo", "install", "-m", "0440", "-o", "root", "-g", GROUP, TMP, DROPIN)
 
 
-def _fake(free=False, listing=LISTING_UNSET, rc_l=0):
-    f = fakes.World()
-    f.answer(["id", "-un"], 0, "justinmichaud\n")
-    f.answer(["hostname", "-s"], 0, "tolken\n")
-    f.answer(["sudo", "-n", "true"], 0 if free else 1)
-    f.answer(["sudo", "-n", "-l"], rc_l, listing)
-    return f
+def window(minutes):
+    return "    timestamp_timeout=%s\n\n" % minutes + UNSET
 
 
-class TestArgv(unittest.TestCase):
-    """What each spelling reaches: the verb, --on and --all read by the dispatcher off key's table."""
+class Box(FakeDriver):
+    """A build machine whose own wk is a `PEER <name> <args>` line its machine runs, answering `out`."""
 
-    def reached(self, argv):
-        seen = []
-        with mock.patch.object(sudo, "on_machine", lambda reg, a, t, env: seen.append(("machine", a, t)) or 0), \
-                mock.patch.object(sudo, "all_machines", lambda reg, a, env: seen.append(("all", a)) or 0), \
-                mock.patch.object(sudo, "status_here", lambda s, env: seen.append(("here", "status")) or 0), \
-                mock.patch.object(Sudo, "setup", lambda s: seen.append(("here", "setup")) or 0):
-            key_sudo(argv)
-        return seen
-
-    def test_each_spelling_reaches_its_arm(self):
-        for argv, want in (([], ("here", "status")), (["setup"], ("here", "setup")),
-                           (["setup", "--on", "moose"], ("machine", "setup", "moose")),
-                           (["status", "--all"], ("all", "status"))):
-            with self.subTest(argv=argv):
-                self.assertEqual([want], self.reached(argv))
-
-    def test_an_unknown_verb_or_an_empty_target_is_refused(self):
-        for argv in (["bogus"], ["--on", ""]):
-            with self.subTest(argv=argv), self.assertRaises(Refused):
-                self.reached(argv)
+    def wk(self, *args, env=None, quiet=False):
+        r = self.machine.run(["sh", "-c", self.wk_cmd(args, env)])
+        return r.rc, r.out
 
 
-class TestVerdict(unittest.TestCase):
-    """0 exactly when a password is required and the window is 30s or less."""
+class World(fakes.World):
+    """This host: `sudo -n -l` answers `listing` (`readable` False: it wants a password), `sudo -n true` runs while
+    `free` (a cached timestamp or a NOPASSWD rule), and after `sudo -k` only while `still_free` (a rule later in the
+    include order than the drop-in); `visudo -c` passes `parses` on the generated file, `parses_after` on the whole."""
 
-    def test_each_listing_s_verdict(self):
-        timeout = lambda t: "    timestamp_timeout=%s\n\n" % t + LISTING_UNSET  # noqa: E731
-        head = "User justinmichaud may run the following commands on tolken:\n"
+    def __init__(self, tmp=None, listing=UNSET, free=False, readable=True, boxes=None):
+        super().__init__(tmp)
+        self.listing, self.free, self.readable = listing, free, readable
+        self.still_free, self.parses, self.parses_after = False, True, True
+        R = fakes.Result
+        self.answer(["id", "-un"], out="justinmichaud\n")
+        self.answer(["sh", "-c", 'command -v "$1" >/dev/null', "sh", "visudo"])
+        self.react(["sudo", "-n", "-l"], lambda a, f: R(0, f.listing) if f.readable else R(1))
+        self.react(["sudo", "-n", "true"], lambda a, f: R(0 if f.free else 1))
+        self.react(["sudo", "-k"], lambda a, f: R(0 if setattr(f, "free", f.still_free) is None else 1))
+        self.react(["visudo", "-c", "-f"], lambda a, f: R(0) if f.parses else R(1, "", "syntax error"))
+        self.react(["sudo", "install"], lambda a, f: R(0 if f._set_file(a[-1], f.files[a[-2]]) is None else 1))
+        self.react(["sudo", "visudo", "-c"], lambda a, f: R(0 if f.parses_after else 1))
+        self.react(["sudo", "rm", "-f"], lambda a, f: R(0 if f._drop(a[-1]) is None else 1))
+        self.react(["sh", "-c"], lambda a, f: R(0, f.boxes[a[2].split()[1]].out))   # PEER <name> ...
+        self.boxes = {n: Box(n, machine=self, out=b) if isinstance(b, str) else b for n, b in (boxes or {}).items()}
+        self.reg = FakeRegistry(self.env, self, lambda n, e: self.boxes[n], names=list(self.boxes))
+
+
+class Flow(fakes.FlowTest):
+    def typed(self, w, *argv):
+        w.effects = []
+        return self.wk(w, "key", "sudo", *argv)
+
+
+class TestStatus(Flow):
+    """`wk key sudo` reports one row: 0 exactly when a password is required and the window is 30 seconds or less."""
+
+    def test_each_listing_is_judged_by_its_window_and_what_runs_without_a_password(self):
         # sudoers' last match wins: a later blanket NOPASSWD overrides an earlier ALL; one naming a program is no blanket.
-        for name, free, listing, rc_l, dropin, env, want, msg in (
-                ("our window", False, timeout("0.5"), 0, False, {}, 0, "30 seconds"),
-                ("longer window", False, timeout("15"), 0, False, {}, 1, "wanted 30 seconds"),
-                ("zero", False, timeout("0"), 0, False, {}, 0, "stricter"),
-                ("never expires", False, timeout("-1"), 0, False, {}, 1, ""),
-                ("unset", False, LISTING_UNSET, 0, False, {}, 1, "sudo's default"),
-                ("blanket last", True, head + "    (ALL : ALL) ALL\n    (root) NOPASSWD: ALL\n", 0, False, {}, 1,
-                 "NOPASSWD: ALL is granted"),
-                ("scoped", True, head + "    (root) NOPASSWD: /usr/local/libexec/wk-quiesce-priv\n    (ALL : ALL) ALL\n",
-                 0, False, {}, 1, "a timestamp is cached"),
-                ("unreadable, drop-in", False, LISTING_UNSET, 1, True, {}, 0, "is installed"),
-                ("unreadable, none", False, LISTING_UNSET, 1, False, {}, 1, "sudo's default")):
-            with self.subTest(name):
-                f = _fake(free=free, listing=listing, rc_l=rc_l)
-                s = Sudo(f, env)
-                if dropin:
-                    f.files[s.dropin()] = "..."
-                rc, got = s.verdict()
-                self.assertEqual(rc, want, got)
-                self.assertIn(msg, got)
+        keeps, wanted = "a password is required, but sudo keeps a timestamp", "-- wanted 30 seconds"
+        for world, rc, row in (
+                (dict(listing=window("0.5")), 0, "a password is required, and the timestamp lasts 30 seconds"),
+                (dict(listing=window("15")), 1, "%s for 15 minute(s) (900 seconds) %s" % (keeps, wanted)),
+                (dict(listing=window("0")), 0, "a password is required, and no timestamp is kept at all (timeout 0) -- "
+                                               "stricter than the 30 seconds this installs, so nothing to do"),
+                (dict(listing=window("-1")), 1, "%s for -1 minute(s) (-60 seconds) %s" % (keeps, wanted)),
+                (dict(), 1, keeps + " (timeout unset -- sudo's default)"),
+                (dict(listing=UNSET + BLANKET[len(HEAD):], free=True), 1, "NOPASSWD: ALL is granted here -- root costs nothing at all"),
+                (dict(listing=HEAD + "    (root) NOPASSWD: %s\n    (ALL : ALL) ALL\n" % QUIESCE_PRIV, free=True), 1,
+                 "sudo runs without a password right now -- a timestamp is cached")):
+            with self.subTest(row):
+                w = World(self.tmp, **world)
+                code, out, err = self.typed(w)
+                self.assertEqual((code, out, rc == 1), (rc, "%-22s %s\n" % ("here", row), "  fix: wk key sudo setup" in err))
+                self.assertEqual([], w.mutations())
+
+    def test_a_listing_that_wants_a_password_is_judged_by_the_drop_in_alone(self):
+        for held, rc, tail in ((True, 0, "but %s is installed" % DROPIN),
+                               (False, 1, "and %s is not installed, so it is sudo's default (a few minutes)" % DROPIN)):
+            with self.subTest(held=held):
+                w = World(self.tmp, readable=False)
+                if held:
+                    w.files[DROPIN] = BODY
+                code, out, _ = self.typed(w, "status")
+                self.assertEqual((code, out.splitlines()[-1]), (rc, "  the timeout cannot be read without authenticating -- " + tail))
+
+    def test_a_verb_it_does_not_have_and_an_empty_machine_are_refused(self):
+        w = World(self.tmp)
+        code, _, err = self.typed(w, "bogus")
+        self.assertEqual((code, err.splitlines()[0]), (2, "warning: unknown verb: bogus (one of status, setup)"))
+        code, _, err = self.typed(w, "status", "--on", "")
+        self.assertEqual((code, said(err)), (1, "error: --on needs a name"))
+        self.assertEqual([], w.effects)
+
+    def test_inside_a_workspace_it_is_refused_before_anything_is_asked(self):
+        w = World(self.tmp)
+        w.env["WK_MARKER"] = str(self.tmp / "marker")
+        (self.tmp / "marker").write_text("name=myws\n")
+        code, _, err = self.typed(w)
+        self.assertEqual((code, said(err).split(".")[0]), (1, "error: 'wk key' acts on a host, and this is workspace 'myws'"))
+        self.assertEqual([], w.effects)
 
 
-def _setup_fake(free_before=True, install_ok=True, post_check_ok=True, property_holds=True):
-    """Every command Sudo.setup() runs answers; the last `sudo -n true`, asked after `sudo -k`, is the property test."""
-    f = fakes.World()
-    f.answer(["id", "-un"], 0, "justinmichaud\n")
-    f.answer(["hostname", "-s"], 0, "tolken\n")
-    f.answer(HAVE + ("visudo",))
-    listing = ("User justinmichaud may run the following commands on tolken:\n"
-               "    (root) NOPASSWD: ALL\n") if free_before else LISTING_UNSET
-    f.answer(["sudo", "-n", "-l"], 0, listing)
+class TestSetup(Flow):
+    def test_it_validates_installs_validates_again_forgets_the_timestamp_and_proves_a_password_is_asked(self):
+        w = World(self.tmp, listing=BLANKET, free=True)
+        code, _, err = self.typed(w, "setup")
+        self.assertEqual((code, said(err)), (0, "==> sudo on here now asks for a password, and forgets after 30 seconds"))
+        self.assertEqual(w.mutations(), [("write", TMP), ("act", INSTALL), ("remove", TMP), ("act", ("sudo", "visudo", "-c")),
+                                         ("act", ("sudo", "-k"))])
+        self.assertLess(w.effects.index(("run", ("visudo", "-c", "-f", TMP))), w.effects.index(("act", INSTALL)))
+        self.assertEqual((w.effects[-1], w.files, w.free), (("run", ("sudo", "-n", "true")), {DROPIN: BODY}, False))
 
-    calls = {"n": 0}
+    def test_a_file_that_does_not_parse_is_never_installed(self):
+        w = World(self.tmp, listing=BLANKET, free=True)
+        w.parses = False
+        code, _, err = self.typed(w, "setup")
+        self.assertEqual((code, said(err)), (1, "error: the sudoers file wk generated does not parse -- refusing to install it"))
+        self.assertEqual((w.mutations(), w.files), ([("write", TMP), ("remove", TMP)], {}))
 
-    def sudo_true(argv, fake):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return Result(0 if free_before else 1)
-        return Result(1 if property_holds else 0)
-    f.react(["sudo", "-n", "true"], sudo_true)
+    def test_a_sudoers_that_stops_parsing_after_the_install_has_the_drop_in_removed(self):
+        w = World(self.tmp, listing=BLANKET, free=True)
+        w.parses_after = False
+        code, _, err = self.typed(w, "setup")
+        self.assertEqual((code, said(err)), (1, "error: sudoers was left as it was; nothing changed"))
+        self.assertEqual((w.mutations()[-2:], w.files), ([("act", ("sudo", "visudo", "-c")), ("act", ("sudo", "rm", "-f", DROPIN))], {}))
 
-    f.answer(["visudo", "-c", "-f"], 0)
-    f.answer(["sudo", "install"], 0 if install_ok else 1)
-    f.answer(["sudo", "visudo", "-c"], 0 if post_check_ok else 1)
-    f.answer(["sudo", "rm", "-f"], 0)
-    f.answer(["sudo", "-k"], 0)
-    return f
+    def test_a_rule_later_than_the_drop_in_that_still_grants_nopasswd_fails_it(self):
+        w = World(self.tmp, listing=BLANKET, free=True)
+        w.still_free = True
+        code, _, err = self.typed(w, "setup")
+        self.assertEqual((code, said(err).split(":")[0]), (1, "warning"))
+        self.assertIn("sudo still runs without a password after installing " + DROPIN, err)
 
+    def test_a_drop_in_that_out_ranks_a_privileged_helper_is_named(self):
+        w = World(self.tmp)
+        w.files[QUIESCE_PRIV] = "#!/bin/sh\n"
+        w.answer(["sudo", "-n", QUIESCE_PRIV, "status"], rc=1)
+        code, _, err = self.typed(w, "setup")
+        self.assertEqual(code, 1)
+        self.assertIn("the drop-in out-ranks a privileged helper: " + QUIESCE_PRIV, err)
 
-class TestSetup(unittest.TestCase):
-    def test_validates_before_and_after_and_proves_the_property(self):
-        f = _setup_fake(free_before=True, property_holds=True)
-        rc = Sudo(f, {}, linux=False).setup()
-        self.assertEqual(rc, 0)
-        argvs = [e[1] for e in f.effects if e[0] == "run"]
-        self.assertTrue(any(a[:3] == ("visudo", "-c", "-f") for a in argvs),
-                         "the generated file is validated before it is installed")
-        self.assertTrue(any(a[:2] == ("sudo", "visudo") for a in argvs),
-                         "sudoers is validated again after the install")
-        self.assertTrue(any(a[:2] == ("sudo", "-k") for a in argvs),
-                         "the cached credential is cleared to prove the property")
+    def test_already_set_up_changes_nothing(self):
+        w = World(self.tmp, listing=window("0.5"))
+        code, _, err = self.typed(w, "setup")
+        self.assertEqual((code, said(err)), (0, "==> already set up on here: a password is required, and the timestamp lasts 30 seconds"))
+        self.assertEqual([], w.mutations())
 
-    def test_a_file_that_fails_to_validate_is_never_installed(self):
-        f = _setup_fake(free_before=True)
-        f.answer(["visudo", "-c", "-f"], 1, "", "syntax error")
-        s = Sudo(f, {}, linux=False)
-        with self.assertRaises(Refused):
-            s.setup()
-        self.assertFalse(any(e[0] == "run" and e[1][:2] == ("sudo", "install") for e in f.effects))
-
-    def test_a_sudoers_that_stops_parsing_after_install_is_removed(self):
-        f = _setup_fake(free_before=True, post_check_ok=False)
-        s = Sudo(f, {}, linux=False)
-        with self.assertRaises(Refused):
-            s.setup()
-        self.assertTrue(any(e[0] == "run" and tuple(e[1][:3]) == ("sudo", "rm", "-f") for e in f.effects))
-
-    def test_the_property_test_fails_when_still_passwordless(self):
-        f = _setup_fake(free_before=True, property_holds=False)
-        rc = Sudo(f, {}, linux=False).setup()
-        self.assertEqual(rc, 1)
-
-    def test_already_set_up_is_a_no_op(self):
-        f = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
-        f.answer(HAVE + ("visudo",))
-        s = Sudo(f, {}, linux=False)
-        rc = s.setup()
-        self.assertEqual(rc, 0)
-        self.assertEqual([e for e in f.effects if e[0] != "run"], [], "no write, install or removal at all")
-        self.assertFalse(any(e[0] == "run" and e[1][:2] == ("sudo", "install") for e in f.effects))
+    def test_without_visudo_nothing_is_written(self):
+        w = World(self.tmp)
+        w.answer(["sh", "-c", 'command -v "$1" >/dev/null', "sh", "visudo"], rc=1)
+        code, _, err = self.typed(w, "setup")
+        self.assertEqual((code, said(err).split(" --")[0]), (1, "error: visudo is required (part of the sudo package) but not on PATH"))
+        self.assertEqual([], w.mutations())
 
 
-def registry(drivers=None, machine=None):
-    ts = drivers or {}
-    return FakeRegistry({}, machine or Fake("here"), lambda n, e: ts[n], names=list(ts), in_workspace=lambda: False)
+class TestTheFleet(Flow):
+    def test_on_a_machine_its_own_wk_is_asked_and_its_line_is_the_row(self):
+        w = World(self.tmp, boxes={"box": "a password is required, and the timestamp lasts 30 seconds\n"})
+        code, out, _ = self.typed(w, "status", "--on", "box")
+        self.assertEqual((code, out), (0, "%-22s %s\n" % ("box", "a password is required, and the timestamp lasts 30 seconds")))
+        self.assertEqual([("run", ("sh", "-c", "PEER box key sudo status --quiet"))], w.effects)
 
+    def test_setup_on_a_machine_runs_its_own_wk_on_a_terminal_for_its_password(self):
+        w = World(self.tmp, boxes={"box": ""})
+        self.assertEqual(self.typed(w, "setup", "--on", "box")[0], 0)
+        self.assertEqual([("run_tty", ("sh", "-c", "PEER box key sudo setup"), None)], w.effects)
 
-class TestPlaceAndAll(unittest.TestCase):
-    def test_target_status_asks_the_machine_and_reports_its_line(self):
-        box = FakeDriver("box", out="tolken box status line\n")
-        rc = key_sudo(["status", "--on", "box"], reg=registry({"box": box}))
-        self.assertEqual(rc, 0)
-        self.assertEqual([args for args, _, _ in box.asked], [("key", "sudo", "status", "--quiet")])
+    def test_an_unreachable_machine_is_named_and_not_asked(self):
+        for verb in ("status", "setup"):
+            with self.subTest(verb):
+                w = World(self.tmp, boxes={"box": FakeDriver("box", side="unreachable", why="timed out after 10s")})
+                code, out, _ = self.typed(w, verb, "--on", "box")
+                self.assertEqual((code, out), (1, "%-22s %s\n" % ("box", "unreachable over ssh: timed out after 10s")))
+                self.assertEqual([], w.effects)
 
-    def test_target_setup_goes_over_a_tty(self):
-        box = Fake("box")
-        box.answer(["sh", "-c"])
-        rc = key_sudo(["setup", "--on", "box"], reg=registry({"box": FakeDriver("box", machine=box)}))
-        self.assertEqual(rc, 0)
-        self.assertEqual([e[1] for e in box.effects if e[0] == "run_tty"], [("sh", "-c", "PEER box key sudo setup")])
+    def test_an_unknown_machine_is_refused(self):
+        code, _, err = self.typed(World(self.tmp), "status", "--on", "nowhere")
+        self.assertEqual((code, said(err).split(".")[0]), (1, "error: unknown place 'nowhere'"))
 
-    def test_an_unreachable_target_is_named_not_run(self):
-        reg = registry({"box": FakeDriver("box", side="unreachable", why="timed out after 10s", out="ok\n")})
-        rc = key_sudo(["status", "--on", "box"], reg=reg)
-        self.assertEqual(rc, 1)
+    def test_all_reports_this_machine_then_every_other(self):
+        w = World(self.tmp, listing=window("0.5"), boxes={"box": "it holds there\n"})
+        code, out, _ = self.typed(w, "status", "--all")
+        self.assertEqual((code, out.splitlines()), (0, ["%-22s %s" % ("here", "a password is required, and the timestamp lasts 30 seconds"),
+                                                         "%-22s %s" % ("box", "it holds there")]))
 
-    def test_an_unknown_target_is_refused(self):
-        reg = registry({})
-        with self.assertRaises(Refused):
-            key_sudo(["status", "--on", "nowhere"], reg=reg)
-
-    def test_all_reports_the_local_machine_and_fans_out(self):
-        local = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
-        reg = registry({"box": FakeDriver("box", out="box status line\n")}, machine=local)
-        rc = key_sudo(["status", "--all"], reg=reg)
-        self.assertEqual(rc, 0)
-
-    def test_all_setup_never_sets_up_the_local_machine(self):
-        local = _fake(free=False, listing="    timestamp_timeout=0.5\n\n" + LISTING_UNSET)
-        box = Fake("box")
-        box.answer(["sh", "-c"])
-        reg = registry({"box": FakeDriver("box", machine=box)}, machine=local)
-        key_sudo(["setup", "--all"], reg=reg)
-        self.assertFalse(any(e[0] == "run" and e[1][:2] == ("sudo", "install") for e in local.effects))
-
-
-class TestRefusesInAWorkspace(unittest.TestCase):
-    def test_refuses_in_a_workspace(self):
-        reg = registry({})
-        reg.in_workspace, reg.env["WK_NAME"] = (lambda: True), "myws"
-        with self.assertRaises(Refused):
-            key_sudo(["status"], reg=reg)
+    def test_all_setup_sets_up_every_other_machine_and_only_reports_this_one(self):
+        w = World(self.tmp, boxes={"box": ""})
+        code, out, _ = self.typed(w, "setup", "--all")
+        self.assertEqual((code, out.split()[0]), (1, "here"))
+        self.assertEqual([], w.mutations())
+        self.assertEqual(("run_tty", ("sh", "-c", "PEER box key sudo setup"), None), w.effects[-1])
+        self.assertEqual({}, w.files)
 
 
 if __name__ == "__main__":
