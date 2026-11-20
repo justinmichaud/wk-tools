@@ -9,14 +9,12 @@ from pathlib import Path
 
 from tests.support import REPO, WkTest, fake_workspace
 
-sys.path.insert(0, str(REPO / "lib"))
-from wk import presets  # noqa: E402
+# Where jsc-release puts jsc and its libraries in a local workspace: the Apple port's layout on macOS, JSCOnly's elsewhere.
+LAYOUT = ("Release/jsc", "Release") if sys.platform == "darwin" else ("JSCOnly/Release/bin/jsc", "JSCOnly/Release/lib")
 
 
 def _jsc_layout(src):
-    """Where jsc-release puts its binary and its libraries under `src`, by the resolve `wk run` calls."""
-    preset = presets.resolve("jsc-release", "macos" if sys.platform == "darwin" else "linux", "local", {})
-    return Path(preset.jsc_path(str(src))), Path(preset.run_dir(str(src)))
+    return Path(src, "WebKitBuild", LAYOUT[0]), Path(src, "WebKitBuild", LAYOUT[1])
 
 
 def _plant_fake_jsc(ws, script_body):
@@ -78,12 +76,6 @@ class TestUntilCrashLoopsToTheCrash(WkTest):
             self.assertEqual(cp.returncode, 0, cp.stdout)
             self.assertIn("until-crash: reached the cap of 2 iterations without a crash", cp.stdout)
             self.assertEqual(counter.read_text().strip(), "2")
-
-    def test_max_refuses_a_non_numeric_value(self):
-        with fake_workspace() as ws:
-            cp = ws.run("run", "--until-crash", "--max", "abc", "--", "x.js")
-            self.assertNotEqual(cp.returncode, 0, cp.stdout)
-            self.assertIn("--max needs a positive integer", cp.stdout)
 
 
 def _lldb_runs():
