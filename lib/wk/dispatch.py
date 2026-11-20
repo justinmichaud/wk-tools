@@ -289,7 +289,6 @@ def relayed(child):
 
 
 def exec_flushed(argv):
-    """This process becomes `argv`, dry run or not: a forward is no effect, and the far wk prints its own plan."""
     registry().machine._exec(argv, None, None)
     raise Exit(0)
 

@@ -125,17 +125,16 @@ class TestABoxBuildIsHandedToTheBox(test_wk_places.RemoteTest):
 
     def made_here(self, t):
         """What this end changed beyond the ssh control directory every far call makes."""
-        return t.records().list(), [e for e in t.here.effects if e[0] != "run" and e != ("mkdir", t.ssh_dir())]
+        return t.records().list(), [e for e in t.here.effects if e[0] not in ("run", "exec") and e != ("mkdir", t.ssh_dir())]
 
     def test_every_command_about_a_box_workspace_goes_to_the_boxs_wk(self):
         with mock.patch.object(dispatch, "_registry", self.reg):
             self.assertEqual("box", dispatch.delegate_driver("box").name)
 
     def test_the_hand_over_is_the_whole_command_and_changes_nothing_here(self):
-        ran = []
-        with mock.patch.object(dispatch, "_registry", self.reg), mock.patch.object(dispatch.os, "execvp", lambda f, a: ran.append(a)):
+        with mock.patch.object(dispatch, "_registry", self.reg), self.assertRaises(dispatch.Exit):
             dispatch.delegate_run(dispatch.delegate_driver("box"), "build", ["a", "jsc-release", "--detach"])
-        (argv,) = ran
+        (argv,) = [e[1] for e in self.reg.machine.effects if e[0] == "exec"]
         self.assertEqual(argv[0], "ssh")
         self.assertIn("/home/u/wk/tools/wk build a jsc-release --detach", argv[-1])
         self.assertEqual(([], []), self.made_here(self.reg.load("box")))

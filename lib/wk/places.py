@@ -1453,8 +1453,7 @@ class Vm(Driver):
                 act.die("%s failed for '%s' (exit %d); what it said is above" % (" ".join(argv[1:2]), ws, r.rc), r.rc)
         self.machine.mkdir(ws_dir)
         self.machine.write(os.path.join(ws_dir, READY_MARKER), "")
-        if not act.dry_run():   # a dry run cloned nothing to boot
-            self.start(ws)
+        act.dry_run() or self.start(ws)   # a dry run cloned nothing to boot
 
     def runners(self, v):
         r = self.machine.run(["pgrep", "-f", "tart run .*[[:space:]]%s$" % v])
