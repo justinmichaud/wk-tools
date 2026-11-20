@@ -135,8 +135,6 @@ class Sync:
         except LookupError as e:
             die(str(e))
 
-    # -- the run
-
     def run(self):
         if self.scope == "mirror":
             if self.reg.in_workspace() or not self.mirror_is_here():
@@ -155,10 +153,7 @@ class Sync:
 
     def sync_one(self):
         rc = 0
-        try:
-            driver = self.load(self.reg.ws_place(self.only))
-        except LookupError as e:
-            die(str(e))
+        driver = self.reg.driver_of(self.only)
         if self.reg.in_workspace() and driver.repo(self.only).snapshot:
             rc = self.mirror_refresh_request()
         else:
@@ -321,10 +316,7 @@ class Sync:
         bases = Snapshots(store, here)
         prev = bases.newest_complete()
         if branch == "origin/main" and prev and not bases.verify(prev):
-            try:
-                recorded = here.read(store.snapshot_sha_file(prev)).strip()
-            except OSError:
-                recorded = ""
+            recorded = here.read_or(store.snapshot_sha_file(prev)).strip()
             if recorded and recorded == main_sha:
                 debug("ok: mirror unchanged; base %s is already %s" % (prev, main_sha[:10]))
                 return

@@ -4,7 +4,7 @@ import re
 import shlex
 import sys
 
-from wk import images, job, places, presets, record, session, store
+from wk import images, job, places, presets, record, session
 from wk.act import Refused, die, dry_run, info, log, warn
 from wk.build import size_for
 from wk.clock import Clock
@@ -60,8 +60,7 @@ def main(name, opts, reg=None, clock=None):
             die("the test run in '%s' outlived a TERM and a KILL.\n    Look at it:  wk enter %s  and then  pgrep -af run-" % (name, name))
         return 0
 
-    preset_name = store.build_preset() or presets.default_preset(reg, name)
-    preset = presets.resolve_or_die(preset_name, driver)
+    preset_name, preset = presets.chosen(reg, driver, name)
 
     # Asked of the preset, not of preset.port: on macOS a jsc-* preset is an Apple-port build with no port flag.
     if opts["suite"] == "layout" and preset.jsc_only:

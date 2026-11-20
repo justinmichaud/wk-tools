@@ -378,11 +378,8 @@ def report_checkout(driver, name):
 
 def rm_plan(reg, records, name):
     """(driver, "workspace" | "record"), mutating nothing; Refused(1) absent, Refused(2) unreachable."""
-    try:
-        tname = reg.ws_place(name)
-        driver = reg.load(tname)
-    except LookupError as e:
-        die(str(e))
+    driver = reg.driver_of(name)
+    tname = driver.name
     if reg.machine.isdir(driver.store.ws_dir(name)):
         return driver, "workspace"
     ok, why = driver.answers()

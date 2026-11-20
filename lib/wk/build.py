@@ -173,11 +173,7 @@ class Build:
                                ["ws:" + name], self.refuse(None, 0))
 
         def note(title, body):
-            try:
-                old = here.read(report)
-            except OSError:
-                old = ""
-            here.write(report, old + "=== %s  %s ===\n%s\n\n" % (title, self.clock.iso(), body))
+            here.write(report, here.read_or(report) + "=== %s  %s ===\n%s\n\n" % (title, self.clock.iso(), body))
 
         def give_up(word, title, body, why):
             task.end(word)

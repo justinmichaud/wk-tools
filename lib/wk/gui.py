@@ -2,7 +2,7 @@
 import os
 import shlex
 
-from wk import images, places, presets, session, store
+from wk import images, places, presets, session
 from wk.act import die, info, log, warn
 from wk.ldpath import LLDB_PIN_OPTS, LLDB_PRELUDE, lldb_waiting, rr_ready, rr_trace_dir
 from wk.machine import is_macos
@@ -53,8 +53,7 @@ def main(name, opts):
             "    '%s' is a remote place, an arbitrary machine reached over ssh with no seat\n"
             "    of its own to draw into. Use a container or vm workspace instead." % name)
 
-    preset_name = store.build_preset() or gui_default_preset(reg, name)
-    preset = presets.resolve_or_die(preset_name, driver)
+    preset_name, preset = presets.chosen(reg, driver, name, gui_default_preset)
 
     if preset.jsc_only:
         die("'%s' builds JavaScriptCore alone -- there is no browser in it.\n"

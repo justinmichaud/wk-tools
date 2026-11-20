@@ -76,15 +76,19 @@ STALE_REWRITES = ("git config --local --name-only --get-regexp '^url\\..*\\.(pus
                   ' git config --local --remove-section "$s" 2>/dev/null || true; done')
 
 
+def _fetch_steps(name, specs):
+    return ([(["git", "config", "--unset-all", "remote.%s.fetch" % name], TOLERATE)]
+            + [(["git", "config", "--add", "remote.%s.fetch" % name, s], None) for s in specs]
+            + [(["git", "config", "remote.%s.tagOpt" % name, "--no-tags"], None)])
+
+
 # The URL is rewritten rather than replaced, so `remote.<r>.url` still answers with GitHub -- what the PR tool reads to find the project.
 def fetch_config(mirror, branches, remotes=REMOTES):
     steps = [STALE_REWRITES]
     for name, url in remotes:
         if mirror:
             steps.append((["git", "config", "--add", "url.%s.insteadOf" % mirror, url], None))
-        steps.append((["git", "config", "--unset-all", "remote.%s.fetch" % name], TOLERATE))
-        steps += [(["git", "config", "--add", "remote.%s.fetch" % name, s], None) for s in fetch_refspecs(name, mirror, branches)]
-        steps.append((["git", "config", "remote.%s.tagOpt" % name, "--no-tags"], None))
+        steps += _fetch_steps(name, fetch_refspecs(name, mirror, branches))
     # The PR tool's setup fetches every remote in parallel, and two fetches writing the commit graph collide on its lock.
     return steps + [(["git", "config", "fetch.writeCommitGraph", "false"], None),
                     (["git", "config", "gc.writeCommitGraph", "false"], None)]
@@ -109,11 +113,8 @@ def wiring(mirror, forks, branches, extra_name="", extra_url="", ssh_config="", 
         steps.append((["git", "config", "core.sshCommand", "ssh -F " + ssh_config], None))
     if extra_name and extra_url:
         steps += [_set_url(extra_name, extra_url),
-                  (["git", "remote", "set-url", "--push", extra_name, "no-push://%s-is-a-local-copy" % extra_name], None),
-                  (["git", "config", "--unset-all", "remote.%s.fetch" % extra_name], TOLERATE)]
-        steps += [(["git", "config", "--add", "remote.%s.fetch" % extra_name, "+refs/heads/%s:refs/remotes/%s/%s" % (b, extra_name, b)], None)
-                  for b in branches]
-        steps.append((["git", "config", "remote.%s.tagOpt" % extra_name, "--no-tags"], None))
+                  (["git", "remote", "set-url", "--push", extra_name, "no-push://%s-is-a-local-copy" % extra_name], None)]
+        steps += _fetch_steps(extra_name, ["+refs/heads/%s:refs/remotes/%s/%s" % (b, extra_name, b) for b in branches])
     # Each snapshot publish hard-links the last tree, and link() moves every file's ctime: trusted, it makes git re-read every file.
     steps.append((["git", "config", "core.trustctime", "false"], None))
     return steps + fetch_config(mirror, branches, remotes) + push_rewrite(forks)

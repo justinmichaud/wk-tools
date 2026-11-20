@@ -78,26 +78,27 @@ class Store:
     def named_runtime_socket(self):
         return self.env.get("WK_BROKER_SOCKET")
 
-    def runtime_socket(self):
-        if self.env.get("XDG_RUNTIME_DIR"):
-            default = os.path.join(self.env["XDG_RUNTIME_DIR"], "wk", "broker.sock")
-        else:
-            default = os.path.join(self.state_dir(), "broker.sock")
-        return self.named_runtime_socket() or default
-
-    def workspace_runtime_socket(self):
-        return self.named_runtime_socket() or (os.path.join(self.home(), GUEST_BROKER_SOCKET) if self.macos_host else BROKER_SOCKET)
-
     def named_push_socket(self):
         return self.env.get("WK_PUSH_SOCKET")
 
+    def _socket(self, named, name):
+        runtime = self.env.get("XDG_RUNTIME_DIR")
+        return named or os.path.join(os.path.join(runtime, "wk") if runtime else self.state_dir(), name)
+
+    def _workspace_socket(self, named, guest, path):
+        return named or (os.path.join(self.home(), guest) if self.macos_host else path)
+
+    def runtime_socket(self):
+        return self._socket(self.named_runtime_socket(), "broker.sock")
+
+    def workspace_runtime_socket(self):
+        return self._workspace_socket(self.named_runtime_socket(), GUEST_BROKER_SOCKET, BROKER_SOCKET)
+
     def push_socket(self):
-        default = os.path.join(self.env["XDG_RUNTIME_DIR"], "wk", "push.sock") if self.env.get("XDG_RUNTIME_DIR") \
-            else os.path.join(self.state_dir(), "push.sock")
-        return self.named_push_socket() or default
+        return self._socket(self.named_push_socket(), "push.sock")
 
     def workspace_push_socket(self):
-        return self.named_push_socket() or (os.path.join(self.home(), GUEST_PUSH_SOCKET) if self.macos_host else PUSH_SOCKET)
+        return self._workspace_socket(self.named_push_socket(), GUEST_PUSH_SOCKET, PUSH_SOCKET)
 
     def container_mirror_dir(self):
         return self.env.get("WK_MIRROR")
@@ -120,9 +121,6 @@ class Store:
     def vm_store_apart(self):
         """Whether the vm place has a store of its own: only on a macOS host, and never the container's."""
         return self.macos_host and os.path.realpath(self.vm_store_dir()) != os.path.realpath(self.store_dir())
-
-    def machine_store_dir(self):
-        return self.env.get("WK_STORE_DEFAULT") or self.store_dir()
 
     def records_dir(self):
         if self.macos_host and self.store_dir() == self.default_store_dir():
@@ -167,7 +165,7 @@ class Store:
         if self.macos_host:
             return self.env.get("WK_HOST_SECRETS") or os.path.join(
                 self.env.get("XDG_CONFIG_HOME") or os.path.join(self.home(), ".config"), "wk", "secrets")
-        return os.path.join(self.machine_store_dir(), "secrets")
+        return os.path.join(self.env.get("WK_STORE_DEFAULT") or self.store_dir(), "secrets")
 
     def keyring_view_dir(self, kind):
         return os.path.join(self.keyring_dir(), "view", kind)
@@ -199,10 +197,7 @@ class Snapshots:
         self.machine = machine
 
     def _read(self, path):
-        try:
-            return self.machine.read(path)
-        except OSError:
-            return None
+        return self.machine.read_or(path, None)
 
     def _ls(self, d):
         try:

@@ -3,7 +3,7 @@
 import shlex
 
 from wk import act, fleet, images, project, record, resources
-from wk.store import dispatch_place
+from wk.store import build_preset, dispatch_place
 
 LIST_TEXT = "".join("%-18s %s\n" % row for row in project.get("PRESETS").items()) + """
 In a macOS workspace the three jsc-* presets build the Apple port's
@@ -160,13 +160,18 @@ class Preset:
 
 
 def default_preset(reg, name):
-    driver = reg.load(reg.ws_place(name))
+    driver = reg.driver_of(name)
     rec = record.Records(driver.store.records_dir(), env=driver.env).find("build", name)
     preset_name = rec.field("preset") if rec else ""
     if preset_name:
         act.info("preset: %s -- what '%s' was last built with" % (preset_name, name))
         return preset_name
     return project.get("MAC_PRESET") if driver.os() == "macos" else "jsc-release"
+
+
+def chosen(reg, driver, name, default=default_preset):
+    preset_name = build_preset() or default(reg, name)
+    return preset_name, resolve_or_die(preset_name, driver)
 
 
 def resolve_or_die(name, driver):

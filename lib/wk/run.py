@@ -1,19 +1,25 @@
 """`wk run`: jsc from a workspace's build tree, plain, under lldb, looped until it crashes, or recorded and replayed with rr."""
 import shlex
 
-from wk import images, places, presets, store
+from wk import images, places, presets
 from wk.ldpath import LLDB_PRELUDE, prelude, rr_ready, rr_trace_dir
 
 ROOT = images.root()
 
-LLDB_UNTIL_CRASH = '''{lldb_prelude}
-{prelude}
-LOGDIR={logdir_q}
-mkdir -p "$LOGDIR"
+LOOP_HEAD = '''mkdir -p "$LOGDIR"
 i=0
 while [ "$i" -lt {max} ]; do
     i=$((i + 1))
-    STFILE=$(mktemp)
+'''
+
+LOOP_TAIL = '''done
+echo "until-crash: reached the cap of {max} iterations without a crash"
+exit 0'''
+
+LLDB_UNTIL_CRASH = '''{lldb_prelude}
+{prelude}
+LOGDIR={logdir_q}
+''' + LOOP_HEAD + '''    STFILE=$(mktemp)
     WK_UNTIL_CRASH_STATUS="$STFILE" "$LLDB" {lldb_opts} -s {runfile_q} {jsc_q} -- --validateOptions=1 {tail_q}
     STATUS=$(cat "$STFILE" 2>/dev/null || true)
     rm -f "$STFILE"
@@ -22,19 +28,13 @@ while [ "$i" -lt {max} ]; do
     esac
     echo "until-crash: iteration $i exited $STATUS -- args: {tail_q}" >&2
     exit "$STATUS"
-done
-echo "until-crash: reached the cap of {max} iterations without a crash"
-exit 0'''
+''' + LOOP_TAIL
 
 PLAIN_UNTIL_CRASH = '''{prelude}
 export JSC_validateOptions=1
 LOGDIR={logdir_q}
 CORE_DIR={core_dir_q}
-mkdir -p "$LOGDIR"
-i=0
-while [ "$i" -lt {max} ]; do
-    i=$((i + 1))
-    STAMP=$(date -u +%Y%m%dT%H%M%SZ)-$i
+''' + LOOP_HEAD + '''    STAMP=$(date -u +%Y%m%dT%H%M%SZ)-$i
     LOG="$LOGDIR/$STAMP.log"
     MARK="$LOGDIR/.mark-$STAMP"
     touch "$MARK"
@@ -54,9 +54,7 @@ while [ "$i" -lt {max} ]; do
         printf '%s\\n' "$CORES" | sed 's/^/  /' >&2
     fi
     exit "$STATUS"
-done
-echo "until-crash: reached the cap of {max} iterations without a crash"
-exit 0'''
+''' + LOOP_TAIL
 
 DIRECT_LLDB = '{lldb_prelude}\n{prelude}; exec "$LLDB" {lldb_opts} -s {runfile_q} {jsc_q} -- --validateOptions=1 {tail_q}'
 
@@ -71,8 +69,7 @@ def main(name, opts):
     reg = places.Registry(ROOT)
     driver = reg.present(name)
 
-    preset_name = store.build_preset() or presets.default_preset(reg, name)
-    preset = presets.resolve_or_die(preset_name, driver)
+    preset_name, preset = presets.chosen(reg, driver, name)
 
     src = driver.src(name)
     jsc = preset.jsc_path(src)
