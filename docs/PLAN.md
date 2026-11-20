@@ -11,7 +11,7 @@ Measured 2026-11-20 on the host (`./wk selftest`).
 | | |
 | --- | --- |
 | code and tests | `python3 -m tests.test_lint_budgets` prints each row's size beside its interim and its budget |
-| `wk selftest` (lint then unit) | 3,235 tests, 5 minutes, green; 50 owed |
+| `wk selftest` (lint then unit) | 3,192 tests, 5 minutes, green; 56 owed |
 | the last live runs from the host | 2026-11-20: `DevIntegrationContainer` (14 of 14, 10 min) and `DevIntegrationTart` (14 of 14, 15 min) pass whole -- creation, git, a Claude session behind the wall, pi, the jsc-debug build, the push to the fork and its refusals, git-webkit, sync, the editor and removal. `wk new` for a container takes 1 min 22 s (3 min 24 s before the first start's apt installs became the image layer's) |
 
 Why bugs come back:
@@ -1236,9 +1236,9 @@ exist.
      dispatcher and returns its exit status and streams; `tests.test_wk_workspace.Flow.typed` and `said` are the shared
      helpers; `lint.test_shape_held` holds each landed module (`SHAPED`, tests/test_lint.py). Landed: `enter`, `ls`, `scp`'s
      routes, `run`, `gui`, rr, `test`, `build`, `zed`, `new` and `rm`, `sync` (one world, the old one gone), `sync --tools`, `pr`,
-     a `--repo` workspace, every place driver a command line reaches (tests/test_places_flows.py), and of the agent-session
-     workflow `ai`, the agents' install, `key sudo` and `doctor <workspace>` from the host. The tests rows moved
-     with it: workspace 5,759 to 5,195, places 4,011 to 3,905; a flow is about as long as the driver test it replaces, so the
+     a `--repo` workspace, every place driver a command line reaches (tests/test_places_flows.py), a guest's `start` and `stop`,
+     `status`, `gc`, and of the agent-session workflow `ai`, the agents' install, `key sudo` and `doctor <workspace>` from the host. The tests rows moved
+     with it: workspace 5,759 to 5,184, places 4,011 to 3,905, secrets 4,684 to 4,493, status 2,708 to 2,670; a flow is about as long as the driver test it replaces, so the
      rows fall by what several method tests shared, not by the conversion itself.
      Each conversion was proven by breaking the production line a test names. What the conversions found, fixed in the same
      run: commands that built a Registry, a Session or a clock of their own and so left the world (`run`, `gui`, `pr`, `stop`,
