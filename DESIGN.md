@@ -97,12 +97,22 @@ These are enforced once, in the dispatcher, from a table each command declares.
 
 - A command is data: name, where it runs, positionals, options, subverbs,
   `readonly` or `destructive`, plus one `main(args, inv)`.
+- A command is one module in `lib/wk/cmd/`, found by listing the directory:
+  `build.py` is `wk build`, `key_set.py` is the verb `wk key set`. No file
+  lists the commands.
 - Where it runs: `client` (fleet-wide commands), `server` (the workspace's
-  machine), `any`.
+  machine), `any`. A `server` command typed on the client is handed to the
+  server named by `--on`, else to the one holding its `<ws>`; that one is
+  found by asking every server for `wk ls --json`. A command that needs both
+  ends is `any` and hands itself over.
+- `inv` is the one object a command reaches machines, the clock, the fleet,
+  drivers, tasks and secrets through. A test builds it of fakes.
 - `--dry-run`: every state change goes through one function, `act`, which
   under dry-run prints the command and runs nothing.
 - Only a destructive action prompts. It asks once, defaults to No, declines
-  without a terminal; `--yes` answers it.
+  without a terminal; `--yes` answers it. A destructive command that changes
+  state before it asks, or a `readonly` one that changes state at all, is a
+  bug the gate raises.
 - A refusal says why and names the remedy. `--force` crosses a refusal that
   exists because of a rule, and says so again at exit.
 - Exit codes: 0 ok, 1 failed, 2 busy, 3 stalled or out of memory, 4 needs a
@@ -116,11 +126,15 @@ fake in a unit test.
 
 | Seam | Interface | Implementations |
 | --- | --- | --- |
-| `Machine` | run, read, write, exists, listdir, copy, spawn | `Local`, `Ssh`, `Fake` |
+| `Machine` | run, act, read, write, remove, exists, listdir, copy, spawn | `Local`, `Ssh`, `Fake` |
 | `Clock` | now, sleep, wait_until | real, fake |
 | `Driver` | create, destroy, state, exec argv, enter argv | `Container`, `Plain` |
 | `Tasks` | add, status, log, kill, wait | pueue, fake |
 | `Secrets` | get, put, list | OpenBao HTTP API, fake |
+
+`run` reads and `act` changes state: `act` and every other mutator end in the
+one gate that `--dry-run` turns into a printed line. A server that does not
+answer raises; its answer is unknown, never absent or empty.
 
 ## State
 
@@ -218,7 +232,10 @@ converges. A half-made workspace is wiped, never repaired.
   with the command that fixes it. Unknown is never reported as ok.
 - `wk gc` reclaims what loses no work and names the flag for the rest.
 - A machine is one `machines/<name>.conf`: `kind` and literal values. Code
-  never names a machine.
+  never names a machine. The file is named for the machine's tailnet name,
+  which is also its hostname: that is how `wk` knows which machine it is on.
+- Setup stages, doctor rows and gc rows are collected from a `hooks` module
+  in each package under `lib/wk/`; no file lists them.
 
 ## Tree
 
@@ -226,7 +243,8 @@ converges. A half-made workspace is wiped, never repaired.
 wk                      launcher (python3 -I)
 DESIGN.md
 machines/               one conf per machine
-lib/wk/core/            dispatch, decl, act, machine, clock, conf, fleet, errors
+lib/wk/core/            dispatch, decl, act, inv, route, machine, clock, conf, fleet,
+                        errors, seams and hooks (the contracts between lanes), fakes
 lib/wk/cmd/             one module per command: COMMAND table + main
 lib/wk/workspace/       drivers, mirror, git wiring, lifecycle
 lib/wk/tasks/           pueue client, sizing, memory guard, status

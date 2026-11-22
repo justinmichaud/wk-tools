@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+# Isolated (-I): no PYTHONPATH, no user site and no script directory, so nothing named `wk` shadows lib/wk.
+if not sys.flags.isolated:
+    os.execv(sys.executable, [sys.executable, "-I", os.path.abspath(__file__)] + sys.argv[1:])
+root = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, os.path.join(root, "lib"))
+
+from wk.core.dispatch import entry  # noqa: E402
+
+entry(root)
