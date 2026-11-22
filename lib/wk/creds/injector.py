@@ -101,6 +101,15 @@ def refreshed(oauth, got, now):
     return new
 
 
+def refusal(body):
+    """The token endpoint's own words for refusing: the code and description of an OAuth error body."""
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return ""
+    return "".join(", %s" % doc[key][:100] for key in ("error", "error_description") if isinstance(doc, dict) and isinstance(doc.get(key), str))
+
+
 def ask_token_endpoint(body, urlopen=urllib.request.urlopen):
     request = urllib.request.Request(TOKEN_URL, data=body, method="POST", headers={"Content-Type": "application/json", "User-Agent": "wk"})
     try:
@@ -108,8 +117,9 @@ def ask_token_endpoint(body, urlopen=urllib.request.urlopen):
             return json.loads(r.read())
     except urllib.error.HTTPError as e:
         if e.code in (400, 401, 403):
-            raise LoginError("%s refused to refresh the claude.ai login (HTTP %d): it was revoked, or something else holds and "
-                             "spent it -- `wk key set claude-login`, then `wk machine setup` this machine" % (TOKEN_URL, e.code))
+            raise LoginError("%s refused to refresh the claude.ai login (HTTP %d%s): it expired, was revoked, or something else "
+                             "holds and spent it -- log in to Claude again, `wk key set claude-login`, then `wk machine setup` this "
+                             "machine" % (TOKEN_URL, e.code, refusal(e.read())))
         raise LoginError("%s answered HTTP %d to a refresh; it is tried again" % (TOKEN_URL, e.code))
     except (OSError, ValueError) as e:
         raise LoginError("could not refresh the claude.ai login at %s (%s); it is tried again" % (TOKEN_URL, e))

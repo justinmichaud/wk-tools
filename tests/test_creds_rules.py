@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from tests.credsworld import TOKEN, URL, Http, login, private_key, public_key
@@ -130,6 +131,15 @@ class TestClaudeLogin(Rules):
         got = self.probe("claude-login", login(expires_ms=999000), {}, now=1000.0)
         self.assertEqual((got[0], self.http.asked), (UNKNOWN, []))
         self.assertIn("the injector holds the refreshed one", got[1])
+
+    def test_a_copy_whose_refresh_token_has_expired_is_bad_and_asks_nobody(self):
+        dead = json.loads(login(expires_ms=999000))
+        dead["claudeAiOauth"]["refreshTokenExpiresAt"] = (1000 - 3 * 86400) * 1000
+        got = self.probe("claude-login", json.dumps(dead), {}, now=1000.0)
+        self.assertEqual((got, self.http.asked), ((BAD, "its refresh token expired 3 day(s) ago, so nothing can refresh it: log in to Claude "
+                                                        "again, then `wk key set claude-login`"), []))
+        dead["claudeAiOauth"]["refreshTokenExpiresAt"] = 1001000
+        self.assertEqual(self.verdict("claude-login", json.dumps(dead), {}, now=1000.0), UNKNOWN)
 
 
 class TestTailnet(Rules):

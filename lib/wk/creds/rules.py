@@ -153,6 +153,10 @@ def claude_login_check(value):
 
 def claude_login_probe(value, ctx):
     oauth = injector.parse(value)
+    gone = oauth.get("refreshTokenExpiresAt")
+    if isinstance(gone, (int, float)) and gone <= ctx.now * 1000:
+        return BAD, ("its refresh token expired %d day(s) ago, so nothing can refresh it: log in to Claude again, then `wk key set claude-login`"
+                     % ((ctx.now - gone / 1000) // 86400))
     if oauth["expiresAt"] <= ctx.now * 1000:
         return UNKNOWN, "the stored copy's access token has expired; the injector holds the refreshed one, and `wk doctor` asks it"
     # An accepted bearer answers 200 and a refused one 401; no model is run.

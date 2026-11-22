@@ -72,13 +72,22 @@ class TestTokenEndpoint(unittest.TestCase):
         self.assertEqual((got, self.request.get_method(), self.request.full_url, self.request.data, urlopen.call_args[1]),
                          ({"access_token": "a"}, "POST", injector.TOKEN_URL, b"{}", {"timeout": 20}))
 
-    def error(self, code):
-        return urllib.error.HTTPError(injector.TOKEN_URL, code, "x", {}, io.BytesIO(b""))
+    def error(self, code, body=b""):
+        return urllib.error.HTTPError(injector.TOKEN_URL, code, "x", {}, io.BytesIO(body))
 
-    def test_a_refusal_means_the_login_was_revoked_or_spent(self):
+    def test_a_refusal_means_the_login_expired_was_revoked_or_spent(self):
         for code in (400, 401, 403):
             with self.error(code) as e:
-                self.assertRaisesRegex(LoginError, r"refused to refresh the claude.ai login \(HTTP %d\).*wk key set claude-login" % code, self.ask, e)
+                self.assertRaisesRegex(LoginError, r"refused to refresh the claude.ai login \(HTTP %d\): it expired, was revoked.*"
+                                                   r"log in to Claude again, `wk key set claude-login`" % code, self.ask, e)
+
+    def test_a_refusal_carries_the_endpoints_own_code_and_description(self):
+        with self.error(400, b'{"error": "invalid_grant", "error_description": "Refresh token expired", "other": "x"}') as e:
+            self.assertRaisesRegex(LoginError, r"\(HTTP 400, invalid_grant, Refresh token expired\): it expired", self.ask, e)
+        for body in (b"<html>", b"[]", b'{"error": {"type": "x"}}'):
+            with self.error(400, body) as e:
+                self.assertRaisesRegex(LoginError, r"\(HTTP 400\): it expired", self.ask, e)
+        self.assertEqual(injector.refusal(json.dumps({"error": "e" * 300}).encode()), ", " + "e" * 100)
 
     def test_any_other_failure_is_tried_again(self):
         with self.error(500) as e:
