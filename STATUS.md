@@ -44,6 +44,9 @@ Debian x86_64, 128 cores, an unprivileged user behind an ssh gateway). There is 
 | The playbook: `credentials`, `borrowed-claude` | yes | its syntax | yes for the CA, the placeholder login, `env.sh`, `ssh_config` and the two lines, with a store that could not be asked; no for any secret |
 | The playbook on a Mac (launchd) | yes | its syntax | no |
 | `wk doctor`, `wk doctor <ws>`, `wk gc` | yes | yes | yes |
+| `wk machine install`: the refusals, the question, the `ansible-playbook` line, `--rehearse` | yes | yes | no |
+| The rules for `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `bmc/<machine>/user` and `password` | yes | yes, HTTP scripted | no |
+| The install playbook (`ansible/install.yml`, `ansible/install/`) | yes | no: its YAML is parsed and its autoinstall template rendered by a real Ansible | no |
 
 ## Verified live
 
@@ -82,3 +85,16 @@ What the live runs corrected: the unit directory is made before a unit is writte
 - TODO: a memory ceiling in a child cgroup, on a machine that lets one be made.
 - TODO: `wk` typed inside the container, and the pueue client reaching the daemon's socket from there.
 - TODO: `wk gc` with something to reclaim, and `wk new` over a half-made workspace, on a real server.
+- TODO: `wk machine install`: nothing of it has run against a BMC, a media host or a server. Each line below is unverified.
+- TODO: install: `xorriso -boot_image any replay` on Ubuntu's arm64 live-server image: that the result still boots under UEFI, and that its `/boot/grub/grub.cfg` has the `linux /casper/vmlinuz ---` line the playbook edits.
+- TODO: install: subiquity reading `/cdrom/autoinstall.yaml` with `autoinstall` on the kernel command line: no question asked, on a BMC's virtual CD.
+- TODO: install: the BMC's Redfish as `community.general.redfish_command` drives it: `VirtualMediaInsert` under the Manager, the `TransferProtocolType` it lists (AMI firmware commonly lists NFS, CIFS and HTTPS and not HTTP), whether remote media must first be enabled, `SetOneTimeBoot` to `Cd` in UEFI mode, `PowerForceRestart`, `PowerOn`, `DisableBootOverride`.
+- TODO: install: the BMC fetching a 3.8 GB image from `python3 -m http.server`, which answers no Range request.
+- TODO: install: the media host: `systemd-run` of the server as root, `nft --json --handle list chain` and a rule found again by its comment, and `ansible.builtin.copy` of the image over the tailnet.
+- TODO: install: WiFi in the installer and on the first boot: `wpasupplicant` from the image's own pool, the conf's interface name under Ubuntu's kernel, and cloud-init waiting for a WiFi network before it installs packages.
+- TODO: install: Ubuntu's generic kernel on the server's hardware (the machine now runs a vendor kernel).
+- TODO: install: the installer powering the machine off, the BMC reporting `PowerState` `Off`, and the machine booting its disk at the next `PowerOn` with the image ejected.
+- TODO: install: cloud-init's `apt.sources` with `signed-by=$KEY_FILE` for Tailscale's repository, and `tailscale up --auth-key=file:` with `--advertise-tags` under the stored key.
+- TODO: install: the tailnet API with `tailnet-api-key`: listing devices, deleting the old node, and the new node taking the bare name.
+- TODO: install: `StrictHostKeyChecking=accept-new` through Ansible's ssh for the new host key, and Tailscale SSH admitting the conf's user under the tailnet's policy.
+- TODO: install: `wk machine setup` on a freshly installed server.

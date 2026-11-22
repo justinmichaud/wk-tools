@@ -1,0 +1,50 @@
+---
+# The image where the BMC reaches it: copied to the media host, served by a transient unit for as long as the install
+# lasts, behind one firewall rule when the conf names the chain that would drop the BMC. The media host's login is root.
+
+- name: Name the media host
+  ansible.builtin.add_host:
+    name: "{{ wk_media_host }}"
+    ansible_user: "{{ wk_media_user }}"
+  changed_when: false
+
+- name: Stage and serve the image
+  delegate_to: "{{ wk_media_host }}"
+  block:
+    # A media host that does not answer fails here, as a task; unreachable would end the play with no cleanup.
+    - name: Reach the media host
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Make the image's directory
+      ansible.builtin.file:
+        path: "{{ wk_install_staged }}"
+        state: directory
+        mode: "0700"
+
+    - name: Copy the image to the media host
+      ansible.builtin.copy:
+        src: "{{ wk_install_build }}/{{ wk_install_unit }}.iso"
+        dest: "{{ wk_install_staged }}/{{ wk_install_unit }}.iso"
+        mode: "0600"
+      diff: false
+
+    - name: Remove what an earlier run left serving
+      ansible.builtin.import_tasks: close.yml
+
+    - name: Admit the BMC to the image's port
+      ansible.builtin.command:
+        argv: >-
+          {{ ['nft', 'insert', 'rule'] + wk_media_chain.split('/')
+             + ['ip', 'saddr', wk_bmc, 'tcp', 'dport', wk_install_media_port | string, 'accept', 'comment', '"' ~ wk_install_unit ~ '"'] }}
+      when: wk_media_chain is defined
+
+    - name: Serve the image
+      ansible.builtin.command:
+        argv: "{{ ['systemd-run', '--unit', wk_install_unit, '--collect'] + wk_install_media_serve }}"
+
+    - name: Wait for the image's port
+      ansible.builtin.wait_for:
+        host: "{{ wk_media_address }}"
+        port: "{{ wk_install_media_port }}"
+        timeout: 30

@@ -1,0 +1,92 @@
+---
+# What must hold before an image is made: one server, its conf, the client's tools and key, the store, and a BMC that
+# answers this login. Nothing here changes anything, so all of it runs in check mode too.
+
+- name: Assert the play has one server
+  ansible.builtin.assert:
+    that: ansible_play_hosts_all | length == 1
+    fail_msg: "install.yml erases the disk of every host it is given, and this run has {{ ansible_play_hosts_all | length }}: pass --limit <server>"
+    quiet: true
+
+- name: Assert the conf says how this server is installed
+  ansible.builtin.assert:
+    that:
+      - wk_kind in ['linux', 'credential']
+      - wk_bmc is defined
+      - wk_media_host is defined
+      - wk_media_user is defined
+      - wk_media_address is defined
+      - wk_os | default('') in wk_ubuntu
+      - wk_arch | default('') in wk_ubuntu[wk_os | default('')] | default({})
+    fail_msg: >-
+      machines/{{ inventory_hostname }}.conf must be a Linux server's and set bmc=, arch=, os=, media_host=, media_user=
+      and media_address=; the pinned releases are {{ wk_ubuntu.keys() | join(', ') }}, each for arm64 and amd64
+      (DESIGN.md, Installing a server)
+    quiet: true
+
+- name: Ask xorriso for its version
+  ansible.builtin.command:
+    argv: [xorriso, -version]
+  register: wk_xorriso
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Assert the client has xorriso
+  ansible.builtin.assert:
+    that: wk_xorriso.rc == 0
+    fail_msg: "this machine has no xorriso, which puts the autoinstall file into Ubuntu's image: brew install xorriso"
+    quiet: true
+
+- name: Find the client's ssh public key
+  ansible.builtin.set_fact:
+    wk_install_public_keys: >-
+      {{ query('ansible.builtin.first_found', {'files': ['id_ed25519.pub', 'id_ecdsa.pub', 'id_rsa.pub'],
+                                               'paths': [lookup('ansible.builtin.env', 'HOME') ~ '/.ssh'], 'skip': true}) }}
+
+- name: Assert the client has an ssh public key
+  ansible.builtin.assert:
+    that: wk_install_public_keys | length == 1
+    fail_msg: "this machine has no ssh public key to authorise on {{ inventory_hostname }}: ssh-keygen -t ed25519"
+    quiet: true
+
+- name: Ask the store for its names
+  ansible.builtin.import_tasks: ../roles/credentials/tasks/names.yml
+
+- name: Assert the store holds what an install reads
+  ansible.builtin.assert:
+    that: wk_install_needs | difference(wk_store_names) | length == 0
+    fail_msg: >-
+      the store lacks {{ wk_install_needs | difference(wk_store_names) | join(', ') }}:
+      {{ wk_store.stderr | trim if wk_store.rc == 4 else 'wk key set <name> for each' }}
+    quiet: true
+
+- name: Read the secrets
+  ansible.builtin.set_fact:
+    wk_install_public_key: "{{ lookup('ansible.builtin.file', wk_install_public_keys[0]) }}"
+    wk_install_secret:
+      bmc_user: "{{ lookup('ansible.builtin.pipe', wk_bao_get ~ (('bmc/' ~ inventory_hostname ~ '/user') | quote)) }}"
+      bmc_password: "{{ lookup('ansible.builtin.pipe', wk_bao_get ~ (('bmc/' ~ inventory_hostname ~ '/password') | quote)) }}"
+      auth_key: "{{ lookup('ansible.builtin.pipe', wk_bao_get ~ 'tailnet-auth-key') }}"
+      api_key: "{{ lookup('ansible.builtin.pipe', wk_bao_get ~ 'tailnet-api-key') }}"
+      ssid: "{{ lookup('ansible.builtin.pipe', wk_bao_get ~ 'wifi-ssid') if wk_wifi is defined else '' }}"
+      psk: "{{ lookup('ansible.builtin.pipe', wk_bao_get ~ 'wifi-psk') if wk_wifi is defined else '' }}"
+  no_log: true
+
+- name: Ask the BMC for the system
+  community.general.redfish_info:
+    category: Systems
+    command: GetSystemInventory
+  register: wk_power
+
+- name: Ask the BMC for its virtual media
+  community.general.redfish_info:
+    category: "{{ wk_install_media_category }}"
+    command: GetVirtualMedia
+  register: wk_media
+
+- name: Say what the BMC answered
+  ansible.builtin.debug:
+    msg:
+      power: "{{ wk_install_power }}"
+      virtual_media: "{{ wk_install_media }}"

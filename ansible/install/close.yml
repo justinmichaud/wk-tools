@@ -1,0 +1,27 @@
+---
+# On the media host: the transient unit stopped and the firewall rule gone. Both are found by this install's name, so a
+# run killed anywhere leaves nothing a later one does not remove.
+
+- name: Stop serving the image
+  ansible.builtin.command:
+    argv: [systemctl, stop, "{{ wk_install_unit }}.service"]
+  register: wk_stopped
+  changed_when: wk_stopped.rc == 0
+  # 5: no such unit is loaded.
+  failed_when: wk_stopped.rc not in [0, 5]
+
+- name: Close the image's port
+  when: wk_media_chain is defined
+  block:
+    - name: List the chain's rules
+      ansible.builtin.command:
+        argv: "{{ ['nft', '--json', '--handle', 'list', 'chain'] + wk_media_chain.split('/') }}"
+      register: wk_chain
+      changed_when: false
+
+    - name: Delete the rule that admits the BMC
+      ansible.builtin.command:
+        argv: "{{ ['nft', 'delete', 'rule'] + wk_media_chain.split('/') + ['handle', item | string] }}"
+      loop: >-
+        {{ (wk_chain.stdout | from_json).nftables | selectattr('rule', 'defined') | map(attribute='rule')
+           | selectattr('comment', 'defined') | selectattr('comment', 'equalto', wk_install_unit) | map(attribute='handle') }}

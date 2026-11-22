@@ -34,5 +34,34 @@
   "wk_claude_version": "2.1.308",
   "wk_pi_package": "@earendil-works/pi-coding-agent",
   "wk_node": "22.19",
-  "wk_build_tools": ["build-webkit", "build-jsc", "cmake", "ninja", "make", "xcodebuild", "run-webkit-tests", "run-javascriptcore-tests"]
+  "wk_build_tools": ["build-webkit", "build-jsc", "cmake", "ninja", "make", "xcodebuild", "run-webkit-tests", "run-javascriptcore-tests"],
+  "wk_ubuntu": {
+    "24.04": {
+      "codename": "noble",
+      "arm64": {
+        "url": "https://cdimage.ubuntu.com/releases/24.04/release/ubuntu-24.04.5-live-server-arm64.iso",
+        "sha256": "f12484464c7d4d73e2167e0a7dbda1e669f8fae9bcf778dc0944937034b320cb"
+      },
+      "amd64": {
+        "url": "https://releases.ubuntu.com/24.04/ubuntu-24.04.5-live-server-amd64.iso",
+        "sha256": "97f3d7ffb032c3eb3b23d2c8be9cc76e60c2c1f2c0146ba5ba9fe01cafae0fd8"
+      }
+    }
+  },
+  "wk_install_locale": "en_US.UTF-8",
+  "wk_install_keyboard": "us",
+  "wk_install_timezone": "Etc/UTC",
+  "wk_install_packages": ["git", "podman", "uidmap", "bubblewrap", "python3", "curl", "openssl", "tar", "unzip", "xz-utils",
+                          "ca-certificates", "dbus-user-session", "tailscale"],
+  "wk_install_minutes": 90,
+  "wk_install_boot_minutes": 30,
+  "wk_install_boot_device": "Cd",
+  "wk_install_media_category": "Manager",
+  "wk_install_media_scheme": "http",
+  "wk_install_media_port": 8089,
+  "wk_install_media_serve": ["python3", "-m", "http.server", "--bind", "{{ wk_media_address }}", "--directory", "{{ wk_install_staged }}",
+                             "{{ wk_install_media_port | string }}"],
+  "wk_tailnet_api": "https://api.tailscale.com/api/v2",
+  "wk_tailnet_tag": "tag:wk",
+  "wk_tailscale_apt": "https://pkgs.tailscale.com/stable/ubuntu"
 }

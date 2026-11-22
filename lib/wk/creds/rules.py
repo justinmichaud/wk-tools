@@ -24,7 +24,9 @@ GITHUB_API = "https://api.github.com"
 UPSTREAM = PROJECT["upstream"][len("https://github.com/"):-len(".git")]
 BUGZILLA = PROJECT["bugzilla"]
 ANTHROPIC_API = "https://api.anthropic.com"
+TAILNET_API = "https://api.tailscale.com/api/v2"
 DEPLOY = "deploy-key/"
+BMC = re.compile(r"bmc/[a-z0-9][a-z0-9-]*/(user|password)")
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 WORD = re.compile(r"[A-Za-z0-9_.-]+")
 KEY_MAGIC = b"openssh-key-v1\0"
@@ -170,6 +172,31 @@ def tailnet_key_probe(value, ctx):
     return UNKNOWN, "Tailscale has no probe that does not enroll a node: its tag, reuse and expiry are at https://login.tailscale.com/admin/settings/keys"
 
 
+def tailnet_api_key_check(value):
+    return None if value.startswith("tskey-api-") and WORD.fullmatch(value) else "a tailnet API access token starts `tskey-api-`"
+
+
+def tailnet_api_key_probe(value, ctx):
+    status, doc = ask("GET", TAILNET_API + "/tailnet/-/devices", value)
+    if status == 200:
+        return OK, "Tailscale accepts it, and it lists %d device(s)" % len(doc.get("devices") or [])
+    if status in (401, 403):
+        return BAD, "Tailscale does not accept this token (HTTP %d): expired, revoked, or not allowed to read devices" % status
+    return unanswered("GET /tailnet/-/devices", status, doc)
+
+
+def one_line(value):
+    return None if value and "\n" not in value else "it is not one line"
+
+
+def wifi_psk_check(value):
+    return None if 8 <= len(value) <= 64 and "\n" not in value else "a WPA passphrase is 8 to 63 characters, or a key of 64 hex digits"
+
+
+def unasked(why):
+    return lambda value, ctx: (UNKNOWN, why)
+
+
 def public_key(private):
     """(cipher, "type base64") of an OpenSSH private key; ValueError when it is not one."""
     lines = private.strip().splitlines()
@@ -216,6 +243,7 @@ def deploy_key_probe(repo):
     return probe
 
 
+INSTALL_ASKS = "it is first used by `wk machine install`, whose --dry-run asks the store and the BMC"
 RULES = (
     Rule("github-user", "your GitHub account name, which git-webkit sends with the token", one_word, github_user_probe),
     Rule("github-token", "a classic GitHub personal access token (scope public_repo), for git-webkit and gh", github_token_check, github_token_probe),
@@ -227,7 +255,12 @@ RULES = (
     Rule("claude-login", "the claude.ai login document (.credentials.json) of a `claude` logged in for this purpose alone; "
          "only the injector holds it", claude_login_check, claude_login_probe),
     Rule("tailnet-auth-key", "the auth key a new server joins the tailnet with", tailnet_key_check, tailnet_key_probe),
+    Rule("tailnet-api-key", "a tailnet API access token; `wk machine install` retires a reinstalled server's old node with it",
+         tailnet_api_key_check, tailnet_api_key_probe),
+    Rule("wifi-ssid", "the name of the WiFi network a server with wifi= in its conf is installed onto", one_line, unasked(INSTALL_ASKS)),
+    Rule("wifi-psk", "that WiFi network's passphrase", wifi_psk_check, unasked(INSTALL_ASKS)),
 )
+BMC_WHAT = "one half of the login of a server's BMC, which `wk machine install` installs it through"
 DEPLOY_WHAT = "the ssh key that pushes to one repository: a private key with no passphrase, its public half a deploy key there"
 
 
@@ -238,9 +271,13 @@ def find(name):
             return rule
     if name.startswith(DEPLOY) and REPO.fullmatch(name[len(DEPLOY):]):
         return Rule(name, DEPLOY_WHAT, deploy_key_check, deploy_key_probe(name[len(DEPLOY):]))
-    die("no credential is named %s: the names are %s and %s<owner>/<repo>" % (name, ", ".join(r.name for r in RULES), DEPLOY))
+    if BMC.fullmatch(name):
+        return Rule(name, BMC_WHAT, one_line, unasked(INSTALL_ASKS))
+    die("no credential is named %s: the names are %s, %s<owner>/<repo> and bmc/<machine>/user|password"
+        % (name, ", ".join(r.name for r in RULES), DEPLOY))
 
 
-def repos(names):
-    """The repositories that have a deploy key among the store's `names`."""
-    return [name[len(DEPLOY):] for name in names if name.startswith(DEPLOY) and REPO.fullmatch(name[len(DEPLOY):])]
+def named(names):
+    """The credentials among the store's `names` that are named for a repository or a machine."""
+    return [name for name in names if BMC.fullmatch(name) or name.startswith(DEPLOY) and REPO.fullmatch(name[len(DEPLOY):])]
+

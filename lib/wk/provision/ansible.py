@@ -1,5 +1,5 @@
-"""Provisioning is Ansible's (ansible/site.yml). This is what wk adds: the inventory, made of machines/*.conf, and the
-one command line that runs the playbook.
+"""Provisioning is Ansible's (ansible/site.yml, and ansible/install.yml for a server's operating system). This is what
+wk adds: the inventory, made of machines/*.conf, and the one command line that runs a playbook.
 
     ansible-playbook -i ansible/inventory.py [--limit <server>] [--tags <role>] [--check --diff] ansible/site.yml
 
@@ -60,13 +60,14 @@ def roles(inv):
     return sorted(os.listdir(os.path.join(inv.root, "ansible", "roles")))
 
 
-def play(inv, limit, tag):
-    """Run the playbook against `limit` (None: every server), `tag` alone (None: every role); returns its exit code.
-    Under --dry-run it runs in Ansible's check mode, which changes nothing and prints what would."""
+def play(inv, limit, tag, book="site.yml", more=()):
+    """Run the playbook `book` against `limit` (None: every server), `tag` alone (None: every role), with `more`
+    options; returns its exit code. Under --dry-run it runs in Ansible's check mode, which changes nothing and
+    prints what would."""
     here, files = inv.here, inv.root + "/ansible/"
     if not here.run(["ansible-playbook", "--version"]).ok:
         die("this machine has no ansible-playbook, which is what provisions a server\n    %s" % INSTALL, NEEDS_PERSON)
     dry = act.flags.dry_run
     argv = (["ansible-playbook", "-i", files + "inventory.py"] + (["--limit", limit] if limit else []) + (["--tags", tag] if tag else [])
-            + (["--check", "--diff"] if dry else []) + [files + "site.yml"])
+            + list(more) + (["--check", "--diff"] if dry else []) + [files + book])
     return (here.run if dry else here.act)(argv, stream=True).rc

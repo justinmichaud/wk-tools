@@ -14,7 +14,7 @@ def main(args, inv):
     held = store.list()
     ctx = rules.Context(store.get, inv.clock.now(), inv.fleet.here.get("litellm_url"))
     bad = False
-    for name in [r.name for r in rules.RULES] + [rules.DEPLOY + repo for repo in rules.repos(held)]:
+    for name in [r.name for r in rules.RULES] + rules.named(held):
         rule = rules.find(name)
         if name not in held:
             print("%-28s %-8s %-8s %s: `wk key set %s`" % (name, "absent", "-", rule.what, name))

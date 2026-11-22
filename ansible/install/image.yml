@@ -1,0 +1,87 @@
+---
+# The image: Ubuntu's pinned live-server ISO with two changes. /autoinstall.yaml is where subiquity looks on its
+# medium, and `autoinstall` on the kernel command line is what makes it erase a disk without asking.
+
+- name: Make the client's cache
+  ansible.builtin.file:
+    path: "{{ wk_install_stock | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Fetch Ubuntu's pinned image
+  ansible.builtin.get_url:
+    url: "{{ wk_install_image.url }}"
+    dest: "{{ wk_install_stock }}"
+    checksum: "sha256:{{ wk_install_image.sha256 }}"
+    mode: "0644"
+
+- name: Fetch the key Tailscale signs its packages with
+  ansible.builtin.uri:
+    url: "{{ wk_tailscale_apt }}/{{ wk_install_codename }}.asc"
+    return_content: true
+  register: wk_tailscale_key
+
+# The directory is this install's alone and is made afresh: nothing an earlier run left in it is trusted.
+- name: Remove the image an earlier run left
+  ansible.builtin.file:
+    path: "{{ wk_install_build }}"
+    state: absent
+
+- name: Make a directory for the image
+  ansible.builtin.file:
+    path: "{{ wk_install_build }}"
+    state: directory
+    mode: "0700"
+
+- name: Write the autoinstall file
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/install/autoinstall.yaml.j2"
+    dest: "{{ wk_install_build }}/autoinstall.yaml"
+    mode: "0600"
+  vars:
+    wk_install_tailscale_key: "{{ wk_tailscale_key.content }}"
+  no_log: true
+  diff: false
+
+- name: Take the boot menu out of Ubuntu's image
+  ansible.builtin.command:
+    argv: [xorriso, -osirrox, "on", -indev, "{{ wk_install_stock }}", -extract, /boot/grub/grub.cfg, "{{ wk_install_build }}/grub.cfg"]
+    creates: "{{ wk_install_build }}/grub.cfg"
+
+- name: Make the boot menu writable
+  ansible.builtin.file:
+    path: "{{ wk_install_build }}/grub.cfg"
+    mode: "0644"
+
+- name: Put autoinstall on every kernel command line
+  ansible.builtin.replace:
+    path: "{{ wk_install_build }}/grub.cfg"
+    regexp: '^(\s*linux\s+\S+)\s+---'
+    replace: '\1 autoinstall ---'
+  register: wk_grub
+
+- name: Assert the boot menu had a kernel command line
+  ansible.builtin.assert:
+    that: wk_grub is changed
+    fail_msg: "{{ wk_install_image.url | basename }} has no `linux <kernel> ---` line in /boot/grub/grub.cfg, so nothing would install unasked"
+    quiet: true
+
+# `-boot_image any replay` keeps the image's own boot records, BIOS and UEFI.
+- name: Make the image
+  ansible.builtin.command:
+    argv:
+      - xorriso
+      - -indev
+      - "{{ wk_install_stock }}"
+      - -outdev
+      - "{{ wk_install_build }}/{{ wk_install_unit }}.iso"
+      - -boot_image
+      - any
+      - replay
+      - -map
+      - "{{ wk_install_build }}/autoinstall.yaml"
+      - /autoinstall.yaml
+      - -map
+      - "{{ wk_install_build }}/grub.cfg"
+      - /boot/grub/grub.cfg
+    creates: "{{ wk_install_build }}/{{ wk_install_unit }}.iso"

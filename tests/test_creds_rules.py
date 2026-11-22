@@ -34,7 +34,7 @@ class Rules(unittest.TestCase):
 class TestFind(Rules):
     def test_every_rule_says_what_it_is_for(self):
         self.assertEqual([r.name for r in rules.RULES], ["github-user", "github-token", "bugzilla-user", "bugzilla-password", "litellm-key",
-                                                         "claude-login", "tailnet-auth-key"])
+                                                         "claude-login", "tailnet-auth-key", "tailnet-api-key", "wifi-ssid", "wifi-psk"])
         self.assertTrue(all(r.what for r in rules.RULES))
 
     def test_a_deploy_key_is_named_for_its_repository(self):
@@ -42,11 +42,13 @@ class TestFind(Rules):
 
     def test_an_unknown_name_is_refused_naming_the_names(self):
         for name in ("bogus", "deploy-key/norepo", "deploy-key/a/b/c"):
-            with self.assertRaisesRegex(Refused, "no credential is named %s: the names are github-user, .* and deploy-key/<owner>/<repo>" % name):
+            with self.assertRaisesRegex(Refused, "no credential is named %s: the names are github-user, .*, deploy-key/<owner>/<repo> and "
+                                                 r"bmc/<machine>/user\|password" % name):
                 rules.find(name)
 
-    def test_repos_are_the_deploy_keys_in_the_store(self):
-        self.assertEqual(rules.repos(["github-token", "deploy-key/o/r", "deploy-key/odd"]), ["o/r"])
+    def test_the_named_credentials_in_the_store_are_those_of_a_repository_or_a_machine(self):
+        self.assertEqual(rules.named(["github-token", "deploy-key/o/r", "deploy-key/odd", "bmc/lin/user", "bmc/lin/pin", "bmc/Lin/user"]),
+                         ["deploy-key/o/r", "bmc/lin/user"])
 
 
 class TestGithub(Rules):
@@ -134,6 +136,34 @@ class TestTailnet(Rules):
     def test_an_auth_key_is_checked_by_shape_and_cannot_be_probed(self):
         self.checks("tailnet-auth-key", ["tskey-auth-abc"], ["tskey-api-abc", "tskey-auth-a b", ""])
         self.assertEqual(self.verdict("tailnet-auth-key", "tskey-auth-abc", {}), UNKNOWN)
+
+
+    def test_an_api_token_is_checked_by_shape_and_by_listing_the_devices(self):
+        self.checks("tailnet-api-key", ["tskey-api-abc"], ["tskey-auth-abc", "tskey-api-a b", ""])
+        devices = ("GET", "https://api.tailscale.com/api/v2/tailnet/-/devices")
+        self.assertEqual(self.probe("tailnet-api-key", "tskey-api-abc", {devices: (200, {"devices": [{}, {}]})}),
+                         (OK, "Tailscale accepts it, and it lists 2 device(s)"))
+        self.assertEqual(self.http.asked[0][2], {"Authorization": "Bearer tskey-api-abc"})
+        self.assertEqual([self.verdict("tailnet-api-key", "tskey-api-abc", {devices: a}) for a in ((401, {}), (403, {}), (500, {}), DOWN)],
+                         [BAD, BAD, UNKNOWN, UNKNOWN])
+
+
+class TestInstall(Rules):
+    def test_what_only_an_install_can_try_is_checked_by_shape_and_never_probed(self):
+        self.checks("wifi-ssid", ["Some Network"], ["", "two\nlines"])
+        self.checks("wifi-psk", ["8 chars!", "f" * 64], ["short", "f" * 65, "eight or\nmore"])
+        self.checks("bmc/lin/user", ["admin"], ["", "a\nb"])
+        for name in ("wifi-ssid", "wifi-psk", "bmc/lin/user", "bmc/lin/password"):
+            self.assertEqual(self.probe(name, "any value", {}),
+                             (UNKNOWN, "it is first used by `wk machine install`, whose --dry-run asks the store and the BMC"))
+        self.assertEqual(self.http.asked, [])
+
+    def test_a_bmc_login_is_named_for_its_machine(self):
+        self.assertEqual((rules.find("bmc/lin/password").name, rules.find("bmc/lin/user").what),
+                         ("bmc/lin/password", "one half of the login of a server's BMC, which `wk machine install` installs it through"))
+        for name in ("bmc/lin", "bmc/lin/pin", "bmc/Lin/user", "bmc//user"):
+            with self.assertRaises(Refused):
+                rules.find(name)
 
 
 class TestDeployKey(Rules):

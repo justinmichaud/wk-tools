@@ -83,7 +83,7 @@ class TestKeySet(unittest.TestCase):
 
 class TestKeyCheck(unittest.TestCase):
     def test_one_row_per_credential_present_or_absent_with_the_probes_verdict(self):
-        w = world(github_user="me", github_token=TOKEN, tailnet_auth_key="tskey-auth-a", **{"deploy-key/o/r": private_key()})
+        w = world(github_user="me", github_token=TOKEN, tailnet_auth_key="tskey-auth-a", **{"deploy-key/o/r": private_key(), "bmc/lin/user": "admin"})
         answers = dict(GOOD)
         answers[("GET", GH + "/users/me")] = (200, {})
         answers[("GET", GH + "/repos/o/r/keys?per_page=100")] = net.NoAnswer("down")
@@ -93,9 +93,10 @@ class TestKeyCheck(unittest.TestCase):
         self.assertEqual((r.code, r.effects, [row[:3] for row in rows]),
                          (0, [], [["github-user", "present", "ok"], ["github-token", "present", "ok"], ["bugzilla-user", "absent", "-"],
                                   ["bugzilla-password", "absent", "-"], ["litellm-key", "absent", "-"], ["claude-login", "absent", "-"],
-                                  ["tailnet-auth-key", "present", "unknown"], ["deploy-key/o/r", "present", "unknown"]]))
+                                  ["tailnet-auth-key", "present", "unknown"], ["tailnet-api-key", "absent", "-"], ["wifi-ssid", "absent", "-"],
+                                  ["wifi-psk", "absent", "-"], ["bmc/lin/user", "present", "unknown"], ["deploy-key/o/r", "present", "unknown"]]))
         self.assertEqual(rows[2][3], "your https://bugs.webkit.org login, an email address: `wk key set bugzilla-user`")
-        self.assertEqual(rows[7][3], "GET /repos/o/r/keys did not answer (down)")
+        self.assertEqual(rows[11][3], "GET /repos/o/r/keys did not answer (down)")
         self.assertNotIn(TOKEN, r.out + r.err)
 
     def test_a_bad_credential_exits_1(self):

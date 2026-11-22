@@ -5,8 +5,9 @@ several lines (a deploy key, the claude.ai login) is piped in: `wk key set deplo
 It is stored unless its shape is wrong or its issuer refuses it (`--force` stores what an issuer refuses); an issuer
 that does not answer is said so.
 
-The names: github-user, github-token, bugzilla-user, bugzilla-password, litellm-key, claude-login, tailnet-auth-key and
-deploy-key/<owner>/<repo>. `wk key check` says what each is for. litellm-key is the one an agent session can read."""
+The names: github-user, github-token, bugzilla-user, bugzilla-password, litellm-key, claude-login, tailnet-auth-key,
+tailnet-api-key, wifi-ssid, wifi-psk, deploy-key/<owner>/<repo> and bmc/<machine>/user, bmc/<machine>/password.
+`wk key check` says what each is for. litellm-key is the one an agent session can read."""
 
 import getpass
 

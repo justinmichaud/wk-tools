@@ -1,0 +1,74 @@
+---
+# Installing a server's operating system from nothing, unattended, through its BMC. `wk machine install <server>` runs
+#   ansible-playbook -i ansible/inventory.py --limit <server> [--skip-tags wipe] [--check --diff] ansible/install.yml
+# Ubuntu's own autoinstall does the installing, the BMC's Redfish API the media, the boot and the power. The server's
+# disk is erased. `--skip-tags wipe` stops after the image is inserted and read back: nothing boots, nothing is erased.
+# `--check` asks the store and the BMC and stages nothing.
+
+- name: Install a server through its BMC
+  hosts: all
+  gather_facts: false
+  vars:
+    wk_client_env:
+      PATH: "{{ lookup('ansible.builtin.env', 'PATH') }}"
+      BAO_ADDR: "{{ wk_bao_addr }}"
+    wk_bao_get: "BAO_ADDR={{ wk_bao_addr | quote }} bao kv get -field=value -mount=secret wk/"
+    wk_install_name: "{{ inventory_hostname }}"
+    wk_install_user: "{{ wk_user | default(lookup('ansible.builtin.env', 'USER')) }}"
+    wk_install_image: "{{ wk_ubuntu[wk_os][wk_arch] }}"
+    wk_install_codename: "{{ wk_ubuntu[wk_os].codename }}"
+    wk_install_stock: "{{ lookup('ansible.builtin.env', 'HOME') }}/.cache/wk/{{ wk_install_image.url | basename }}"
+    wk_install_unit: "wk-install-{{ inventory_hostname }}"
+    wk_install_build: "{{ wk_install_stock | dirname }}/{{ wk_install_unit }}"
+    wk_install_staged: "/var/tmp/{{ wk_install_unit }}"
+    wk_install_url: "{{ wk_install_media_scheme }}://{{ wk_media_address }}:{{ wk_install_media_port }}/{{ wk_install_unit }}.iso"
+    wk_install_power: "{{ wk_power.redfish_facts.system.entries[0][1].PowerState }}"
+    wk_install_media: "{{ wk_media.redfish_facts.virtual_media.entries[0][1] }}"
+    wk_install_needs: >-
+      {{ ['bmc/' ~ inventory_hostname ~ '/user', 'bmc/' ~ inventory_hostname ~ '/password', 'tailnet-auth-key', 'tailnet-api-key']
+         + (['wifi-ssid', 'wifi-psk'] if wk_wifi is defined else []) }}
+  # The password is masked by the modules themselves, so what a BMC answers stays readable.
+  module_defaults:
+    community.general.redfish_info: &bmc
+      baseuri: "{{ wk_bmc }}"
+      username: "{{ wk_install_secret.bmc_user }}"
+      password: "{{ wk_install_secret.bmc_password }}"
+    community.general.redfish_command: *bmc
+
+  tasks:
+    - name: Ask before anything is staged
+      ansible.builtin.import_tasks: install/preflight.yml
+      delegate_to: localhost
+
+    - name: Stop here in check mode
+      ansible.builtin.meta: end_play
+      when: ansible_check_mode
+
+    - name: Install
+      block:
+        - name: Make the image
+          ansible.builtin.import_tasks: install/image.yml
+          delegate_to: localhost
+
+        - name: Serve the image where the BMC reaches it
+          ansible.builtin.import_tasks: install/media.yml
+
+        - name: Insert the image and boot the installer from it
+          ansible.builtin.import_tasks: install/boot.yml
+
+      always:
+        - name: Take the image out of the BMC
+          block:
+            - name: Eject the image
+              ansible.builtin.import_tasks: install/eject.yml
+
+            - name: Clear the boot override
+              community.general.redfish_command:
+                category: Systems
+                command: DisableBootOverride
+              delegate_to: localhost
+              tags: [wipe]
+
+          always:
+            - name: Stop serving and remove every copy of the image
+              ansible.builtin.import_tasks: install/unserve.yml
