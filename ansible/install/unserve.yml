@@ -1,0 +1,25 @@
+---
+# Every copy of the image goes: it holds the WiFi passphrase and the tailnet auth key.
+
+- name: Remove the image from the client
+  ansible.builtin.file:
+    path: "{{ wk_install_build }}"
+    state: absent
+  delegate_to: localhost
+
+- name: Stop serving and remove the image from the media host
+  delegate_to: "{{ wk_media_host }}"
+  when: wk_media_host in hostvars
+  block:
+    # A media host that does not answer fails here, as a task; unreachable would end the play with the rest undone.
+    - name: Reach the media host
+      ansible.builtin.wait_for_connection:
+        timeout: 60
+
+    - name: Stop serving
+      ansible.builtin.import_tasks: close.yml
+
+    - name: Remove the image from the media host
+      ansible.builtin.file:
+        path: "{{ wk_install_staged }}"
+        state: absent

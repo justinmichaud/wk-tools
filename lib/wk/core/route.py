@@ -20,15 +20,15 @@ FORWARD = "WK_FORWARD"
 FORWARD_PORTS = (20000, 10000)      # the first and how many: below the range Linux gives out by itself (32768 on)
 
 
-def workspaces(inv):
-    """(every Workspace on every server that answered, the names of the servers that did not)."""
+def workspaces(inv, names=None):
+    """(every Workspace on every server, or on `names`, that answered; the names of the servers that did not)."""
     def listing(machine):
         try:
             rows = json.loads(machine.run(["wk", "ls", "--json"], timeout=30).out)["workspaces"]
         except ValueError:
             return UNKNOWN
         return [Workspace(server=machine.name, **row) for row in rows]
-    answers = inv.fleet.ask(listing)
+    answers = inv.fleet.ask(listing, names)
     return ([ws for found in answers.values() if found is not UNKNOWN for ws in found],
             [name for name, found in answers.items() if found is UNKNOWN])
 

@@ -1,0 +1,77 @@
+# Ubuntu's autoinstall for one server, read by subiquity from the root of the install medium. It holds the WiFi
+# passphrase and the tailnet auth key. Every scalar is written with to_json: a JSON string is a YAML string.
+autoinstall:
+  version: 1
+  interactive-sections: []
+  locale: {{ wk_install_locale | to_json }}
+  keyboard:
+    layout: {{ wk_install_keyboard | to_json }}
+  timezone: {{ wk_install_timezone | to_json }}
+  refresh-installer:
+    update: false
+  source:
+    search_drivers: false
+  network:
+    version: 2
+    ethernets:
+      wired:
+        match:
+          name: "e*"
+        dhcp4: true
+        optional: true
+{% if wk_wifi is defined %}
+    # netplan's networkd backend takes a wifi by its interface name alone, never by a match.
+    wifis:
+      {{ wk_wifi | to_json }}:
+        dhcp4: true
+        access-points:
+          {{ wk_install_secret.ssid | to_json }}:
+            password: {{ wk_install_secret.psk | to_json }}
+{% endif %}
+  # A mirror the installer cannot reach makes it install from the medium; the first boot fetches the rest.
+  apt:
+    fallback: offline-install
+  storage:
+    layout:
+      name: lvm
+      sizing-policy: all
+      match:
+        size: largest
+  ssh:
+    install-server: true
+    allow-pw: false
+{% if wk_wifi is defined %}
+  # From the medium's own pool, so the installed system joins WiFi whether or not the installer did.
+  packages: [wpasupplicant]
+{% endif %}
+  # The play ejects the medium while the machine is off, then powers it on.
+  shutdown: poweroff
+  # cloud-init's, for the installed system's first boot.
+  user-data:
+    hostname: {{ wk_install_name | to_json }}
+    ssh_pwauth: false
+    users:
+      - name: {{ wk_install_user | to_json }}
+        gecos: {{ wk_install_user | to_json }}
+        shell: /bin/bash
+        groups: [adm, sudo]
+        sudo: "ALL=(ALL) NOPASSWD:ALL"
+        lock_passwd: true
+        ssh_authorized_keys:
+          - {{ wk_install_public_key | to_json }}
+    apt:
+      sources:
+        tailscale.list:
+          source: {{ ('deb [signed-by=$KEY_FILE] ' ~ wk_tailscale_apt ~ ' ' ~ wk_install_codename ~ ' main') | to_json }}
+          key: {{ wk_install_tailscale_key | to_json }}
+    package_update: true
+    packages: {{ wk_install_packages | to_json }}
+    write_files:
+      - path: /etc/wk-tailnet-auth-key
+        permissions: "0600"
+        content: {{ wk_install_secret.auth_key | to_json }}
+    runcmd:
+      - [loginctl, enable-linger, {{ wk_install_user | to_json }}]
+      - [sh, -c, {{ ("grep -q '^" ~ wk_install_user ~ ":' /etc/subuid /etc/subgid || usermod --add-subuids 100000-165535 --add-subgids 100000-165535 " ~ wk_install_user) | to_json }}]
+      - [tailscale, up, "--auth-key=file:/etc/wk-tailnet-auth-key", --ssh, {{ ('--hostname=' ~ wk_install_name) | to_json }}, {{ ('--advertise-tags=' ~ wk_tailnet_tag) | to_json }}]
+      - [rm, -f, /etc/wk-tailnet-auth-key]

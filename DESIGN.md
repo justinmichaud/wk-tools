@@ -290,8 +290,9 @@ converges. A half-made workspace is wiped, never repaired.
   mount `secret`, under `wk/`.
 - The names: `github-user`, `github-token`, `bugzilla-user`,
   `bugzilla-password` (unmodified `git-webkit` sends Bugzilla a login and a
-  password), `litellm-key`, `claude-login`, `tailnet-auth-key`, and
-  `deploy-key/<owner>/<repo>`.
+  password), `litellm-key`, `claude-login`, `tailnet-auth-key`,
+  `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `deploy-key/<owner>/<repo>`,
+  and `bmc/<machine>/user` with `bmc/<machine>/password`.
 - Delivered to each of your servers, into the places the tools already read:
   one deploy key per repository with its ssh alias, and `env.sh` with what
   `git-webkit` and `gh` look for, all under `secrets/`.
@@ -382,7 +383,76 @@ converges. A half-made workspace is wiped, never repaired.
 - Doctor rows, gc rows and cache pins are collected from a `hooks` module in
   each package under `lib/wk/`; no file lists them.
 
+## Installing a server
+
+A server's operating system is installed from nothing, unattended, through
+its BMC. The installer is Ubuntu's own (autoinstall: subiquity and
+cloud-init), the BMC is driven over Redfish by `community.general`'s
+modules, and `xorriso` on the client puts the one file into Ubuntu's image.
+
+- `wk machine install <server>` asks once, then runs, from the client,
+  `ansible-playbook -i ansible/inventory.py --limit <server> ansible/install.yml`
+  and returns its exit code. `--dry-run` adds `--check --diff`: the store and
+  the BMC are asked and nothing is staged. `--rehearse` adds
+  `--skip-tags wipe`: the image is made, served, inserted, read back and
+  ejected, and nothing boots.
+- It refuses the client, a borrowed box, a Mac and a machine with no `bmc=`.
+  The credential server and a server that holds a workspace are barriers. A
+  server that does not answer is installed: that is what a machine being
+  reinstalled usually does.
+- The flow: fetch Ubuntu's pinned live-server image for the conf's `arch`
+  (checksummed, kept in `~/.cache/wk` on the client); write
+  `/autoinstall.yaml` into a copy and put `autoinstall` on its kernel command
+  line, which is what makes subiquity erase a disk without asking; copy it to
+  the media host and serve it from a transient unit (`systemd-run`), behind
+  one firewall rule where the conf names a chain; insert it as the BMC's
+  virtual CD; boot from it once; wait for the installer to power the machine
+  off; eject; retire the old system's tailnet node and forget its host key;
+  power on; wait for ssh by the tailnet name.
+- The installer powers off when it has finished and the image is ejected
+  while the machine is off, so no boot order can run the installer twice.
+- However the run ends, the image is ejected, the boot override cleared, the
+  unit stopped, the firewall rule deleted and every copy of the image
+  removed: it holds the WiFi passphrase and the tailnet auth key. Unit, rule
+  and directories are named for the server, so a run killed anywhere is
+  cleaned up by the next.
+- Conf keys of a server that can be installed:
+
+  | Key | Meaning |
+  | --- | --- |
+  | `bmc` | the BMC's address, as the client reaches it |
+  | `arch` | `arm64` or `amd64` |
+  | `os` | an Ubuntu release `group_vars/all.json` pins (`24.04`) |
+  | `media_host`, `media_user` | a machine the BMC can fetch from, and the login there, which must be root |
+  | `media_address` | that machine's address as the BMC reaches it |
+  | `media_chain` | optional: `<family>/<table>/<chain>` of the media host's nftables chain that would drop the BMC |
+  | `wifi` | optional: the server's WiFi interface; the network's name and passphrase are the store's |
+  | `user` | the login made on the server; the client's when absent |
+
+- The store's part: `bmc/<server>/user`, `bmc/<server>/password`,
+  `tailnet-auth-key` (single-use, pre-approved, tagged as the fleet is),
+  `tailnet-api-key`, and `wifi-ssid` with `wifi-psk` for a server with
+  `wifi=`. No network name is in the tree.
+- The installed system, before `wk machine setup` runs: Ubuntu on LVM over
+  the whole largest disk; the conf's network; one user with the client's ssh
+  public key, a locked password and password logins off; OpenSSH; git,
+  podman, uidmap, bubblewrap, python3, curl, openssl and tar; Tailscale from
+  its own apt repository, joined under the server's name with Tailscale SSH
+  and the fleet's tag; lingering on and subordinate ids present. The auth
+  key's file is deleted once it has joined.
+- What is BMC-specific is a variable in `group_vars/all.json`: the image's
+  scheme and the command that serves it, the boot device's name, and whether
+  virtual media hangs off the Manager or the System.
+
 ## Open decisions
+
+- **sudo on an installed server (a proposal; the owner must confirm).** The
+  autoinstall gives the conf's user `NOPASSWD` sudo: the account has no
+  password, and a server is cattle that nobody types a password into. This
+  contradicts "sudo on your servers asks for a password" above. The
+  alternative is no sudo at all, every root-owned change being a change to
+  the autoinstall file and a reinstall. `bwrap` sets `no_new_privs`, so an
+  agent session on Linux cannot use sudo either way.
 
 - **Refusals `--force` does not cross.** A build whose place cannot be
   measured has no job count to use, and a command whose podman or pueue does
@@ -397,6 +467,7 @@ DESIGN.md               the design
 STATUS.md               what is implemented, tested and verified on a real machine (`wk help status`)
 machines/               one conf per machine
 ansible/site.yml        the playbook: provisioning, whole
+ansible/install.yml     the playbook that installs a server's operating system; its tasks and template in ansible/install/
 ansible/inventory.py    Ansible's inventory script: prints `wk machine inventory`
 ansible/group_vars/     all.json: the pins and ports the playbook and the program share
 ansible/roles/          wk, pueue, mirror, sdk, agents, openbao, injector, credentials, borrowed-claude

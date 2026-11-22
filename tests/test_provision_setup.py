@@ -163,12 +163,18 @@ class TestThePlaybook(unittest.TestCase):
         self.assertEqual((len(digests), [d for d in digests if not re.fullmatch("[0-9a-f]{64}", d)]), (8, []))
 
     def test_every_module_is_named_in_full(self):
+        """A module is a key of its task, beside the task's name; the same word deeper in is a module's own option."""
         short = []
         for directory, _, names in os.walk(os.path.join(ROOT, "ansible")):
             for name in [n for n in names if n.endswith(".yml")]:
                 with open(os.path.join(directory, name)) as f:
-                    short += ["%s: %s" % (name, line.strip()) for line in f
-                              if re.match(r" *(- )?(shell|command|copy|file|template|git|uri|stat|debug|assert|set_fact|get_url|lineinfile):", line)]
+                    for line in f:
+                        task = re.match(r"( *)- ", line)
+                        key = re.match(r"( *)(- )?(shell|command|copy|file|template|git|uri|stat|debug|assert|set_fact|get_url|lineinfile):", line)
+                        if task:
+                            beside = len(task.group(1)) + 2
+                        if key and (key.group(2) or len(key.group(1)) == beside):
+                            short.append("%s: %s" % (name, line.strip()))
         self.assertEqual(short, [])
 
 
