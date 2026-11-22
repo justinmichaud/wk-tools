@@ -6,6 +6,7 @@ import json
 from wk import creds
 from wk.agent import wrapper
 from wk.core.act import barrier, die, info
+from wk.core.errors import NEEDS_PERSON
 from wk.core.vars import VARS
 from wk.workspace import lifecycle
 
@@ -84,6 +85,10 @@ class Session:
 def start(inv, agent, name, tail):
     if agent not in START:
         die("no agent named %s: the agents are %s" % (agent, " and ".join(START)))
+    tty = inv.stdin.isatty()
+    if not tty and not tail:
+        die("an agent's session needs a terminal and there is none: give the agent its prompt, `wk ai %s %s -- -p <prompt>`" % (agent, name),
+            NEEDS_PERSON)
     conf, m, ws = inv.fleet.here, inv.here, lifecycle.ready(inv, name)
     argv, extra = START[agent](inv, conf, ws, inv.wk_home)
     if not m.exists(argv[0]):
@@ -97,7 +102,7 @@ def start(inv, agent, name, tail):
     if agent == "claude":
         trust(m, ws.path + "/src")
     info("starting %s in %s: %s" % (agent, name, wrapper.SAYS[conf.kind]))
-    return m.act(session.driver.exec_argv(ws, session.wrap(argv + tail, env), tty=True), stream=True, tty=True).rc
+    return m.act(session.driver.exec_argv(ws, session.wrap(argv + tail, env), tty=tty), stream=True, tty=tty).rc
 
 
 def answered(text, checkout):

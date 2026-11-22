@@ -65,6 +65,7 @@ class Call:
     cwd: object = None
     env: object = None
     forward: object = None
+    tty: bool = False
 
 
 class Fake(Machine):
@@ -102,7 +103,7 @@ class Fake(Machine):
         return self._run(argv, strict=True, **how)
 
     def _run(self, argv, input=None, timeout=None, cwd=None, env=None, stream=False, tty=False, forward=None, strict=False):
-        call = Call(tuple(argv), input, cwd, env, forward)
+        call = Call(tuple(argv), input, cwd, env, forward, tty)
         self.calls.append(call)
         match = max((p for p in self.scripts if call.argv[:len(p)] == p), key=len, default=None)
         if match is None and strict:

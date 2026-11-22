@@ -146,7 +146,7 @@ class EndToEnd(unittest.TestCase):
 
     def agent(self, w, name, env=CLAUDE_ENV):
         """`wk ai claude x`: measured, then started under the kind's wrapper with the injector's environment."""
-        run = self.ok(w.wk("ai", "claude", "x"))
+        run = self.ok(w.wk("ai", "claude", "x", tty=True))
         start = EXEC_TTY[name] + wrap(w.confs[name].kind, [CLAUDE] + MODE[name] + ["--remote-control", "x"], [SECRETS], env)
         self.assertEqual(run.effects, ["[%s] write /home/u/.claude.json" % name, "[%s] %s" % (name, shlex.join(start))])
         for hidden in ("GH_TOKEN", "GITHUB_COM_TOKEN", "SSH_AUTH_SOCK", "leaked"):
@@ -231,5 +231,5 @@ class TestABorrowedBox(EndToEnd):
     def test_claude_typed_on_the_box_itself_is_refused_naming_the_client(self):
         w = world()
         self.ok(w.wk("new", "x", "--on", "box"))
-        r = self.ok(w.wk("ai", "claude", "x", on="box"), 4)
+        r = self.ok(w.wk("ai", "claude", "x", on="box", tty=True), 4)
         self.assertIn("    start it from the client: wk ai claude x\n", r.err)

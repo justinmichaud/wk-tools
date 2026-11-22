@@ -94,7 +94,7 @@ class World:
         return code, out.getvalue(), err.getvalue()
 
     def _far(self, name, call):
-        return Result(*self._type(call.argv[1:], name, call.env or {}, Stdin(call.input or "", False)))
+        return Result(*self._type(call.argv[1:], name, call.env or {}, Stdin(call.input or "", call.tty)))
 
     def wk(self, *words, on=None, stdin="", tty=False, env=None):
         mark = len(self.journal.entries)
