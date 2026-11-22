@@ -41,6 +41,14 @@
       when: "'linux' in group_names or 'credential' in group_names"
       tags: [pueue, openbao, injector]
 
+    - name: Make the directory of the user's units
+      ansible.builtin.file:
+        path: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user"
+        state: directory
+        mode: "0755"
+      when: "'linux' in group_names or 'credential' in group_names"
+      tags: [pueue, openbao, injector]
+
   tasks:
     - name: Run the roles under the login shell's PATH
       environment:

@@ -23,3 +23,6 @@
   containers.podman.podman_image:
     name: "{{ wk_sdk_image | default(wk_project.sdk_image) }}"
     state: present
+  # The image is some 15 GB.
+  async: 7200
+  poll: 30
