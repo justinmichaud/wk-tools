@@ -112,4 +112,4 @@ class TestHooks(unittest.TestCase):
         self.assertEqual([(r.name, r.detail, r.flag, r.reclaim()) for r in rows], [("alpha-cache", "3 files", "", None)])
 
     def test_the_real_tree_is_searched_by_default(self):
-        self.assertEqual(hooks.collect("doctor", None, None, None), [])
+        self.assertEqual(hooks.collect("doctor", None, World().confs["desk"], None), [])
