@@ -193,7 +193,7 @@ a `wk` typed on that machine itself.
 | `bin/wk` | a link to `tools/wk`; one line in the login shell's profile puts `bin/` on `PATH` |
 | `git/WebKit.git` | the mirror; `gc.auto 0`, since workspaces borrow its objects |
 | `ws/<name>/src` | the checkout: `git clone --shared` from the mirror |
-| `ws/<name>/build` | build output and the workspace's ccache |
+| `ws/<name>/build` | build output, a directory per preset (`JSCOnly/Release`, ...), and the workspace's ccache |
 | `ws/<name>/build/guard.py` | the memory guard, copied in by each build and test run |
 | `ws/<name>/.ready` | written last by `wk new`; absent means half-made |
 | `cache/` | pinned downloads: `pueue-<version>/`, `agents/`, `openbao-<version>/`. `wk gc` reclaims an entry no lane pins |
@@ -363,6 +363,9 @@ converges. A half-made workspace is wiped, never repaired.
 - Every task is idempotent: a second run reports `changed=0`, which is how
   convergence is verified, and a run killed anywhere converges when typed
   again. A task that needs a person stops the run with its remedy.
+- A run finishes while the store cannot be asked (no `bao login` yet) or
+  lacks a name: nothing of the store's, or not that name, is delivered, the
+  run says so, and the injector holds no login until `claude-login` is set.
 - Under `--dry-run` a task that asks a running daemon or a server's API is
   skipped: Ansible's check mode reports files, downloads and units.
 - `ansible/group_vars/all.json` holds what the playbook installs by and the

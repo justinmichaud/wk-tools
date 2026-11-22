@@ -11,7 +11,7 @@ from wk.workspace import lifecycle
 
 # On a server of the owner's an agent asks permission for nothing (DESIGN.md, Trust).
 OWN_MODE = ["--dangerously-skip-permissions"]
-# Claude Code refuses --dangerously-skip-permissions to root, which the login on a borrowed box is.
+# A borrowed box is not the owner's, and Claude Code refuses --dangerously-skip-permissions to root, which a login there may be.
 BORROWED_MODE = ["--permission-mode", "auto"]
 CLAUDE_MODE = {"linux": OWN_MODE, "mac": OWN_MODE, "borrowed": BORROWED_MODE}
 WHY = {wrapper.LEAKS: "does not hold", wrapper.ABSENT: "cannot run", wrapper.UNKNOWN: "could not be measured"}
