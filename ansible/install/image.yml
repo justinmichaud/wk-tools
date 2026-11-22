@@ -1,6 +1,8 @@
 ---
 # The image: Ubuntu's pinned live-server ISO with two changes. /autoinstall.yaml is where subiquity looks on its
-# medium, and `autoinstall` on the kernel command line is what makes it erase a disk without asking.
+# medium, and `autoinstall` on the kernel command line is what makes it erase a disk without asking. `fsck.mode=skip`
+# stops casper reading the whole medium to check it, which at the media's pace would take longer than the install.
+# What follows `---` there is the installer's and, by curtin's rule, the installed system's too: the consoles.
 
 - name: Make the client's cache
   ansible.builtin.file:
@@ -53,11 +55,11 @@
     path: "{{ wk_install_build }}/grub.cfg"
     mode: "0644"
 
-- name: Put autoinstall on every kernel command line
+- name: Put autoinstall and the consoles on every kernel command line
   ansible.builtin.replace:
     path: "{{ wk_install_build }}/grub.cfg"
-    regexp: '^(\s*linux\s+\S+)\s+---'
-    replace: '\1 autoinstall ---'
+    regexp: '^(\s*linux\s+\S+)\s+---.*$'
+    replace: '\1 autoinstall fsck.mode=skip --- {{ wk_install_consoles }}'
   register: wk_grub
 
 - name: Assert the boot menu had a kernel command line
@@ -74,7 +76,7 @@
       - -indev
       - "{{ wk_install_stock }}"
       - -outdev
-      - "{{ wk_install_build }}/{{ wk_install_unit }}.iso"
+      - "{{ wk_install_iso }}"
       - -boot_image
       - any
       - replay
@@ -84,4 +86,4 @@
       - -map
       - "{{ wk_install_build }}/grub.cfg"
       - /boot/grub/grub.cfg
-    creates: "{{ wk_install_build }}/{{ wk_install_unit }}.iso"
+    creates: "{{ wk_install_iso }}"

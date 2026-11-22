@@ -49,9 +49,10 @@ Debian x86_64, 128 cores, an unprivileged user behind an ssh gateway). There is 
 | The playbook: `credentials`, `borrowed-claude` | yes | its syntax | yes: moose with the store's secrets (deploy keys, `env.sh`, `ssh_config`), buildbox4; no for pi's `models.json` |
 | The playbook on a Mac (launchd) | yes | its syntax | no |
 | `wk doctor`, `wk doctor <ws>`, `wk gc` | yes | yes | yes |
-| `wk machine install`: the refusals, the question, the `ansible-playbook` line, `--rehearse` | yes | yes | no |
-| The rules for `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `bmc/<machine>/user` and `password` | yes | yes, HTTP scripted | no |
-| The install playbook (`ansible/install.yml`, `ansible/install/`) | yes | no: its YAML is parsed and its autoinstall template rendered by a real Ansible | no |
+| `wk machine install`: the refusals, the question, the `ansible-playbook` line, `--rehearse`, `--dry-run` | yes | yes | yes: `--dry-run` and `--rehearse` on moose |
+| The rules for `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `sudo-password`, `bmc/<machine>/user` and `password` | yes | yes, HTTP scripted | no |
+| The install playbook: the store and the BMC asked, the image made, attached through the BMC, seen from the server, detached | yes | its YAML is parsed and its autoinstall template rendered by a real Ansible | yes: moose |
+| The install playbook: what is tagged `wipe` (the boot override, the restart, the installer, the tailnet node, the first ssh) | yes | its YAML is parsed | no |
 
 ## Verified live
 
@@ -77,6 +78,16 @@ Typed on tolken. Ansible is the Homebrew `ansible` package (core 2.22.0); `bao` 
 - `wk doctor`: every row ok but node and pi on both servers, pi's `models.json` on moose.
 - After these fixes `wk machine setup` of moose, buildbox4 and alce each report `changed=0` on a second run.
 
+- `wk machine install moose --dry-run`: the store holds every name asked for, the BMC (OpenBMC, firmware 1.06.00) takes the stored login and lists `Usb` among its one-time boot targets. `ok=12 changed=0`.
+- `wk machine install moose --rehearse --yes`, twice, 27 s each with Ubuntu's image already fetched: the image is made, `qemu-nbd` and `websocat` started, and moose, running, reports a USB disk `sda` (`Linux File-Stor Gadget`) of the image's exact size, 3825532928 bytes, labelled `Ubuntu-Server 24.04.5 LTS arm64`; then both processes are stopped, the disk leaves moose and `~/.cache/wk/wk-install-moose` is gone. `ok=35 changed=11 failed=0`.
+- The image a rehearsal made, kept by a hard link and read back with `xorriso`: `/autoinstall.yaml` is YAML with the keys the template writes (user `jmichaud` with `NOPASSWD` sudo and one ed25519 key, `wlo1`, `shutdown: reboot`), both kernel lines of `/boot/grub/grub.cfg` read `autoinstall fsck.mode=skip --- console=ttyAMA0,115200 console=tty0`, and the El Torito UEFI record is at the block and of the size it has in Ubuntu's image.
+- That image attached by the playbook's two command lines and read on moose: `blkid` says `iso9660` with Ubuntu's label on `sda` and `sda1` and `vfat` `ESP` on `sda2`; the first 64 MiB read with `dd iflag=direct` has the sha256 of the same bytes on the client, at 635 kB/s. Three readers at once took 304 MiB of Ubuntu's image from three offsets with matching sha256 and the bridge up, 590 kB/s between them.
+- The pace is measured. Unthrottled, the attach died four times in four: the BMC and moose both probe the new disk's partitions, replies arrive together, the BMC's NBD client logs `Connection timed out` 30 s later and the websocket closes with `Error in connecting to VM port`, while `qemu-nbd`'s trace shows every reply sent. Images that are probed with one read at a time (32 MiB of noise, 24 MiB with zeros) survived unthrottled at 1.9 MB/s. Throttled by bytes: 1 MiB/s died once in two, 768 KiB/s survived two of two, 640 KiB/s seven of seven.
+- `efibootmgr -v` on moose with the image attached lists no entry for it: this firmware adds none while the system runs. The disk is a USB mass-storage disk (`sd`, not `sr`), which is why the boot device is `Usb`.
+- The BMC's serial console: `ssh -p 2200` with the stored login opens a session (the BMC runs `obmc-console-client` for it) and shows nothing while nobody types. On moose `/sys/class/tty/console/active` is `ttyAMA0 tty0` and a getty runs on `ttyAMA0`, the firmware's SPCR console.
+- Ansible's `become` on moose: with the password it runs `shutdown --show` as root; with an empty one it is refused `Missing sudo password`, which is how an install fails, before any restart, while the store holds no `sudo-password`.
+- moose's tailnet node is named `moose` and tagged; the installed system joins with the stored auth key alone and takes the tags that key carries.
+
 What the live runs corrected: the unit directory is made before a unit is written; `--daemonize` does not survive the provisioning session on buildbox4, where a user unit does; the SDK image had no `latest` tag; WebKit's scripts take `WEBKIT_OUTPUTDIR` whole as the product directory, so each preset now builds in its own; a leaf certificate without an authority key identifier is refused by Python 3.15 with OpenSSL 4; `wk enter <ws> -- <command>` without a terminal sourced no `env.sh`, and the plain driver never did; `wk ai` demanded a terminal even for `-p`; Claude Code stops at a dialog for bypass-permissions mode until `skipDangerousModePermissionPrompt` is in its settings; the injector's refusal hid the token endpoint's reason, and it called a login it could not refresh held.
 
 ## Needs a person
@@ -100,16 +111,15 @@ What the live runs corrected: the unit directory is made before a unit is writte
 - TODO: a memory ceiling in a child cgroup, on a machine that lets one be made.
 - TODO: `wk` typed inside the container, and the pueue client reaching the daemon's socket from there.
 - TODO: `wk gc` with something to reclaim, and `wk new` over a half-made workspace, on a real server.
-- TODO: `wk machine install`: nothing of it has run against a BMC, a media host or a server. Each line below is unverified.
-- TODO: install: `xorriso -boot_image any replay` on Ubuntu's arm64 live-server image: that the result still boots under UEFI, and that its `/boot/grub/grub.cfg` has the `linux /casper/vmlinuz ---` line the playbook edits.
-- TODO: install: subiquity reading `/cdrom/autoinstall.yaml` with `autoinstall` on the kernel command line: no question asked, on a BMC's virtual CD.
-- TODO: install: the BMC's Redfish as `community.general.redfish_command` drives it: `VirtualMediaInsert` under the Manager, the `TransferProtocolType` it lists (AMI firmware commonly lists NFS, CIFS and HTTPS and not HTTP), whether remote media must first be enabled, `SetOneTimeBoot` to `Cd` in UEFI mode, `PowerForceRestart`, `PowerOn`, `DisableBootOverride`.
-- TODO: install: the BMC fetching a 3.8 GB image from `python3 -m http.server`, which answers no Range request.
-- TODO: install: the media host: `systemd-run` of the server as root, `nft --json --handle list chain` and a rule found again by its comment, and `ansible.builtin.copy` of the image over the tailnet.
-- TODO: install: WiFi in the installer and on the first boot: `wpasupplicant` from the image's own pool, the conf's interface name under Ubuntu's kernel, and cloud-init waiting for a WiFi network before it installs packages.
+- TODO: install: everything tagged `wipe`. Each line below is unverified.
+- TODO: install: `SetOneTimeBoot` to `Usb` in UEFI mode as this OpenBMC takes it from `community.general.redfish_command`, the firmware booting the USB disk's ESP for it once and the disk after, and `DisableBootOverride`. The BMC reports the running server as `Off`.
+- TODO: install: `shutdown --reboot +1` itself, with `sudo-password` in the store (it holds none yet); `PowerForceRestart` for a server that does not answer.
+- TODO: install: the image under UEFI after `xorriso -boot_image any replay`, and the boot menu on the serial console.
+- TODO: install: subiquity reading `/autoinstall.yaml` from a USB disk with `autoinstall` on the kernel command line: no question asked, and its restart at the end asking for no key.
+- TODO: install: the bridge for the length of an install: the firmware's and the installer's reads at the measured pace, and the client awake throughout.
+- TODO: install: WiFi: the installer's own system has no `wpasupplicant`, so it installs from the medium (`apt: fallback: offline-install`) and puts `wpasupplicant` on the disk from the image's pool; the conf's interface name under Ubuntu's kernel; cloud-init waiting for the WiFi network on the first boot before it installs packages.
 - TODO: install: Ubuntu's generic kernel on the server's hardware (the machine now runs a vendor kernel).
-- TODO: install: the installer powering the machine off, the BMC reporting `PowerState` `Off`, and the machine booting its disk at the next `PowerOn` with the image ejected.
-- TODO: install: cloud-init's `apt.sources` with `signed-by=$KEY_FILE` for Tailscale's repository, and `tailscale up --auth-key=file:` with `--advertise-tags` under the stored key.
-- TODO: install: the tailnet API with `tailnet-api-key`: listing devices, deleting the old node, and the new node taking the bare name.
+- TODO: install: cloud-init's `apt.sources` with `signed-by=$KEY_FILE` for Tailscale's repository, and `tailscale up --auth-key=file:` under the stored key.
+- TODO: install: the tailnet API with `tailnet-api-key`: the new node listed as `<name>-1` with a `created` after the install began, `DELETE /device/<id>` of the old node, `POST /device/<id>/name`.
 - TODO: install: `StrictHostKeyChecking=accept-new` through Ansible's ssh for the new host key, and Tailscale SSH admitting the conf's user under the tailnet's policy.
 - TODO: install: `wk machine setup` on a freshly installed server.

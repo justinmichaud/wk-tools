@@ -17,8 +17,8 @@ from wk.core import conf
 from wk.core.machine import Result
 from wk.core.vars import VARS
 
-BMC = "bmc=10.0.0.2\narch=arm64\nos=24.04\nmedia_host=bridge\nmedia_user=root\nmedia_address=10.0.0.1"
-CONFS = {"desk": "kind=client", "lin": "kind=linux\nuser=jm\nwifi=wlp1s0\nmedia_chain=inet/oob/input\n" + BMC, "bare": "kind=linux",
+BMC = "bmc=10.0.0.2\narch=arm64\nos=24.04"
+CONFS = {"desk": "kind=client", "lin": "kind=linux\nuser=jm\nwifi=wlp1s0\nconsole=ttyAMA0,115200\n" + BMC, "bare": "kind=linux",
          "mac": "kind=mac\n" + BMC, "box": "kind=borrowed\n" + BMC, "vault": "kind=credential\n" + BMC}
 PLAYBOOK = ["ansible-playbook", "-i", ROOT + "/ansible/inventory.py", "--limit", "lin"]
 INSTALL = [ROOT + "/ansible/install.yml"]
@@ -71,8 +71,16 @@ class TestMachineInstall(unittest.TestCase):
     def test_a_rehearsal_skips_what_is_tagged_wipe_and_asks_a_question_of_its_own(self):
         r = self.w.wk("machine", "install", "lin", "--rehearse", stdin="y\n", tty=True)
         self.assertEqual((r.code, played(r)), (0, [PLAYBOOK + ["--skip-tags", "wipe"] + INSTALL]))
-        self.assertIn("insert the install image into lin's BMC at 10.0.0.2, in place of an image an earlier run left? nothing boots [y/N]", r.err)
+        self.assertIn("attach the install image to lin through its BMC at 10.0.0.2, in place of one an earlier run left? nothing boots [y/N]", r.err)
         self.assertNotIn(NEXT, r.err)
+
+    def test_a_rehearsal_erases_nothing_so_it_asks_no_server_what_it_holds_and_meets_no_barrier(self):
+        self.w.workspace("x")
+        held = self.w.wk("machine", "install", "lin", "--rehearse", "--yes")
+        self.assertEqual((held.code, played(held)), (0, [PLAYBOOK + ["--skip-tags", "wipe"] + INSTALL]))
+        self.assertEqual([line for line in held.calls if not line.startswith("[desk]")], [])
+        vault = self.w.wk("machine", "install", "vault", "--rehearse", "--yes")
+        self.assertEqual((vault.code, len(played(vault))), (0, 1))
 
     def test_a_server_that_holds_a_workspace_is_a_barrier_that_force_crosses(self):
         self.w.workspace("x")
@@ -121,9 +129,8 @@ class TestMachineInstall(unittest.TestCase):
     def test_the_confs_install_keys_are_the_hosts_variables(self):
         hostvars = json.loads(self.w.wk("machine", "inventory").out)["_meta"]["hostvars"]
         self.assertEqual(hostvars["lin"], {
-            "wk_kind": "linux", "wk_user": "jm", "ansible_user": "jm", "wk_wifi": "wlp1s0", "wk_media_chain": "inet/oob/input",
-            "wk_bmc": "10.0.0.2", "wk_arch": "arm64", "wk_os": "24.04", "wk_media_host": "bridge", "wk_media_user": "root",
-            "wk_media_address": "10.0.0.1"})
+            "wk_kind": "linux", "wk_user": "jm", "ansible_user": "jm", "wk_wifi": "wlp1s0", "wk_console": "ttyAMA0,115200",
+            "wk_bmc": "10.0.0.2", "wk_arch": "arm64", "wk_os": "24.04"})
 
 
 def tasks():
@@ -145,26 +152,54 @@ class TestThePlaybook(unittest.TestCase):
                 self.assertRegex(pins[arch]["sha256"], "^[0-9a-f]{64}$")
 
     def test_what_boots_erases_or_retires_is_tagged_wipe_and_what_a_rehearsal_runs_is_not(self):
-        boot = tasks()["boot.yml"]
-        at = boot.index("- name: Erase the disk and install\n  tags: [wipe]\n")
-        for word in ("SetOneTimeBoot", "PowerForceRestart", "PowerOn", "method: DELETE", "known_hosts", "wait_for_connection"):
-            self.assertNotIn(word, boot[:at], word)
-            self.assertIn(word, boot[at:], word)
-        self.assertIn("VirtualMediaInsert", boot[:at])
-        self.assertRegex(tasks()["install.yml"], r"command: DisableBootOverride\n +delegate_to: localhost\n +tags: \[wipe\]\n")
+        text = tasks()
+        self.assertIn("          ansible.builtin.import_tasks: install/boot.yml\n          tags: [wipe]\n", text["install.yml"])
+        self.assertRegex(text["install.yml"], r"command: DisableBootOverride\n +tags: \[wipe\]\n")
+        for word in ("SetOneTimeBoot", "shutdown", "wk_install_reset", "method: DELETE", "method: POST", "known_hosts"):
+            self.assertIn(word, text["boot.yml"], word)
+            for name in set(text) - {"boot.yml", "autoinstall.yaml.j2"}:
+                self.assertNotIn(word, text[name], "%s: %s" % (name, word))
+        self.assertEqual(re.findall(r"redfish_command", text["media.yml"] + text["image.yml"] + text["preflight.yml"] + text["detach.yml"]), [])
 
-    def test_the_image_is_ejected_and_every_copy_removed_however_the_run_ends(self):
+    def test_the_old_tailnet_node_is_retired_only_once_the_new_one_has_joined(self):
+        boot = tasks()["boot.yml"]
+        joined, retired, named = (boot.index("- name: " + name) for name in (
+            "Wait for the installed system to join the tailnet", "Retire the old system's tailnet node", "Give the new node the server's name"))
+        self.assertLess(joined, retired)
+        self.assertLess(retired, named)
+        self.assertIn("selectattr('created', 'ge', wk_install_began)", boot[joined:retired])
+        self.assertIn("selectattr('created', 'lt', wk_install_began)", boot[retired:named])
+
+    def test_the_image_is_detached_and_removed_however_the_run_ends(self):
         play = tasks()["install.yml"]
         cleanup = play[play.index("      always:\n"):]
-        self.assertEqual(re.findall(r"import_tasks: install/(\S+)", cleanup), ["eject.yml", "unserve.yml"])
-        unserve = tasks()["unserve.yml"]
-        self.assertEqual(re.findall(r'path: "{{ (\w+) }}"\n +state: absent', unserve), ["wk_install_build", "wk_install_staged"])
-        self.assertIn("import_tasks: close.yml", unserve)
+        self.assertEqual(re.findall(r"import_tasks: install/(\S+)", cleanup), ["detach.yml"])
+        self.assertEqual(re.findall(r'path: "{{ (\w+) }}"\n +state: absent', cleanup), ["wk_install_build"])
+        self.assertIn('argv: [pkill, -f, "{{ wk_install_socket }}"]', tasks()["detach.yml"])
+        for made in ("wk_install_iso", "wk_install_socket"):
+            self.assertRegex(play, r'%s: "{{ wk_install_build }}/' % made)
+        self.assertIn('dest: "{{ wk_install_build }}/', tasks()["media.yml"])
+
+    def test_the_bmcs_password_reaches_the_bridge_in_a_file_and_no_command_line(self):
+        media = tasks()["media.yml"]
+        self.assertIn("--basic-auth-file", media)
+        for line in media.splitlines():
+            if "argv" in line:
+                self.assertNotIn("secret", line)
+
+    def test_the_boot_menus_kernel_lines_gain_autoinstall_and_the_consoles(self):
+        image = tasks()["image.yml"]
+        regexp, replace = re.search(r"regexp: '(.*)'\n +replace: '(.*)'", image).groups()
+        replace = replace.replace("{{ wk_install_consoles }}", "console=ttyAMA0,115200 console=tty0")
+        for line in ("\tlinux\t/casper/vmlinuz  --- console=tty0", "\tlinux\t/casper/vmlinuz  ---", "\tlinux\t/casper/hwe-vmlinuz  --- quiet"):
+            self.assertEqual(re.sub(regexp, replace, line, flags=re.M),
+                             "\tlinux\t%s autoinstall fsck.mode=skip --- console=ttyAMA0,115200 console=tty0" % line.split()[1])
+        self.assertEqual(re.sub(regexp, replace, "\tinitrd\t/casper/initrd", flags=re.M), "\tinitrd\t/casper/initrd")
 
     def test_a_task_that_carries_a_secret_logs_nothing(self):
         for name, text in tasks().items():
             for task in re.split(r"\n(?= *- name: )", text):
-                if re.search(r"lookup\('ansible.builtin.pipe'|Authorization|autoinstall\.yaml\.j2", task):
+                if re.search(r"lookup\('ansible.builtin.pipe'|Authorization|autoinstall\.yaml\.j2|content: .*password", task):
                     self.assertIn("no_log: true", task, "%s: %s" % (name, task.strip().splitlines()[0]))
 
     def test_no_secret_is_written_in_the_playbook(self):
@@ -213,9 +248,9 @@ class TestLive(unittest.TestCase):
             json.dump({"all": {"hosts": {"lin": {}}}}, f)
         self.run_ansible([shutil.which("ansible-playbook", path=REAL_PATH), "-i", self.tmp + "/inventory.json", "--syntax-check"] + INSTALL)
 
-    def test_live_the_autoinstall_file_installs_unasked_onto_the_whole_largest_disk_and_powers_off(self):
+    def test_live_the_autoinstall_file_installs_unasked_onto_the_whole_largest_disk_and_restarts(self):
         auto = self.render()
-        self.assertEqual((auto["version"], auto["interactive-sections"], auto["shutdown"]), (1, [], "poweroff"))
+        self.assertEqual((auto["version"], auto["interactive-sections"], auto["shutdown"]), (1, [], "reboot"))
         self.assertEqual(auto["storage"], {"layout": {"name": "lvm", "sizing-policy": "all", "match": {"size": "largest"}}})
         self.assertEqual(auto["ssh"], {"install-server": True, "allow-pw": False})
         self.assertEqual((auto["locale"], auto["keyboard"], auto["timezone"], auto["apt"]),
@@ -244,5 +279,5 @@ class TestLive(unittest.TestCase):
         self.assertEqual(first["runcmd"], [
             ["loginctl", "enable-linger", "jm"],
             ["sh", "-c", "grep -q '^jm:' /etc/subuid /etc/subgid || usermod --add-subuids 100000-165535 --add-subgids 100000-165535 jm"],
-            ["tailscale", "up", "--auth-key=file:/etc/wk-tailnet-auth-key", "--ssh", "--hostname=lin", "--advertise-tags=tag:wk"],
+            ["tailscale", "up", "--auth-key=file:/etc/wk-tailnet-auth-key", "--ssh", "--hostname=lin"],
             ["rm", "-f", "/etc/wk-tailnet-auth-key"]])

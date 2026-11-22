@@ -1,0 +1,11 @@
+---
+# Both processes carry the image's socket in their command lines, so a run killed anywhere leaves nothing a later one
+# does not find. The BMC removes its USB disk when the websocket closes.
+
+- name: Stop the bridge and the image's server
+  ansible.builtin.command:
+    argv: [pkill, -f, "{{ wk_install_socket }}"]
+  register: wk_detached
+  changed_when: wk_detached.rc == 0
+  # 1: no such process.
+  failed_when: wk_detached.rc not in [0, 1]

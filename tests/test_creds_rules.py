@@ -35,7 +35,7 @@ class Rules(unittest.TestCase):
 class TestFind(Rules):
     def test_every_rule_says_what_it_is_for(self):
         self.assertEqual([r.name for r in rules.RULES], ["github-user", "github-token", "bugzilla-user", "bugzilla-password", "litellm-key",
-                                                         "claude-login", "tailnet-auth-key", "tailnet-api-key", "wifi-ssid", "wifi-psk"])
+                                                         "claude-login", "tailnet-auth-key", "tailnet-api-key", "wifi-ssid", "wifi-psk", "sudo-password"])
         self.assertTrue(all(r.what for r in rules.RULES))
 
     def test_a_deploy_key_is_named_for_its_repository(self):
@@ -163,7 +163,8 @@ class TestInstall(Rules):
         self.checks("wifi-ssid", ["Some Network"], ["", "two\nlines"])
         self.checks("wifi-psk", ["8 chars!", "f" * 64], ["short", "f" * 65, "eight or\nmore"])
         self.checks("bmc/lin/user", ["admin"], ["", "a\nb"])
-        for name in ("wifi-ssid", "wifi-psk", "bmc/lin/user", "bmc/lin/password"):
+        self.checks("sudo-password", ["1"], ["", "a\nb"])
+        for name in ("wifi-ssid", "wifi-psk", "sudo-password", "bmc/lin/user", "bmc/lin/password"):
             self.assertEqual(self.probe(name, "any value", {}),
                              (UNKNOWN, "it is first used by `wk machine install`, whose --dry-run asks the store and the BMC"))
         self.assertEqual(self.http.asked, [])

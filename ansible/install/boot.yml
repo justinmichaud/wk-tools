@@ -1,135 +1,96 @@
 ---
-# The BMC's part. The image is inserted and read back; then, under the tag `wipe`, the installer is booted from it once.
-# It powers the machine off when it has finished, which is how this play knows: the image is ejected while the machine
-# is off, so no boot order can start the installer a second time.
+# Everything here is tagged `wipe` by the play. The installer is booted once from the USB disk, erases the server's
+# disk, and restarts into the installed system by itself; nothing asks the BMC whether the machine is on. The old
+# system's tailnet node is kept until the new one exists, so a server whose installer never started stays reachable.
 
-- name: Run on the client
-  delegate_to: localhost
+- name: Boot the installer and wait for the installed system
   block:
-    - name: Eject what an earlier run left inserted
-      ansible.builtin.import_tasks: eject.yml
+    - name: Note when the install began
+      ansible.builtin.set_fact:
+        wk_install_began: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
 
-    - name: Insert the image
+    - name: Boot from the USB disk once
       community.general.redfish_command:
-        category: "{{ wk_install_media_category }}"
-        command: VirtualMediaInsert
-        virtual_media:
-          image_url: "{{ wk_install_url }}"
-          media_types: [CD, DVD]
-          transfer_protocol_type: "{{ wk_install_media_scheme | upper }}"
-
-    - name: Wait for the BMC to hold the image
-      community.general.redfish_info:
-        category: "{{ wk_install_media_category }}"
-        command: GetVirtualMedia
-      register: wk_media
-      until: wk_install_media | selectattr('Image', 'defined') | selectattr('Image', 'equalto', wk_install_url) | list | length == 1
-      retries: 12
-      delay: 10
-
-    - name: Say what the BMC holds
-      ansible.builtin.debug:
-        msg: "{{ wk_install_media | selectattr('Image', 'defined') | selectattr('Image', 'equalto', wk_install_url) | first }}"
-
-- name: Erase the disk and install
-  tags: [wipe]
-  block:
-    - name: Boot the installer and wait for it to finish
+        category: Systems
+        command: SetOneTimeBoot
+        bootdevice: "{{ wk_install_boot_device }}"
+        boot_override_mode: UEFI
       delegate_to: localhost
-      block:
-        - name: Boot from the image once
-          community.general.redfish_command:
-            category: Systems
-            command: SetOneTimeBoot
-            bootdevice: "{{ wk_install_boot_device }}"
-            boot_override_mode: UEFI
 
-        - name: Ask the BMC whether the machine is on
-          community.general.redfish_info:
-            category: Systems
-            command: GetSystemInventory
-          register: wk_power
+    - name: Restart the server from its own system
+      ansible.builtin.command:
+        argv: [shutdown, --reboot, "+1"]
+      become: true
+      vars:
+        ansible_become_password: "{{ wk_install_secret.sudo_password }}"
+      when: wk_install_up
 
-        - name: Start the machine, or restart it
-          community.general.redfish_command:
-            category: Systems
-            command: "{{ 'PowerForceRestart' if wk_install_power == 'On' else 'PowerOn' }}"
-
-        # A restart shows as a moment of Off, which is not the installer's.
-        - name: Let the restart pass
-          ansible.builtin.wait_for:
-            timeout: 180
-
-        - name: Wait for the installer to power the machine off
-          community.general.redfish_info:
-            category: Systems
-            command: GetSystemInventory
-          register: wk_power
-          until: wk_install_power == 'Off'
-          retries: "{{ wk_install_minutes * 2 }}"
-          delay: 30
-
-      rescue:
-        - name: Say that the installer did not finish
-          ansible.builtin.fail:
-            msg: >-
-              {{ inventory_hostname }} was not installed: {{ ansible_failed_result.msg | default('the task ' ~ ansible_failed_task.name ~ ' failed') }}.
-              A machine that is still on after {{ wk_install_minutes }} minutes never booted the image (its old system is
-              untouched) or its installer stopped: the BMC's console at https://{{ wk_bmc }} shows which, and
-              /var/log/installer there says why. The image is ejected and the boot override cleared now; fix the cause
-              and type this again
-
-    - name: Take the image out before the first boot
-      ansible.builtin.import_tasks: eject.yml
-
-    - name: Retire the old system's tailnet node, so that the new one takes its name
+    - name: Restart the server through its BMC
+      community.general.redfish_command:
+        category: Systems
+        command: "{{ wk_install_reset }}"
       delegate_to: localhost
-      block:
-        - name: Ask the tailnet for its devices
-          ansible.builtin.uri:
-            url: "{{ wk_tailnet_api }}/tailnet/-/devices"
-            headers:
-              Authorization: "Bearer {{ wk_install_secret.api_key }}"
-          register: wk_devices
-          no_log: true
+      when: not wk_install_up
 
-        - name: Delete each node of this name
-          ansible.builtin.uri:
-            url: "{{ wk_tailnet_api }}/device/{{ item }}"
-            method: DELETE
-            headers:
-              Authorization: "Bearer {{ wk_install_secret.api_key }}"
-          loop: >-
-            {{ wk_devices.json.devices | selectattr('name', 'match', '^' ~ (inventory_hostname | regex_escape) ~ '\.')
-               | map(attribute='id') }}
-          no_log: true
+    # The installed system joins under the server's name; while the old node holds it, Tailscale calls the new one <name>-<n>.
+    - name: Wait for the installed system to join the tailnet
+      ansible.builtin.uri:
+        url: "{{ wk_tailnet_api }}/tailnet/-/devices"
+        headers:
+          Authorization: "Bearer {{ wk_install_secret.api_key }}"
+      delegate_to: localhost
+      register: wk_devices
+      until: wk_devices.json.devices | selectattr('name', 'match', wk_install_node) | selectattr('created', 'ge', wk_install_began) | list | length == 1
+      retries: "{{ wk_install_minutes * 2 }}"
+      delay: 30
+      no_log: true
 
-        # The new system has new host keys.
-        - name: Forget the old system's host key
-          ansible.builtin.known_hosts:
-            name: "{{ inventory_hostname }}"
-            state: absent
+    - name: Retire the old system's tailnet node
+      ansible.builtin.uri:
+        url: "{{ wk_tailnet_api }}/device/{{ item }}"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ wk_install_secret.api_key }}"
+      delegate_to: localhost
+      loop: "{{ wk_devices.json.devices | selectattr('name', 'match', wk_install_node) | selectattr('created', 'lt', wk_install_began) | map(attribute='nodeId') }}"
+      no_log: true
 
-        - name: Start the installed system
-          community.general.redfish_command:
-            category: Systems
-            command: PowerOn
+    - name: Give the new node the server's name
+      ansible.builtin.uri:
+        url: "{{ wk_tailnet_api }}/device/{{ item }}/name"
+        method: POST
+        body_format: json
+        body:
+          name: "{{ inventory_hostname }}"
+        headers:
+          Authorization: "Bearer {{ wk_install_secret.api_key }}"
+      delegate_to: localhost
+      loop: "{{ wk_devices.json.devices | selectattr('name', 'match', wk_install_node) | selectattr('created', 'ge', wk_install_began) | map(attribute='nodeId') }}"
+      no_log: true
 
-    # Its first boot installs the packages and joins the tailnet last, so an answer means all of it happened.
-    - name: Wait for the installed system
-      block:
-        - name: Wait for the server to answer ssh by its tailnet name
-          ansible.builtin.wait_for_connection:
-            timeout: "{{ wk_install_boot_minutes * 60 }}"
-            sleep: 15
-          vars:
-            ansible_ssh_extra_args: -o StrictHostKeyChecking=accept-new
+    # The new system has new host keys.
+    - name: Forget the old system's host key
+      ansible.builtin.known_hosts:
+        name: "{{ inventory_hostname }}"
+        state: absent
+      delegate_to: localhost
 
-      rescue:
-        - name: Say that the installed system did not answer
-          ansible.builtin.fail:
-            msg: >-
-              {{ inventory_hostname }} is installed and did not answer ssh as {{ wk_install_user }} within {{ wk_install_boot_minutes }}
-              minutes of its first boot. Its old tailnet node is retired. The BMC's console at https://{{ wk_bmc }} shows how far
-              the boot came, and /var/log/cloud-init-output.log there says whether the network came up, the packages installed
-              and `tailscale up` took tailnet-auth-key (a key is spent by its first use unless it is reusable)
+    - name: Wait for the server to answer ssh by its tailnet name
+      ansible.builtin.wait_for_connection:
+        timeout: "{{ wk_install_boot_minutes * 60 }}"
+        sleep: 15
+      vars:
+        ansible_ssh_extra_args: -o StrictHostKeyChecking=accept-new
+
+  rescue:
+    - name: Say that the install did not finish
+      ansible.builtin.fail:
+        msg: >-
+          {{ inventory_hostname }} was not installed: the task "{{ ansible_failed_task.name }}" failed
+          ({{ ansible_failed_result.msg | default('it logs nothing') }}). The image is detached and the boot override
+          cleared now. The server's serial console shows where it stands: `{{ wk_install_console }}`, with the store's
+          bmc/{{ inventory_hostname }}/password. A server that still answers as before never booted the image, and its
+          old system is untouched. An installer that stopped has /var/log/installer; an installed system that did not
+          join has /var/log/cloud-init-output.log, where `tailscale up` says what it made of tailnet-auth-key
+  vars:
+    wk_install_node: "^{{ inventory_hostname | regex_escape }}(-[0-9]+)?[.]"

@@ -55,13 +55,10 @@
                           "ca-certificates", "dbus-user-session", "tailscale"],
   "wk_install_minutes": 90,
   "wk_install_boot_minutes": 30,
-  "wk_install_boot_device": "Cd",
-  "wk_install_media_category": "Manager",
-  "wk_install_media_scheme": "http",
-  "wk_install_media_port": 8089,
-  "wk_install_media_serve": ["python3", "-m", "http.server", "--bind", "{{ wk_media_address }}", "--directory", "{{ wk_install_staged }}",
-                             "{{ wk_install_media_port | string }}"],
+  "wk_install_media_bps": 655360,
+  "wk_install_boot_device": "Usb",
+  "wk_install_reset": "PowerForceRestart",
+  "wk_install_console_port": 2200,
   "wk_tailnet_api": "https://api.tailscale.com/api/v2",
-  "wk_tailnet_tag": "tag:wk",
   "wk_tailscale_apt": "https://pkgs.tailscale.com/stable/ubuntu"
 }
