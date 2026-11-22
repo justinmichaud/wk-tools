@@ -1,9 +1,4 @@
-"""The provisioning lane's own stage and rows: wk itself on a server, and the stale downloads in its cache.
-
-A lane that keeps a pinned download in <wk_home>/cache names it from its own hooks module, and `wk gc` reclaims every
-entry no lane names:
-
-    def pins(inv, conf): ...        # -> [the names in <wk_home>/cache this lane's current pins use]"""
+"""The provisioning lane's own stage and rows: wk itself on a server, and the downloads in its cache no lane pins."""
 
 from wk.core import hooks
 from wk.core.act import die
@@ -26,6 +21,7 @@ def stale(m, path):
 
 
 def gc(inv, conf):
-    m, cache = inv.machine(conf.name), tools.wk_home(inv, conf) + "/cache"
+    m = inv.machine(conf.name)
+    cache = inv.wk_home_on(m) + "/cache"
     pinned = hooks.collect("pins", inv, conf)
     return [stale(m, cache + "/" + name) for name in m.listdir(cache) if name not in pinned]

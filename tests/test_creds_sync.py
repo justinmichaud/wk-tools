@@ -3,12 +3,10 @@ import unittest
 
 from tests.credsworld import CA_PEM, MODELS, TOKEN, URL, Http, private_key, world
 from tests.killpoints import converges, dry_run_is_the_plan
-from wk import creds
-from wk.core import hooks
 from wk.core.fleet import Fleet
 from wk.core.inv import Inv
 from wk.core.machine import Result
-from wk.creds import deliver, injector, net
+from wk.creds import deliver, hooks, injector, net
 
 S = "/home/u/wk/secrets"
 ANSWERS = {MODELS: (200, {"data": [{"id": "big"}, {"id": "small"}]})}
@@ -17,7 +15,7 @@ PATHS = [S + "/deploy/Me--WebKit", S + "/ssh_config", S + "/env.sh", "/home/u/wk
 
 
 def full():
-    return world(github_user="me", github_token=TOKEN, bugzilla_user="me@example.test", bugzilla_key="it's",
+    return world(github_user="me", github_token=TOKEN, bugzilla_user="me@example.test", bugzilla_password="it's",
                  litellm_key="sk-1", claude_login="never delivered", tailnet_auth_key="tskey-auth-never", **{"deploy-key/Me/WebKit": private_key()})
 
 
@@ -56,8 +54,6 @@ class TestKeySync(Synced):
                           "export BUGS_WEBKIT_ORG_USERNAME=me@example.test", "export BUGS_WEBKIT_ORG_PASSWORD='it'\"'\"'s'",
                           "export GIT_CONFIG_KEY_0=url.git@github-me-webkit:Me/WebKit.git.pushInsteadOf",
                           "export GIT_CONFIG_VALUE_0=https://github.com/Me/WebKit.git", "export GIT_CONFIG_COUNT=1"])
-        self.assertEqual(creds.ENV_NAMES, ("GITHUB_COM_USERNAME", "GITHUB_COM_TOKEN", "GH_TOKEN", "BUGS_WEBKIT_ORG_USERNAME",
-                                           "BUGS_WEBKIT_ORG_PASSWORD", "GIT_CONFIG_COUNT"))
 
     def test_each_repository_has_an_ssh_alias_offering_its_key_alone(self):
         w = full()
@@ -146,6 +142,9 @@ class TestKeySync(Synced):
             r = self.sync(w, "lin")
             self.assertEqual((r.code, r.effects), (4, []))
             self.assertIn("error: lin could not say what it holds (python3 -I failed there), so nothing is delivered to it", r.err)
+        with Http(ANSWERS).patch():
+            r = w.wk("key", "sync", "lin", "--force")
+        self.assertEqual((r.code, len(r.effects)), (0, 1 + len(PATHS) + 1))
 
     def test_what_the_store_lacks_is_not_delivered_and_is_said(self):
         w = world()
@@ -223,7 +222,7 @@ class TestDoctor(Synced):
 
     def doctor(self, w):
         inv = Inv("/", {}, Fleet(lambda: w.confs, "desk", w.machines.get, w.machines["desk"], workers=1), w.clock, None, {}, w.seams)
-        return hooks.collect("doctor", inv, w.confs["lin"], None)
+        return hooks.doctor(inv, w.confs["lin"], None)
 
     def test_an_absent_item_or_a_wrong_mode_is_missing_with_the_remedy(self):
         w = full()
@@ -234,15 +233,12 @@ class TestDoctor(Synced):
         self.assertEqual((rows[S + "/env.sh"], rows[S], rows[S + "/ssh_config"]),
                          (("missing", "absent", "wk key sync lin"), ("missing", "mode 755, not 700", "wk key sync lin"), ("ok", "", "")))
 
-    def test_a_server_that_does_not_answer_or_cannot_say_is_unknown_never_ok(self):
+    def test_a_server_that_cannot_say_what_it_holds_is_unknown_never_ok(self):
         w = full()
-        w.machines["lin"].down = True
-        down = self.doctor(w)
-        w.machines["lin"].down = False
         w.machines["lin"].on(("python3", "-I", "-c"), Result(1))
-        self.assertEqual([(r.name, r.status, r.remedy) for r in down + self.doctor(w)], [("credentials", "unknown", "wk key sync lin")] * 2)
+        self.assertEqual([(r.name, r.status, r.remedy) for r in self.doctor(w)], [("credentials", "unknown", "wk key sync lin")])
 
     def test_a_workspace_has_no_credential_row(self):
         w = full()
-        self.assertEqual(hooks.collect("doctor", None, w.confs["lin"], w.workspace("x")), [])
+        self.assertEqual(hooks.doctor(None, w.confs["lin"], w.workspace("x")), [])
         self.assertEqual(deliver.RC, {"linux": ".bashrc", "mac": ".zshrc"})

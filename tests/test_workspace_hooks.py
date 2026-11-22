@@ -1,8 +1,8 @@
 import unittest
 
 from tests.world import World
-from tests.ws import HOME, MIRROR, WIPE, git, inv, server
-from wk.core import hooks, seams
+from tests.ws import MIRROR, WIPE, git, inv, server
+from wk.core import seams
 from wk.core.errors import Refused
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
 from wk.core.machine import Result
@@ -31,8 +31,8 @@ class TestStages(unittest.TestCase):
     def stage(self, name, order):
         return next(s for s in mine.stages(self.inv, self.w.confs[name]) if s.order == order)
 
-    def test_a_server_gets_the_mirror_then_the_build_environment_and_other_machines_get_neither(self):
-        for name, want in (("lin", [(30, "mirror"), (40, "build environment")]), ("mac", [(30, "mirror"), (40, "build environment")]),
+    def test_a_server_gets_the_mirror_a_container_server_its_build_environment_and_other_machines_get_neither(self):
+        for name, want in (("lin", [(30, "mirror"), (40, "build environment")]), ("mac", [(30, "mirror")]), ("box", [(30, "mirror")]),
                            ("desk", []), ("vault", [])):
             self.assertEqual([(s.order, s.name) for s in mine.stages(self.inv, self.w.confs[name])], want, name)
 
@@ -70,12 +70,6 @@ class TestStages(unittest.TestCase):
         self.assertRaisesRegex(Refused, r"^lin lacks sdk image: podman failed \(exit 125\): Error: storage is corrupt\n    wk machine setup lin$",
                                self.stage("lin", 40).run)
 
-    def test_a_mac_or_a_borrowed_box_needs_git_alone(self):
-        self.w.machines["mac"].on(("git", "--version"), "git version 2.48.1\n")
-        self.w.machines["box"].on(("git", "--version"), Result(127))
-        self.assertEqual((self.stage("mac", 40).run(), self.w.machines["mac"].calls[-1].argv), (False, ("git", "--version")))
-        self.assertRaisesRegex(Refused, r"^box lacks git\n    install git on box \(on a Mac: xcode-select --install\)$", self.stage("box", 40).run)
-
 
 class TestDoctor(unittest.TestCase):
     def setUp(self):
@@ -107,9 +101,9 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual((rows[0].status, rows[3]), (MISSING, DoctorRow("sdk image", UNKNOWN, "podman failed (exit 125): Error: storage is corrupt",
                                                                         "wk machine setup lin")))
 
-    def test_a_plain_server_is_its_mirror_and_git(self):
-        server(self.w, "mac").on(("git", "--version"), "git version 2.48.1\n")
-        self.assertEqual([(r.name, r.status) for r in self.rows("mac")], [("mirror", OK), ("git", OK)])
+    def test_a_plain_server_is_its_mirror_alone(self):
+        server(self.w, "mac")
+        self.assertEqual([(r.name, r.status) for r in self.rows("mac")], [("mirror", OK)])
 
     def test_a_workspace_and_a_machine_that_holds_none_have_no_rows(self):
         self.assertEqual((self.rows("lin", self.w.workspace("x")), self.rows("desk"), self.rows("vault")), ([], [], []))

@@ -37,7 +37,7 @@ class TestShim(unittest.TestCase):
         r = self.ninja(self.path(self.shims, self.real), WK_AGENT="1")
         self.assertEqual((r.rc, r.out), (1, ""))
         self.assertEqual(r.err, "ninja: refused: an agent builds and tests through wk, which sizes the job count to this machine.\n"
-                                "    use: wk build <ws> <preset>  |  wk test <ws> <args>  |  wk run <ws> -- <args>\n")
+                                "    use: wk build <ws> <preset>  |  wk test <ws> -- <args>  |  wk run <ws> -- <args>\n")
 
     def test_wks_own_build_passes_to_the_real_tool_with_its_arguments_and_status(self):
         r = self.ninja(self.path(self.shims, self.real), WK_AGENT="1", WK_BUILD="1")

@@ -14,7 +14,7 @@ class TestWorld(unittest.TestCase):
         self.assertEqual((r.code, r.out), (0, "0\n"))
         self.assertEqual(r.effects, ["[lin] driver create x", "[store] secret put token", "[lin] task add x: make"])
         self.assertEqual((w.made, w.secrets.get("token"), w.tasks("lin").status()),
-                         ({("lin", "x")}, "v", [seams.Task(0, "x", "build", seams.RUNNING, "make")]))
+                         ({("lin", "x")}, "v", [seams.Task(0, "x", "build", seams.RUNNING, "make", at=1000.0)]))
 
     def test_every_seam_is_counted_by_the_kill_points_and_the_dry_run(self):
         def make():

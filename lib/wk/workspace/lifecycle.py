@@ -4,10 +4,11 @@ remove one. Nothing is stored: `.ready` is written last and removed first, so it
 import dataclasses
 import re
 
-from wk.core.act import die, info
+from wk.core.act import barrier, die, info, must
 from wk.core.seams import ABSENT, BROKEN, CREATING, READY, Workspace
+from wk.webkit import PROJECT
 from wk.workspace import mirror
-from wk.workspace.place import PROJECT, must, place
+from wk.workspace.place import place
 
 NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 NO_PUSH = "no-push://push-to-the-fork-remote"
@@ -29,12 +30,13 @@ def state(inv, m, ws):
     if not m.exists(ws.path):
         return ABSENT
     if made(m, ws):
-        return READY if inv.driver(ws.driver, m).state(ws) == READY else BROKEN
+        part = inv.driver(ws.driver, m).state(ws)
+        return BROKEN if part == ABSENT else part
     # The bracket keeps the pattern from matching the shell that carries this very command over ssh.
     r = m.run(["pgrep", "-f", "wk new (.* )?[%s]%s( |$)" % (ws.name[0], ws.name[1:])])
     if r.rc > 1:
-        die("cannot tell whether a `wk new %s` is running on %s: pgrep failed (exit %d): %s\n    pgrep must be installed there"
-            % (ws.name, m.name, r.rc, r.err.strip()))
+        barrier("cannot tell whether a `wk new %s` is running on %s: pgrep failed (exit %d): %s\n    pgrep must be installed there"
+                % (ws.name, m.name, r.rc, r.err.strip()))
     return CREATING if r.ok else BROKEN
 
 
@@ -61,6 +63,14 @@ def need(inv, name):
     if not made(inv.here, ws):
         die("workspace %s on %s is not made (%s): wait for its `wk new`, or `wk new %s` remakes a broken one"
             % (name, ws.server, ws.state, name))
+    return ws
+
+
+def ready(inv, name):
+    """The ready workspace `name` on this server: what a build, a run and an agent session start from."""
+    ws = need(inv, name)
+    if ws.state != READY:
+        barrier("workspace %s on %s is %s, not ready\n    `wk enter %s`, typed on the client, starts its container" % (name, ws.server, ws.state, name))
     return ws
 
 

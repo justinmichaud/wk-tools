@@ -40,7 +40,7 @@ class TestStage(unittest.TestCase):
 
     def test_the_server_gets_a_bundle_of_head_reset_to_its_sha_then_the_layout_the_link_and_the_profile_line(self):
         r = self.setup()
-        self.assertEqual((r.code, r.out), (0, "wk           changed\nlin: 1 changed\n"))
+        self.assertEqual((r.code, r.out), (0, "wk  changed\nlin: 1 changed\n"))
         self.assertEqual(r.effects, DELIVERY + ["[lin] install -d -m 755 %s/%s" % (HOME, name) for name in ("bin", "cache", "git", "ws")]
                          + ["[lin] install -d -m 700 %s/secrets" % HOME, "[lin] ln -sfn %s/wk %s/bin/wk" % (TOOLS, HOME),
                             """[lin] sh -c 'printf "\\n%%s\\n" "$1" >>"$2"' sh '%s' /home/u/.profile""" % LINE])
@@ -54,14 +54,20 @@ class TestStage(unittest.TestCase):
     def test_a_second_run_changes_nothing(self):
         self.setup()
         r = self.setup()
-        self.assertEqual((r.out, r.effects), ("wk           unchanged\nlin: no changes\n", []))
+        self.assertEqual((r.out, r.effects), ("wk  unchanged\nlin: no changes\n", []))
 
     def test_uncommitted_changes_are_refused_before_the_server_is_touched(self):
         checkout(self.w.machines["desk"], status="?? scratch\n")
         r = self.setup()
         self.assertEqual((r.code, self.lin.calls), (1, []))
         self.assertIn("error: stage wk failed on lin: this checkout has uncommitted changes, and a machine is given a commit and nothing else\n"
-                      "    commit or remove them: git -C %s status --short\n" % ROOT, r.err)
+                      "    commit or remove them: git -C %s status --short\n    --force crosses this\n" % ROOT, r.err)
+
+    def test_force_gives_the_server_the_commit_while_the_checkout_has_changes_and_says_so_again_at_exit(self):
+        checkout(self.w.machines["desk"], status="?? scratch\n")
+        r = self.w.wk("machine", "setup", "lin", "--force")
+        self.assertEqual((r.code, self.lin.files[TOOLS + "/.git/HEAD"]), (0, SHA))
+        self.assertIn("warning: this command was forced past: this checkout has uncommitted changes", r.err)
 
     def test_a_tree_with_no_commit_is_refused(self):
         checkout(self.w.machines["desk"], sha="")
@@ -85,7 +91,8 @@ class TestStage(unittest.TestCase):
         self.lin.on(("git", "-C", TOOLS, "fetch"), Result(128, "", "fatal: bad bundle\n"))
         r = self.setup()
         self.assertEqual((r.code, r.effects), (1, DELIVERY[:3]))
-        self.assertIn("stage wk failed on lin: `git -C %s fetch -q %s/.git/wk.bundle HEAD` failed on lin: fatal: bad bundle\n" % (TOOLS, TOOLS), r.err)
+        self.assertIn("stage wk failed on lin: `git -C %s fetch -q %s/.git/wk.bundle HEAD` failed on lin (exit 128): fatal: bad bundle\n"
+                      "    `wk doctor` names what lin lacks\n" % (TOOLS, TOOLS), r.err)
 
     def test_an_old_python_is_refused_and_nothing_is_installed(self):
         self.lin.on(("python3",), "3.8\n")

@@ -9,18 +9,14 @@ A profile line, not a link in ~/.local/bin: no default login PATH holds ~/.local
 
 import shlex
 
-from wk.core.act import die
+from wk.core import act
+from wk.core.act import barrier, die
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
 from wk.core.machine import TIMED_OUT
 
 PYTHON = (3, 9)
 LAYOUT = (("bin", "755", "d"), ("cache", "755", "d"), ("git", "755", "d"), ("ws", "755", "d"), ("secrets", "700", "drwx------"))
 APPEND = 'printf "\\n%s\\n" "$1" >>"$2"'
-
-
-def wk_home(inv, conf):
-    """The machine's WK_HOME: this machine's own, or ~/wk of the login on another."""
-    return inv.wk_home if conf.name == inv.fleet.hostname else inv.machine(conf.name).home + "/wk"
 
 
 def tool(m, name, argv, remedy, timeout=30):
@@ -63,9 +59,7 @@ def lacking(m, home):
 
 
 def must(m, argv):
-    r = m.act(argv)
-    if not r.ok:
-        die("`%s` failed on %s: %s" % (shlex.join(argv), m.name, r.err.strip()))
+    act.must(m, argv, "`wk doctor` names what %s lacks" % m.name)
 
 
 def deliver(inv, m, tools, sha):
@@ -118,13 +112,14 @@ def on_path(m, home):
 
 def converge(inv, conf):
     """Give the server this checkout's commit and put `wk` on its PATH; True when anything changed."""
-    m, home = inv.machine(conf.name), wk_home(inv, conf)
+    m = inv.machine(conf.name)
+    home = inv.wk_home_on(m)
     sha = head(inv)
     if not sha:
         die("%s has no commit to give a machine: run wk from a clone of its repository" % inv.root)
     if inv.here.run(["git", "-C", inv.root, "status", "--porcelain"]).out.strip():
-        die("this checkout has uncommitted changes, and a machine is given a commit and nothing else\n"
-            "    commit or remove them: git -C %s status --short" % inv.root)
+        barrier("this checkout has uncommitted changes, and a machine is given a commit and nothing else\n"
+                "    commit or remove them: git -C %s status --short" % inv.root)
     for row in prerequisites(m):
         if row.status != OK:
             die("%s on %s: %s\n    %s" % (row.name, m.name, row.detail, row.remedy))

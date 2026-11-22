@@ -39,8 +39,7 @@ def setup(inv, conf):
         die("the credential server %s is kind=%s, and the injector is installed as a systemd user unit\n    make a Linux server the credential server"
             % (conf.name, conf.kind))
     machine = inv.machine(conf.name)
-    home = machine.home
-    directory, unit = home + "/wk/injector", "%s/.config/systemd/user/%s" % (home, SERVICE)
+    directory, unit = inv.wk_home_on(machine) + "/injector", "%s/.config/systemd/user/%s" % (machine.home, SERVICE)
     program, login, marker = directory + "/injector.py", directory + "/login/.credentials.json", directory + "/login/delivered"
     dirs = [directory, directory + "/login"]
     wanted = [(program, "600", inv.here.read("%s/lib/wk/creds/injector.py" % inv.root)), (unit, "644", UNIT % (directory, directory, port(conf)))]

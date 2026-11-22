@@ -7,7 +7,7 @@
     inv.driver(kind, machine)      a wk.core.seams.Driver        (wk.workspace.driver(inv, kind, machine))
     inv.tasks(machine)             a wk.core.seams.Tasks         (wk.tasks.tasks(inv, machine))
     inv.secrets()                  a wk.core.seams.Secrets       (wk.creds.secrets(inv))
-    inv.wk_home                    this machine's ~/wk, or $WK_HOME
+    inv.wk_home_on(machine)        its wk home: <its login's home>/wk, or $WK_HOME on this machine (inv.wk_home) alone
     inv.env  inv.stdin  inv.root   the environment, the terminal, the checkout wk runs from
     inv.words                      the command as typed, wk's global flags taken out
     inv.commands                   {("key", "set"): "wk.cmd.key_set"}"""
@@ -35,9 +35,12 @@ class Inv:
     def machine(self, name):
         return self.fleet.machine(name)
 
+    def wk_home_on(self, machine):
+        return machine is self.here and self.env.get("WK_HOME") or machine.home + "/wk"
+
     @property
     def wk_home(self):
-        return self.env.get("WK_HOME") or self.here.home + "/wk"
+        return self.wk_home_on(self.here)
 
     def driver(self, kind, machine):
         return self.seams["driver"](self, kind, machine)

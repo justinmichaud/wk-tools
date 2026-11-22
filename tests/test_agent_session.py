@@ -14,10 +14,10 @@ TOOL = {"lin": "bwrap", "mac": "sandbox-exec", "box": "env"}
 WRAPPED = {"lin": ("bwrap",), "mac": ("sandbox-exec",), "box": ("env", "-i")}
 KIND = {"lin": "linux", "mac": "mac", "box": "borrowed"}
 SEEN = "HOME=/home/u\0USER=u\0PATH=/usr/bin:/bin\0TERM=dumb\0LANG=C.UTF-8\0LC_CTYPE=C\0SSH_AUTH_SOCK=/tmp/a\0GITHUB_TOKEN=t\0WK_BUILD=1\0"
-ENV = {"HOME": "/home/u", "USER": "u", "PATH": HOME + "/shims:/usr/bin:/bin", "TERM": "dumb", "LANG": "C.UTF-8", "LC_CTYPE": "C",
+ENV = {"HOME": "/home/u", "USER": "u", "PATH": HOME + "/shims:" + HOME + "/bin:/usr/bin:/bin", "TERM": "dumb", "LANG": "C.UTF-8", "LC_CTYPE": "C",
        "WK_AGENT": "1", "WK_WORKSPACE": "x"}
-CLAUDE_ENV = dict(ENV, HTTPS_PROXY="http://vault:8443", https_proxy="http://vault:8443", NODE_EXTRA_CA_CERTS=HOME + "/injector-ca.pem",
-                  CLAUDE_SECURESTORAGE_CONFIG_DIR="/home/u/.claude", DISABLE_AUTOUPDATER="1")
+CLAUDE_ENV = dict(ENV, HTTPS_PROXY="http://vault:3128", https_proxy="http://vault:3128", NODE_EXTRA_CA_CERTS=HOME + "/injector-ca.pem",
+                  CLAUDE_SECURESTORAGE_CONFIG_DIR=HOME + "/claude-login", DISABLE_AUTOUPDATER="1")
 CLAUDE = [install.claude_bin(HOME), "--dangerously-skip-permissions", "--remote-control", "x"]
 PI = [install.pi_bin(HOME)]
 ANSWERED = install.answered(None, SRC)
@@ -41,7 +41,7 @@ def line(on, argv, env, tty=False):
 
 
 def probes(on, env):
-    return ["[%s] wk ls --json" % on, "[%s] fake-exec x %s env -0" % (on, SRC),
+    return ["[%s] fake-exec x %s env -0" % (on, SRC),
             "[%s] fake-exec x %s sh -c 'command -v %s'" % (on, SRC, TOOL[on]),
             line(on, ["ls", "-A", HOME + "/secrets"], dict(env, LC_ALL="C")), line(on, ["env", "-0"], env)]
 
@@ -118,12 +118,7 @@ class TestRefusals(unittest.TestCase):
         self.refused(make(), "no workspace named y on lin: `wk ls` lists them, `wk new y` makes it", "ai", "claude", "y")
 
     def test_a_workspace_that_is_not_ready(self):
-        self.refused(make(state="broken"), "workspace x is broken, not ready\n    wait for the `wk new` making it, or: wk rm x && wk new x")
-
-    def test_a_server_whose_listing_cannot_be_read(self):
-        w = make()
-        w.machines["lin"].on(("wk", "ls", "--json"), "Traceback")
-        self.refused(w, "lin did not answer `wk ls --json`, so whether it holds x is unknown")
+        self.refused(make(state="broken"), "workspace x on lin is not made (broken): wait for its `wk new`, or `wk new x` remakes a broken one")
 
     def test_an_agent_that_is_not_installed(self):
         for agent, path in (("claude", install.claude_bin(HOME)), ("pi", install.pi_bin(HOME))):
@@ -140,7 +135,7 @@ class TestRefusals(unittest.TestCase):
     def test_a_wrapper_under_which_a_credential_is_listed(self):
         self.refused(make(listing=Result(0, "github-token\n")),
                      "the credential wrapper does not hold for x on lin: /home/u/wk/secrets is readable under the wrapper: it lists "
-                     "github-token\n    no agent starts until it holds: this is a fault in wk (lib/wk/agent/wrapper.py) to report with the line above")
+                     "github-token\n    no agent starts until it holds: this is a fault in wk (lib/wk/agent/wrapper.py) to report with the line above\n    --force crosses this")
 
     def test_a_wrapper_under_which_the_ssh_agent_is_inherited(self):
         w = make(dump=Result(0, "HOME=/home/u\0SSH_AUTH_SOCK=/tmp/a\0"))
@@ -150,7 +145,12 @@ class TestRefusals(unittest.TestCase):
     def test_a_probe_that_died_is_not_a_wrapper_that_holds(self):
         self.refused(make(listing=Result(1, "", "bwrap: No permissions to create new namespace\n")),
                      "the credential wrapper could not be measured for x on lin: the stand-in could not list /home/u/wk/secrets (exit 1): "
-                     "bwrap: No permissions to create new namespace\n    check that the workspace runs: wk enter x")
+                     "bwrap: No permissions to create new namespace\n    check that the workspace runs: wk enter x\n    --force crosses this")
+
+    def test_force_starts_the_agent_under_a_wrapper_that_does_not_hold_and_says_so_again_at_exit(self):
+        r = make(listing=Result(0, "github-token\n")).wk("ai", "pi", "x", "--force", on="lin")
+        self.assertEqual((r.code, r.effects), (0, [line("lin", PI, ENV, tty=True)]))
+        self.assertIn("warning: this command was forced past: the credential wrapper does not hold for x on lin", r.err)
 
     def test_a_workspace_whose_environment_cannot_be_read(self):
         w = make()
@@ -174,7 +174,7 @@ class TestDoctorRow(unittest.TestCase):
         w = make()
         r = w.wk("agentdoctor", "lin", "x")
         self.assertEqual(r.out, "credential wrapper | ok | credentials are hidden by bwrap | \n")
-        self.assertEqual(r.calls[-4:], probes("lin", ENV)[1:])
+        self.assertEqual(r.calls[-4:], probes("lin", ENV))
 
     def test_a_missing_tool_and_a_leak_are_missing_and_a_dead_probe_is_unknown(self):
         absent = make("mac")

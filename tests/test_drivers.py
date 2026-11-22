@@ -1,3 +1,4 @@
+import dataclasses
 import os
 import tempfile
 import unittest
@@ -8,16 +9,17 @@ from wk.core import seams
 from wk.core.errors import Refused
 from wk.core.machine import Local, Result
 from wk.workspace import driver
-from wk.workspace.drivers import Container, Plain
+from wk.workspace.drivers import ENTER, INSIDE, Container, Plain
 from wk.workspace.place import place
 
 IMAGE = "ghcr.io/igalia/wkdev-sdk:latest"
 X = seams.Workspace("x", "lin", HOME + "/ws/x", "container", seams.READY)
 EXISTS = "[lin] podman container exists wk-x"
 STATUS = "[lin] podman container inspect --format '{{.State.Status}}' wk-x"
-RUN = ("[lin] podman run --detach --replace --pull=never --name wk-x --init --userns=keep-id --pids-limit=-1 "
-       "--security-opt seccomp=unconfined --volume {ws}:{ws} --volume {m}:{m}:ro --volume {h}/secrets:{h}/secrets:ro "
-       "--workdir {ws}/src %s sleep infinity" % IMAGE).format(ws=X.path, m=MIRROR, h=HOME)
+RUN = ("[lin] podman run --detach --replace --pull=never --name wk-x --init --userns=keep-id --uts=host --pids-limit=-1 "
+       "--security-opt seccomp=unconfined --volume /home/u:/home/u --volume {h}:{h} --volume {m}:{m}:ro "
+       "--env HOME=/home/u --env WK_WORKSPACE=x --workdir {ws}/src %s sleep infinity" % IMAGE).format(ws=X.path, m=MIRROR, h=HOME)
+ENV_SH = HOME + "/secrets/env.sh"
 
 
 def podman(machine, status):
@@ -52,13 +54,13 @@ class TestContainer(unittest.TestCase):
     def setUp(self):
         self.w = World(here="lin")
         self.m = self.w.machines["lin"]
-        self.m.files[HOME + "/secrets/github-token"] = "t"
+        self.m.files[ENV_SH] = ""
         self.d = Container(self.m, HOME, IMAGE)
 
     def lines(self):
         return [line for line, _ in self.w.journal.entries]
 
-    def test_create_runs_an_idle_container_with_the_workspace_the_mirror_and_the_secrets_mounted(self):
+    def test_create_runs_an_idle_container_with_the_logins_home_the_wk_home_and_the_mirror_mounted_under_the_hosts_name(self):
         podman(self.m, None)
         self.d.create(X)
         self.assertEqual((self.lines(), self.w.journal.effects()), ([EXISTS, RUN], [RUN]))
@@ -75,8 +77,8 @@ class TestContainer(unittest.TestCase):
 
     def test_create_without_delivered_secrets_is_refused_naming_the_delivery(self):
         podman(self.m, None)
-        del self.m.files[HOME + "/secrets/github-token"]
-        self.assertRaisesRegex(Refused, r"lin has no /home/u/wk/secrets to mount in the container\n    `wk key sync` delivers", self.d.create, X)
+        del self.m.files[ENV_SH]
+        self.assertRaisesRegex(Refused, r"lin has no /home/u/wk/secrets/env.sh for a shell in the container to source\n    `wk key sync` delivers", self.d.create, X)
         self.assertEqual(self.w.journal.effects(), [])
 
     def test_a_run_that_fails_is_refused_with_what_podman_said(self):
@@ -102,19 +104,46 @@ class TestContainer(unittest.TestCase):
         self.assertEqual(self.d.exec_argv(X, ["make", "-j4"]),
                          ["podman", "exec", "--interactive", "--workdir", X.path + "/src", "wk-x", "make", "-j4"])
         self.assertEqual(self.d.exec_argv(X, ["ls"], cwd=X.path + "/build")[3:5], ["--workdir", X.path + "/build"])
+        self.assertEqual(self.d.exec_argv(X, ["claude"], tty=True)[:4], ["podman", "exec", "--interactive", "--tty"])
 
-    def test_a_shell_is_an_interactive_login_shell_in_the_checkout(self):
-        self.assertEqual(self.d.enter_argv(X), ["podman", "exec", "--interactive", "--tty", "--workdir", X.path + "/src", "wk-x", "/bin/bash", "-l"])
+    def test_a_shell_is_an_interactive_login_shell_in_the_checkout_that_has_sourced_the_delivered_environment(self):
+        self.assertEqual(self.d.enter_argv(X), ["podman", "exec", "--interactive", "--tty", "--workdir", X.path + "/src", "wk-x",
+                                                "/bin/bash", "-c", '. "$0" && exec /bin/bash -l "$@"', ENV_SH])
+
+    def test_the_shell_line_really_sources_the_file_then_runs_what_follows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with open(tmp + "/env.sh", "w") as f:
+                f.write("export WK_SOURCED=yes\n")
+            r = Local().run(["/bin/bash", "-c", ENTER, tmp + "/env.sh", "-c", 'echo "$WK_SOURCED"'])
+            self.assertEqual((r.rc, r.out), (0, "yes\n"))
+
+    def test_typed_inside_a_container_its_own_workspace_is_running_and_no_other_can_be_asked(self):
+        self.m.files[INSIDE] = ""
+        d = Container(self.m, HOME, IMAGE, own="x")
+        self.assertEqual((d.state(X), d.state(dataclasses.replace(X, name="y"))), (seams.READY, seams.UNKNOWN))
+        self.assertEqual([c for c in self.lines() if "podman" in c], [])
+
+    def test_typed_inside_a_container_a_command_runs_directly_and_only_a_task_is_a_podman_exec(self):
+        self.m.files[INSIDE] = ""
+        self.assertEqual(self.d.exec_argv(X, ["make"]), ["sh", "-c", 'cd "$0" && exec "$@"', X.path + "/src", "make"])
+        self.assertEqual(self.d.exec_argv(X, ["make"], task=True), ["podman", "exec", "--interactive", "--workdir", X.path + "/src", "wk-x", "make"])
 
     def test_wk_new_and_wk_rm_drive_the_real_driver(self):
         w = World(seams={"driver": driver})
         m = server(w)
-        m.files[HOME + "/secrets/github-token"] = "t"
+        m.files[ENV_SH] = ""
         podman(m, None)
         self.assertEqual(w.wk("new", "x", "--on", "lin").effects, MAKE[:-2] + [RUN, MAKE[-1]])
         podman(m, "running")
         self.assertEqual(w.wk("ls").out.split(), ["x", "lin", "container", "ready"])
         self.assertEqual(w.wk("rm", "x", "--yes").effects[1], "[lin] podman rm --force --ignore wk-x")
+
+    def test_wk_ls_typed_inside_a_container_knows_its_own_workspace_and_calls_the_others_unknown(self):
+        w = World(here="lin", seams={"driver": driver})
+        w.workspace("x")
+        w.workspace("y")
+        w.machines["lin"].files[INSIDE] = ""
+        self.assertEqual(w.wk("ls", env={"WK_WORKSPACE": "x"}).out.split(), ["x", "lin", "container", "ready", "y", "lin", "container", "unknown"])
 
 
 class TestPlain(unittest.TestCase):

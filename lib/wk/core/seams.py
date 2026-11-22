@@ -34,11 +34,12 @@ class Driver:
         raise NotImplementedError
 
     def state(self, ws):
-        """ready | absent | broken, for the driver's part alone."""
+        """ready | absent | broken for the driver's part alone, unknown where it cannot be asked."""
         raise NotImplementedError
 
-    def exec_argv(self, ws, argv, cwd=None, tty=False):
-        """The argv that runs `argv` inside the workspace from `cwd` (default: the checkout); on this terminal when `tty`."""
+    def exec_argv(self, ws, argv, cwd=None, tty=False, task=False):
+        """The argv that runs `argv` inside the workspace from `cwd` (default: the checkout); on this terminal when
+        `tty`. `task` says the server's task daemon will run it, not this process."""
         raise NotImplementedError
 
     def enter_argv(self, ws):
@@ -51,13 +52,19 @@ QUEUED, RUNNING, DONE, FAILED, KILLED = "queued", "running", "done", "failed", "
 
 @dataclasses.dataclass(frozen=True)
 class Task:
-    """One task. `label` is what asked for it (a workspace's name); `rc` is None until it ends."""
+    """One task. `label` is `<ws>:<what>:<preset>`, and a workspace's tasks are those whose label's first `:`-field is
+    its name. `rc` is None until it ends; `at` is when it was queued, started or ended, whichever its state says."""
     id: int
     label: str
     group: str
     state: str
     command: str
     rc: Optional[int] = None
+    at: float = 0.0
+
+    @property
+    def ws(self):
+        return self.label.split(":")[0]
 
     @property
     def ended(self):
@@ -68,7 +75,7 @@ class Tasks:
     """One machine's tasks: anything that outlives its terminal. Made by `inv.tasks(machine)`."""
 
     def add(self, argv, label, group="default", cwd=None):
-        """Queue `argv`; returns the task's id. A group runs as many at once as the machine configures."""
+        """Queue `argv`; returns the task's id, None under --dry-run. A group runs as many at once as the machine configures."""
         raise NotImplementedError
 
     def status(self):
@@ -85,6 +92,14 @@ class Tasks:
 
     def wait(self, id, timeout=None):
         """Block on the Clock until the task ends or `timeout` seconds pass; returns its Task either way."""
+        raise NotImplementedError
+
+    def follow(self, id):
+        """Stream the task's output to the terminal until it ends."""
+        raise NotImplementedError
+
+    def quiet(self):
+        """{id: the seconds since its output last grew}; every running task is in it."""
         raise NotImplementedError
 
 

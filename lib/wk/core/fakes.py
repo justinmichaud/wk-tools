@@ -3,6 +3,7 @@ kill-point test stops a command."""
 
 import dataclasses
 import shlex
+import sys
 
 from wk.core import act, seams
 from wk.core.clock import Clock
@@ -152,7 +153,7 @@ class FakeDriver(seams.Driver):
     def state(self, ws):
         return seams.READY if (self.machine.name, ws.name) in self.made else seams.ABSENT
 
-    def exec_argv(self, ws, argv, cwd=None, tty=False):
+    def exec_argv(self, ws, argv, cwd=None, tty=False, task=False):
         return ["fake-exec"] + ["-t"] * tty + [ws.name, cwd or ws.path + "/src"] + list(argv)
 
     def enter_argv(self, ws):
@@ -160,7 +161,7 @@ class FakeDriver(seams.Driver):
 
 
 class FakeTasks(seams.Tasks):
-    """A task runs from the moment it is added, until a test calls `finish(id, rc, log)`."""
+    """A task runs, printing nothing, from the moment it is added until a test calls `finish(id, rc, log)`."""
 
     def __init__(self, machine, clock, journal):
         self.machine, self.clock, self.journal, self.tasks, self.logs = machine, clock, journal, [], {}
@@ -170,12 +171,12 @@ class FakeTasks(seams.Tasks):
 
     def add(self, argv, label, group="default", cwd=None):
         def do():
-            self.tasks.append(seams.Task(len(self.tasks), label, group, seams.RUNNING, shlex.join(argv)))
+            self.tasks.append(seams.Task(len(self.tasks), label, group, seams.RUNNING, shlex.join(argv), at=self.clock.now()))
             return len(self.tasks) - 1
-        return self.journal.gate(self.machine.name, "task add %s: %s" % (label, shlex.join(argv)), do, dry=len(self.tasks))
+        return self.journal.gate(self.machine.name, "task add %s: %s" % (label, shlex.join(argv)), do)
 
     def finish(self, id, rc=0, log=""):
-        self._set(id, state=seams.FAILED if rc else seams.DONE, rc=rc)
+        self._set(id, state=seams.FAILED if rc else seams.DONE, rc=rc, at=self.clock.now())
         self.logs[id] = log
 
     def status(self):
@@ -191,6 +192,12 @@ class FakeTasks(seams.Tasks):
     def wait(self, id, timeout=None):
         self.clock.wait_until(lambda: self.tasks[id].ended, timeout)
         return self.tasks[id]
+
+    def follow(self, id):
+        sys.stdout.write(self.logs.get(id, ""))
+
+    def quiet(self):
+        return {t.id: self.clock.now() - t.at for t in self.tasks if t.state == seams.RUNNING}
 
 
 class FakeSecrets(seams.Secrets):

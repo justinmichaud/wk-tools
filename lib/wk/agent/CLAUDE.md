@@ -13,7 +13,7 @@ wk build $WK_WORKSPACE <preset>            # jsc-release, gtk-debug, wpe-release
 wk build $WK_WORKSPACE <preset> --detach   # returns at once; the build goes on as a task on the server
 wk build $WK_WORKSPACE --kill              # stop it
 wk run $WK_WORKSPACE -- <args>             # run jsc from the current build
-wk test $WK_WORKSPACE <args>               # run tests
+wk test $WK_WORKSPACE -- <tests>           # run tests
 wk status $WK_WORKSPACE                    # what is running; the exit code is machine-readable (2 is busy)
 wk status $WK_WORKSPACE --wait             # block until it is not busy, instead of polling
 wk status $WK_WORKSPACE --log              # the build log

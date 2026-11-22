@@ -4,7 +4,7 @@ import unittest
 from tests.pueue import FakePueue
 from tests.world import World
 from wk.core import act
-from wk.core.errors import Refused
+from wk.core.errors import Refused, Unreachable
 from wk.core.fleet import Fleet
 from wk.core.hooks import DoctorRow
 from wk.core.inv import Inv
@@ -141,9 +141,9 @@ class TestDoctor(Bare):
         tasks(self.inv, self.m).limit("build", 2)
         self.assertEqual(self.rows()[2].detail, "its parallel limit is 2, not 1")
 
-    def test_a_server_that_does_not_answer_is_unknown_on_every_row(self):
+    def test_a_server_that_does_not_answer_is_the_collectors_to_report(self):
         self.m.down = True
-        self.assertEqual(self.rows(), [DoctorRow(name, "unknown", "lin did not answer", "wk machine setup lin") for name in ("pueue", "pueued", "build group")])
+        self.assertRaises(Unreachable, self.rows)
 
     def test_a_workspace_has_no_row_of_its_own(self):
         self.assertEqual(lane.doctor(self.inv, self.w.confs["lin"], self.w.workspace("x")), [])

@@ -4,7 +4,7 @@ import unittest
 from tests.killpoints import converges, dry_run_is_the_plan
 from tests.pueue import world
 from wk.tasks import status
-from wk.tasks.pueue import Job
+from wk.core.seams import Task
 
 PUEUE = "/home/u/wk/cache/pueue-4.0.5/pueue --config /home/u/wk/pueue/pueue.yml"
 
@@ -15,24 +15,24 @@ def row(state, **more):
 
 class TestRows(unittest.TestCase):
     def test_a_live_task_and_the_last_under_each_label_are_rows_and_older_endings_are_not(self):
-        tasks = [Job(0, "x:build:a", "build", "failed", "", 2, 100.0), Job(1, "x:build:a", "build", "done", "", 0, 400.0),
-                 Job(2, "x:test:a", "default", "running", "", None, 940.0), Job(3, "y:build:a", "build", "queued", "", None, 990.0)]
+        tasks = [Task(0, "x:build:a", "build", "failed", "", 2, 100.0), Task(1, "x:build:a", "build", "done", "", 0, 400.0),
+                 Task(2, "x:test:a", "default", "running", "", None, 940.0), Task(3, "y:build:a", "build", "queued", "", None, 990.0)]
         self.assertEqual(status.rows(tasks, lambda: {2: 12.9}, 1000.0),
                          [{"id": 1, "label": "x:build:a", "group": "build", "state": "done", "rc": 0, "age": 600, "silent": None},
                           {"id": 2, "label": "x:test:a", "group": "default", "state": "running", "rc": None, "age": 60, "silent": 12},
                           {"id": 3, "label": "y:build:a", "group": "build", "state": "queued", "rc": None, "age": 10, "silent": None}])
 
     def test_log_ages_are_not_asked_for_when_nothing_runs(self):
-        self.assertEqual(len(status.rows([Job(0, "x", "build", "done", "", 0, 1.0)], None, 2.0)), 1)
+        self.assertEqual(len(status.rows([Task(0, "x", "build", "done", "", 0, 1.0)], None, 2.0)), 1)
 
     def test_silence_is_running_until_1800_s_then_stalled_and_the_guards_exit_is_oom(self):
-        run = [Job(0, "x", "build", "running", "", None, 0.0)]
+        run = [Task(0, "x", "build", "running", "", None, 0.0)]
         self.assertEqual([status.rows(run, lambda: {0: s}, 5000.0)[0]["state"] for s in (0, 1799.9, 1800, 9000)], ["running", "running", "stalled", "stalled"])
-        self.assertEqual(status.rows([Job(0, "x", "build", "failed", "", 99, 0.0)], None, 1.0)[0]["state"], "oom")
+        self.assertEqual(status.rows([Task(0, "x", "build", "failed", "", 99, 0.0)], None, 1.0)[0]["state"], "oom")
 
-    def test_a_workspaces_tasks_are_those_whose_label_starts_with_its_name(self):
-        tasks = [Job(i, label, "default", "done", "") for i, label in enumerate(("x:build:a", "xy:build:a", "x", "y:test:x"))]
-        self.assertEqual([t.id for t in status.of(tasks, "x")], [0, 2])
+    def test_a_workspaces_tasks_are_those_whose_labels_first_field_is_its_name(self):
+        tasks = [Task(i, label, "default", "done", "") for i, label in enumerate(("x:build:a", "xy:build:a", "x", "y:test:x"))]
+        self.assertEqual([t.id for t in tasks if t.ws == "x"], [0, 2])
 
 
 class TestCode(unittest.TestCase):

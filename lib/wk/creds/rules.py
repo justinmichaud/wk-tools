@@ -16,12 +16,13 @@ from typing import Callable, Optional
 
 from wk.core.act import die
 from wk.creds import injector, net
+from wk.webkit import PROJECT
 
 OK, BAD, UNKNOWN = "ok", "bad", "unknown"
 
 GITHUB_API = "https://api.github.com"
-UPSTREAM = "WebKit/WebKit"
-BUGZILLA = "https://bugs.webkit.org"
+UPSTREAM = PROJECT["upstream"][len("https://github.com/"):-len(".git")]
+BUGZILLA = PROJECT["bugzilla"]
 ANTHROPIC_API = "https://api.anthropic.com"
 DEPLOY = "deploy-key/"
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
@@ -102,20 +103,20 @@ def bugzilla_user_check(value):
     return None if re.fullmatch(r"[^@\s]+@[^@\s]+", value) else "a Bugzilla login is an email address"
 
 
-def bugzilla_key_check(value):
+def bugzilla_password_check(value):
     return None if value and len(value.split()) == 1 else "it is not one word"
 
 
-def bugzilla_probe(user, key):
+def bugzilla_probe(user, password):
     """The request git-webkit itself validates a login with (webkitbugspy/bugzilla.py)."""
-    if not user or not key:
-        return UNKNOWN, "it is checked with its other half: `wk key set %s`" % ("bugzilla-key" if user else "bugzilla-user")
+    if not user or not password:
+        return UNKNOWN, "it is checked with its other half: `wk key set %s`" % ("bugzilla-password" if user else "bugzilla-user")
     login = urllib.parse.quote(user)
-    status, doc = ask("GET", "%s/rest/user/%s?login=%s&password=%s" % (BUGZILLA, login, login, urllib.parse.quote(key)))
+    status, doc = ask("GET", "%s/rest/user/%s?login=%s&password=%s" % (BUGZILLA, login, login, urllib.parse.quote(password)))
     if status == 200:
         return OK, "%s accepts it as %s" % (BUGZILLA, user)
     if status == 401:
-        return BAD, "%s does not accept this login and key together (HTTP 401)" % BUGZILLA
+        return BAD, "%s does not accept this login and password together (HTTP 401)" % BUGZILLA
     return unanswered("GET /rest/user", status, doc)
 
 
@@ -219,8 +220,8 @@ RULES = (
     Rule("github-user", "your GitHub account name, which git-webkit sends with the token", one_word, github_user_probe),
     Rule("github-token", "a classic GitHub personal access token (scope public_repo), for git-webkit and gh", github_token_check, github_token_probe),
     Rule("bugzilla-user", "your %s login, an email address" % BUGZILLA, bugzilla_user_check,
-         lambda value, ctx: bugzilla_probe(value, ctx.get("bugzilla-key"))),
-    Rule("bugzilla-key", "what git-webkit sends %s as the password of bugzilla-user" % BUGZILLA, bugzilla_key_check,
+         lambda value, ctx: bugzilla_probe(value, ctx.get("bugzilla-password"))),
+    Rule("bugzilla-password", "your %s password, which git-webkit sends with bugzilla-user" % BUGZILLA, bugzilla_password_check,
          lambda value, ctx: bugzilla_probe(ctx.get("bugzilla-user"), value)),
     Rule("litellm-key", "pi's model key for the client's litellm_url; it is the one key an agent can read", litellm_key_check, litellm_key_probe),
     Rule("claude-login", "the claude.ai login document (.credentials.json) of a `claude` logged in for this purpose alone; "

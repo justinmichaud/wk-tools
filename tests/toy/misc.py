@@ -14,5 +14,5 @@ def main(args, inv):
     if args.interrupt:
         raise KeyboardInterrupt
     if args.barrier or args.retry:
-        barrier("the rule says no", retry=args.retry)
+        barrier("the rule says no", 75 if args.retry else 1)
     return int(args.code) if args.code else None

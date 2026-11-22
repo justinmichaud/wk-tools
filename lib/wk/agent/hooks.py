@@ -11,10 +11,14 @@ def stages(inv, conf):
     if not conf.holds_workspaces:
         return []
     m = inv.machine(conf.name)
-    return [Stage(50, "claude", lambda: install.claude(m, install.wk_home(inv, m), conf.name)),
-            Stage(50, "pi", lambda: install.pi(m, install.wk_home(inv, m), conf.name)),
-            Stage(50, "build-tool shims", lambda: install.put(m, install.shims(install.wk_home(inv, m)), mode="755")),
+    return [Stage(50, "claude", lambda: install.claude(m, inv.wk_home_on(m), conf.name)),
+            Stage(50, "pi", lambda: install.pi(m, inv.wk_home_on(m), conf.name)),
+            Stage(50, "build-tool shims", lambda: install.put(m, install.shims(inv.wk_home_on(m)), mode="755")),
             Stage(50, "agent config", lambda: install.put(m, install.config(m)))]
+
+
+def pins(inv, conf):
+    return ["agents"]
 
 
 def doctor(inv, conf, ws):
@@ -25,7 +29,7 @@ def doctor(inv, conf, ws):
         verdict, why, _ = Session(inv, conf, ws, {}).measure()
         return [DoctorRow("credential wrapper", WRAPPER[verdict], why or wrapper.SAYS[conf.kind],
                           REMEDY[verdict] % {"server": conf.name, "ws": ws.name})]
-    home = install.wk_home(inv, m)
+    home = inv.wk_home_on(m)
 
     def row(name, good, detail):
         return DoctorRow(name, OK if good else MISSING, "" if good else detail, "" if good else fix)

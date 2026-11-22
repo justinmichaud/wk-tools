@@ -140,7 +140,7 @@ class TestSeamFakes(Wet):
     def test_a_task_runs_until_finished_and_keeps_its_log(self):
         t = FakeTasks(self.m, self.clock, self.journal)
         a, b = t.add(["make", "a b"], "x", group="build"), t.add(["false"], "y")
-        self.assertEqual(t.status()[a], seams.Task(0, "x", "build", seams.RUNNING, "make 'a b'"))
+        self.assertEqual(t.status()[a], seams.Task(0, "x", "build", seams.RUNNING, "make 'a b'", at=1000.0))
         t.finish(a, log="built\n")
         t.finish(b, rc=2)
         self.assertEqual([(k.state, k.rc, k.ended) for k in t.status()], [("done", 0, True), ("failed", 2, True)])
@@ -160,19 +160,29 @@ class TestSeamFakes(Wet):
         self.clock.after(30, lambda: t.finish(a, rc=1))
         self.assertEqual(t.wait(a).state, seams.FAILED)
 
-    def test_a_dry_run_adds_no_task_and_returns_the_id_it_would_get(self):
+    def test_a_tasks_time_is_its_start_then_its_end_and_a_running_one_has_been_quiet_since_it_started(self):
+        t = FakeTasks(self.m, self.clock, self.journal)
+        a, b = t.add(["make"], "x:build:jsc-release"), t.add(["ls"], "y")
+        self.clock.sleep(30)
+        t.finish(b, log="one\n")
+        self.assertEqual(([k.at for k in t.status()], t.quiet(), [k.ws for k in t.status()]), ([1000.0, 1030.0], {a: 30.0}, ["x", "y"]))
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            t.follow(b)
+        self.assertEqual(out.getvalue(), "one\n")
+
+    def test_a_dry_run_adds_no_task_and_has_no_id(self):
         t = FakeTasks(self.m, self.clock, self.journal)
         act.begin(act.Flags(dry_run=True))
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertEqual((t.add(["make"], "x"), t.status()), (0, []))
+            self.assertEqual((t.add(["make"], "x"), t.status()), (None, []))
         self.assertEqual(err.getvalue(), "would: [srv] task add x: make\n")
 
     def test_secrets_put_get_and_list(self):
         s = FakeSecrets(self.journal)
         s.put("github-token", "v")
-        s.put("bugzilla-key", "w")
-        self.assertEqual((s.get("github-token"), s.get("absent"), s.list()), ("v", None, ["bugzilla-key", "github-token"]))
-        self.assertEqual(self.journal.effects(), ["[store] secret put github-token", "[store] secret put bugzilla-key"])
+        s.put("bugzilla-password", "w")
+        self.assertEqual((s.get("github-token"), s.get("absent"), s.list()), ("v", None, ["bugzilla-password", "github-token"]))
+        self.assertEqual(self.journal.effects(), ["[store] secret put github-token", "[store] secret put bugzilla-password"])
 
     def test_the_contracts_refuse_to_run_unimplemented(self):
         for call in (lambda: seams.Driver().create(self.ws), lambda: seams.Driver().destroy(self.ws), lambda: seams.Driver().state(self.ws),

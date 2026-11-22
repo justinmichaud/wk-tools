@@ -2,7 +2,8 @@
 
 Its `config` file is wk's whole: written, never edited, so a wrong setting is found by comparing two strings."""
 
-from wk.workspace.place import PROJECT, must
+from wk.core.act import must
+from wk.webkit import PROJECT
 
 # gc.auto 0: a repack would delete objects the `--shared` checkouts borrow. No tags: every fetch would re-negotiate
 # each tag upstream has. Two fetches writing the commit graph at once collide on its lock.

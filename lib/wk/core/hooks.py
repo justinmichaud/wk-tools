@@ -3,9 +3,12 @@
     def stages(inv, conf): ...        # -> [Stage]      what `wk machine setup` converges on the machine `conf`
     def doctor(inv, conf, ws): ...    # -> [DoctorRow]  ws is a Workspace, or None for the machine itself
     def gc(inv, conf): ...            # -> [GcRow]
+    def gc_flags(): ...               # -> [Opt]        the flags of `wk gc` that take this lane's flagged rows
+    def pins(inv, conf): ...          # -> [str]        the names in <wk_home>/cache this lane uses; `wk gc` reclaims the rest
 
-`conf` is the machine's wk.core.conf.Conf; its Machine is inv.machine(conf.name). `collect` finds them; no list of
-lanes exists anywhere."""
+`conf` is the machine's wk.core.conf.Conf; its Machine is inv.machine(conf.name). A hook lets Unreachable propagate:
+the command that collects turns it into that machine's one row. `collect` finds the hooks; no list of lanes exists
+anywhere."""
 
 import dataclasses
 import importlib
@@ -47,7 +50,7 @@ class GcRow:
 
 
 def collect(hook, *args, package="wk"):
-    """Every row `hook` ("stages" | "doctor" | "gc") yields across the lanes, in lane-name order; stages by `order`."""
+    """Everything `hook` yields across the lanes, in lane-name order; stages by `order`."""
     rows = []
     for lane in sorted(m.name for m in pkgutil.iter_modules(importlib.import_module(package).__path__) if m.ispkg):
         name = "%s.%s.hooks" % (package, lane)

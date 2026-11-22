@@ -9,7 +9,6 @@ Coded against pueue VERSION; tests/data/pueue-status.json is its pueue_lib/tests
     add --print-task-id      prints the id; the command is one string, run by `sh -c`
     <pueue_directory>/task_logs/<id>.log is the task's output as it grows"""
 
-import dataclasses
 import datetime
 import json
 import re
@@ -26,12 +25,6 @@ MTIMES = """import os, sys
 for name in os.listdir(sys.argv[1]):
     if name.endswith(".log"):
         print(name[:-4], os.path.getmtime(os.path.join(sys.argv[1], name)))"""
-
-
-@dataclasses.dataclass(frozen=True)
-class Job(seams.Task):
-    """A Task and `at`: when it was queued, started or ended, whichever its state says."""
-    at: float = 0.0
 
 
 def stamp(text):
@@ -54,7 +47,7 @@ def job(row):
             state = seams.KILLED
         else:
             state, rc = seams.FAILED, result.get("Failed", 1) if isinstance(result, dict) else 1
-    return Job(row["id"], row["label"] or "", row["group"], state, row["command"], rc, stamp(at))
+    return seams.Task(row["id"], row["label"] or "", row["group"], state, row["command"], rc, stamp(at))
 
 
 def jobs(state):
@@ -63,7 +56,7 @@ def jobs(state):
 
 class Pueue(seams.Tasks):
     def __init__(self, inv, machine):
-        home = inv.env.get("WK_HOME") or machine.home + "/wk"
+        home = inv.wk_home_on(machine)
         self.m, self.clock = machine, inv.clock
         self.bin, self.dir = "%s/cache/pueue-%s" % (home, VERSION), home + "/pueue"
         self.config = self.dir + "/pueue.yml"
@@ -81,12 +74,14 @@ class Pueue(seams.Tasks):
     def _act(self, *words):
         r = self.m.act(self.argv(*words))
         if not r.ok:
-            die("pueue %s failed on %s: %s" % (words[0], self.m.name, r.err.strip()))
+            die("pueue %s failed on %s: %s\n    `wk doctor` says whether its daemon answers" % (words[0], self.m.name, r.err.strip()))
         return r.out
 
     def limit(self, group, parallel):
-        """Make `group` run `parallel` tasks at once; True when that changed anything."""
-        have = self.state()["groups"].get(group)
+        """Make `group` run `parallel` tasks at once; True when that changed anything. A daemon that does not answer
+        has no group yet: under --dry-run that is the daemon setup has still to start."""
+        r = self.m.run(self.argv("status", "--json"))
+        have = json.loads(r.out)["groups"].get(group) if r.ok else None
         if have is None:
             self._act("group", "add", group, "--parallel", str(parallel))
         elif have["parallel_tasks"] != parallel:
@@ -94,7 +89,6 @@ class Pueue(seams.Tasks):
         return have is None or have["parallel_tasks"] != parallel
 
     def add(self, argv, label, group="default", cwd=None):
-        """None under --dry-run: no task was added."""
         if group in LIMITS:
             self.limit(group, LIMITS[group])
         out = self._act("add", "--print-task-id", "--group", group, "--label", label, "--working-directory", cwd or self.m.home,
@@ -125,12 +119,10 @@ class Pueue(seams.Tasks):
         return self._one(id)
 
     def follow(self, id):
-        """Stream the task's output to the terminal from its start until it ends."""
         r = self.m.run(self.argv("follow", str(id)), stream=True)
         sys.stdout.write(r.out)
 
     def quiet(self):
-        """{id: the seconds since its log last grew}, for every task with a log."""
         r = self.m.run(["python3", "-I", "-c", MTIMES, self.dir + "/task_logs"])
         if not r.ok:
             die("cannot read when the task logs on %s last grew: %s" % (self.m.name, r.err.strip()))

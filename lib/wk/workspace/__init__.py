@@ -6,4 +6,4 @@ from wk.workspace.place import image, place
 
 def driver(inv, kind, machine):
     conf, home = place(inv, machine)
-    return {"container": lambda: Container(machine, home, image(conf)), "plain": Plain}[kind]()
+    return {"container": lambda: Container(machine, home, image(conf), inv.env.get("WK_WORKSPACE")), "plain": Plain}[kind]()

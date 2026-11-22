@@ -11,19 +11,19 @@ class TestMachineSetup(unittest.TestCase):
 
     def test_it_runs_every_lanes_stages_in_order_and_counts_the_changes(self):
         r = self.w.wk("machine", "setup", "lin")
-        self.assertEqual((r.code, r.out), (0, "first        changed\nsecond       changed\nthird        changed\nlin: 3 changed\n"))
+        self.assertEqual((r.code, r.out), (0, "first   changed\nsecond  changed\nthird   changed\nlin: 3 changed\n"))
         self.assertEqual(r.effects, ["[lin] write /done/first", "[lin] write /done/second", "[lin] write /done/third"])
 
     def test_a_second_run_changes_nothing_and_says_so(self):
         self.w.wk("machine", "setup", "lin")
         r = self.w.wk("machine", "setup", "lin")
         self.assertEqual((r.code, r.out, r.effects),
-                         (0, "first        unchanged\nsecond       unchanged\nthird        unchanged\nlin: no changes\n", []))
+                         (0, "first   unchanged\nsecond  unchanged\nthird   unchanged\nlin: no changes\n", []))
 
     def test_a_stage_that_fails_stops_the_run_naming_it_and_how_to_re_run_it(self):
         self.w.machines["lin"].files["/fail/second"] = "1"
         r = self.w.wk("machine", "setup", "lin")
-        self.assertEqual((r.code, r.out, r.effects), (1, "first        changed\n", ["[lin] write /done/first"]))
+        self.assertEqual((r.code, r.out, r.effects), (1, "first   changed\n", ["[lin] write /done/first"]))
         self.assertEqual(r.err, "error: stage second failed on lin: second broke\n"
                                 "    fix that and re-run it alone: wk machine setup lin --stage second\n"
                                 "    then the rest: wk machine setup lin\n")
@@ -35,7 +35,7 @@ class TestMachineSetup(unittest.TestCase):
 
     def test_stage_runs_that_stage_alone(self):
         r = self.w.wk("machine", "setup", "lin", "--stage", "second")
-        self.assertEqual((r.out, r.effects), ("second       changed\nlin: 1 changed\n", ["[lin] write /done/second"]))
+        self.assertEqual((r.out, r.effects), ("second  changed\nlin: 1 changed\n", ["[lin] write /done/second"]))
 
     def test_an_unknown_stage_is_refused_naming_the_stages(self):
         r = self.w.wk("machine", "setup", "lin", "--stage", "fourth")

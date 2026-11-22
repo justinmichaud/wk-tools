@@ -48,7 +48,8 @@ def clock(inv, m):
 
 
 def server(inv, conf):
-    m, home, remedy = inv.machine(conf.name), tools.wk_home(inv, conf), "wk machine setup %s" % conf.name
+    m, remedy = inv.machine(conf.name), "wk machine setup %s" % conf.name
+    home = inv.wk_home_on(m)
     return tools.prerequisites(m) + [commit(inv, m, home, remedy), path(m, home, remedy), layout(m, home, remedy),
                                      disk(m, home), clock(inv, m)]
 

@@ -2,10 +2,11 @@
 
 The checkout is cloned from the server's mirror, so no network is used.
 Typed on the client, the server is `--on`, else the client conf's `default_server=`. A name in use on any server is
-refused. Killed and typed again, it remakes the workspace from nothing."""
+refused, and so is any name while a server does not answer, since it cannot be shown to be free. Killed and typed again, it remakes the workspace from nothing."""
 
 from wk.core import route
-from wk.core.act import die, warn
+from wk.core.act import barrier, die
+from wk.core.errors import NEEDS_PERSON
 from wk.core.decl import Command, Opt
 from wk.core.seams import BROKEN
 from wk.workspace import lifecycle
@@ -22,8 +23,9 @@ def main(args, inv):
         die("no server to make %s on: pass --on <server>, or set default_server= in machines/%s.conf" % (args.ws, inv.fleet.hostname))
     inv.fleet.server(server)
     found, unknown = route.workspaces(inv)
-    for name in unknown:
-        warn("%s did not answer: whether it holds a workspace named %s is unknown" % (name, args.ws))
+    if unknown:
+        barrier("%s did not answer, so a workspace named %s cannot be shown to be on no server\n    check `tailscale status`"
+                % (", ".join(unknown), args.ws), NEEDS_PERSON)
     held = [ws for ws in found if ws.name == args.ws and (ws.server, ws.state) != (server, BROKEN)]
     if held:
         die("workspace %s is already on %s (%s): `wk rm %s` removes it, or pick another name"

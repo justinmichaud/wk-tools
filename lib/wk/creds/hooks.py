@@ -2,7 +2,6 @@
 server, and nothing on a borrowed box."""
 
 from wk.core import hooks
-from wk.core.errors import Unreachable
 from wk.creds import deliver, service
 
 MANAGED = ("linux", "mac")
@@ -23,14 +22,11 @@ def doctor(inv, conf, ws):
         return [service.doctor(inv, conf)]
     remedy = "wk key sync %s" % conf.name
     machine = inv.machine(conf.name)
-    try:
-        home = machine.home
-        wanted = [(home + "/wk/secrets", "700"), (home + "/wk/secrets/deploy", "700"), (home + "/wk/secrets/env.sh", "600"),
-                  (home + "/wk/secrets/ssh_config", "600"), ("%s/wk/%s/.credentials.json" % (home, deliver.LOGIN_DIR), "600"),
-                  ("%s/wk/%s" % (home, deliver.CA), "644"), (home + "/.pi/agent/models.json", "600")]
-        have = deliver.status(machine, [path for path, _ in wanted])
-    except Unreachable:
-        have = None
+    wk = inv.wk_home_on(machine)
+    wanted = [(wk + "/secrets", "700"), (wk + "/secrets/deploy", "700"), (wk + "/secrets/env.sh", "600"),
+              (wk + "/secrets/ssh_config", "600"), ("%s/%s/.credentials.json" % (wk, deliver.LOGIN_DIR), "600"),
+              ("%s/%s" % (wk, deliver.CA), "644"), (machine.home + "/.pi/agent/models.json", "600")]
+    have = deliver.status(machine, [path for path, _ in wanted])
     if have is None:
         return [hooks.DoctorRow("credentials", hooks.UNKNOWN, "%s could not say what it holds" % conf.name, remedy)]
     rows = []

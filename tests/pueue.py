@@ -30,10 +30,15 @@ def iso(t):
     return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).isoformat()
 
 
+def bare(clock):
+    """As much of an inv as the client asks: a clock, and where a machine's wk home is."""
+    return types.SimpleNamespace(wk_home_on=lambda machine: machine.home + "/wk", clock=clock)
+
+
 class FakePueue:
     def __init__(self, machine, clock, up=True):
         self.m, self.clock, self.logs, self.grew, self.endings = machine, clock, {}, {}, []
-        self.client = Pueue(types.SimpleNamespace(env={}, clock=clock), machine)
+        self.client = Pueue(bare(clock), machine)
         self.path = self.client.dir + "/state.json"
         machine.on(self.client.argv(), self.answer)
         machine.on(["python3", "-I", "-c", MTIMES], lambda call: "".join("%d %r\n" % item for item in sorted(self.grew.items())))

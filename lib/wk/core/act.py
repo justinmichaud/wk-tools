@@ -1,13 +1,14 @@
 """The gate every state change passes, and what a command says and asks.
 
-    from wk.core.act import act, info, warn, die, confirm, barrier
+    from wk.core.act import act, must, info, warn, die, confirm, barrier
 
 A command changes state through a Machine's mutators (act, write, remove, spawn, copy) or a seam built on them; each
 ends in `act` here. A seam that is not a Machine (an HTTP API) calls `act` itself."""
 
+import shlex
 import sys
 
-from wk.core.errors import FAILED, NEEDS_PERSON, REFUSED_FOR_NOW, Bug, Refused
+from wk.core.errors import FAILED, NEEDS_PERSON, Bug, Refused
 
 
 class Flags:
@@ -52,6 +53,14 @@ def die(message, status=FAILED):
     raise Refused(message, status)
 
 
+def must(machine, argv, remedy):
+    """A state change on `machine` whose failure ends the command, with what it said and the remedy."""
+    r = machine.act(argv)
+    if not r.ok:
+        die("`%s` failed on %s (exit %d): %s\n    %s" % (shlex.join(argv), machine.name, r.rc, r.err.strip(), remedy))
+    return r
+
+
 def confirm(prompt):
     """Ask once before a destructive action. Returns when the answer is yes; any other answer ends the command."""
     if flags.dry_run:
@@ -66,10 +75,10 @@ def confirm(prompt):
     flags.confirmed = True
 
 
-def barrier(message, retry=False):
-    """A refusal that exists because of a rule: only --force crosses it, and the dispatcher repeats it at exit.
-    `retry` marks a barrier that lifts by itself (exit 75)."""
+def barrier(message, status=FAILED):
+    """A refusal because of a rule or a reading that could not be taken: only --force crosses it, and the dispatcher
+    repeats it at exit. A refusal the command line itself caused is a `die`."""
     if not flags.force:
-        die("%s\n    --force crosses this" % message, REFUSED_FOR_NOW if retry else FAILED)
+        die("%s\n    --force crosses this" % message, status)
     warn("forced past: %s" % message)
     flags.forced.append(message)

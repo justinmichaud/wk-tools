@@ -33,7 +33,7 @@ class Rules(unittest.TestCase):
 
 class TestFind(Rules):
     def test_every_rule_says_what_it_is_for(self):
-        self.assertEqual([r.name for r in rules.RULES], ["github-user", "github-token", "bugzilla-user", "bugzilla-key", "litellm-key",
+        self.assertEqual([r.name for r in rules.RULES], ["github-user", "github-token", "bugzilla-user", "bugzilla-password", "litellm-key",
                                                          "claude-login", "tailnet-auth-key"])
         self.assertTrue(all(r.what for r in rules.RULES))
 
@@ -84,20 +84,20 @@ class TestGithub(Rules):
 
 
 class TestBugzilla(Rules):
-    STORE = {"bugzilla-user": "me@example.test", "bugzilla-key": "k+1"}
+    STORE = {"bugzilla-user": "me@example.test", "bugzilla-password": "k+1"}
 
     def test_the_login_is_an_email_and_the_key_one_word(self):
         self.checks("bugzilla-user", ["me@example.test"], ["me", "a b@c", ""])
-        self.checks("bugzilla-key", ["k+1"], ["two words", ""])
+        self.checks("bugzilla-password", ["k+1"], ["two words", ""])
 
     def test_both_halves_are_checked_with_git_webkits_own_request(self):
-        for name in ("bugzilla-user", "bugzilla-key"):
+        for name in ("bugzilla-user", "bugzilla-password"):
             verdicts = [self.verdict(name, self.STORE[name], {BZ: a}, self.STORE) for a in ((200, {}), (401, {}), (500, {}), DOWN)]
             self.assertEqual(verdicts, [OK, BAD, UNKNOWN, UNKNOWN])
 
     def test_one_half_alone_is_unknown_and_names_the_other(self):
-        self.assertEqual(self.probe("bugzilla-key", "k+1", {}), (UNKNOWN, "it is checked with its other half: `wk key set bugzilla-user`"))
-        self.assertEqual(self.probe("bugzilla-user", "me@example.test", {}), (UNKNOWN, "it is checked with its other half: `wk key set bugzilla-key`"))
+        self.assertEqual(self.probe("bugzilla-password", "k+1", {}), (UNKNOWN, "it is checked with its other half: `wk key set bugzilla-user`"))
+        self.assertEqual(self.probe("bugzilla-user", "me@example.test", {}), (UNKNOWN, "it is checked with its other half: `wk key set bugzilla-password`"))
 
 
 class TestLitellm(Rules):

@@ -1,3 +1,4 @@
+import importlib
 import os
 import sys
 import tempfile
@@ -19,7 +20,11 @@ class TestHelp(unittest.TestCase):
     def test_help_lists_every_command_with_its_usage_and_summary_and_the_topics(self):
         out = self.w.wk("help").out
         self.assertIn("wk help [<topic>]                            List the commands, or print a section of the design.\n", out)
-        self.assertIn("wk selftest [<pattern>]", out)
+        listed = out.split("\n\n")[0].splitlines()
+        self.assertEqual(len(listed), len(self.w.commands))
+        for key, line in zip(sorted(self.w.commands), listed):
+            summary = importlib.import_module(self.w.commands[key]).__doc__.split("\n")[0]
+            self.assertTrue(line.startswith("wk %s" % " ".join(key)) and line.endswith(" " + summary) and summary.rstrip(".:`"), line)
         self.assertIn("\ntopics (wk help <topic>): design, decisions, vocabulary, shape, rules every command obeys, seams,", out)
 
     def test_a_topic_prints_the_section_whose_heading_starts_with_it(self):

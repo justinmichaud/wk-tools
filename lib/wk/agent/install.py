@@ -16,10 +16,6 @@ TOOLS = ("build-webkit", "build-jsc", "cmake", "ninja", "make", "xcodebuild", "r
 MOVE = 'test -x "$1/.local/share/claude/versions/$3" && mv "$1" "$2"'
 
 
-def wk_home(inv, m):
-    return inv.wk_home if m is inv.here else m.home + "/wk"
-
-
 def claude_bin(home):
     return "%s/cache/agents/claude/%s/.local/share/claude/versions/%s" % (home, CLAUDE_VERSION, CLAUDE_VERSION)
 

@@ -11,15 +11,15 @@ import hashlib
 import json
 import shlex
 
-from wk.core.act import die, warn
+from wk.core.act import barrier, die, warn
 from wk.core.errors import NEEDS_PERSON
 from wk.creds import injector, rules
 
 # What git-webkit (webkitcorepy.credentials: <HOST>_USERNAME and <HOST>_TOKEN or _PASSWORD) and gh read.
+BUGZILLA = rules.BUGZILLA.split("//")[1].upper().replace(".", "_")
 ENV = (("GITHUB_COM_USERNAME", "github-user"), ("GITHUB_COM_TOKEN", "github-token"), ("GH_TOKEN", "github-token"),
-       ("BUGS_WEBKIT_ORG_USERNAME", "bugzilla-user"), ("BUGS_WEBKIT_ORG_PASSWORD", "bugzilla-key"))
-ENV_NAMES = tuple(var for var, _ in ENV) + ("GIT_CONFIG_COUNT",)
-DELIVERED = ("github-user", "github-token", "bugzilla-user", "bugzilla-key", "litellm-key")
+       (BUGZILLA + "_USERNAME", "bugzilla-user"), (BUGZILLA + "_PASSWORD", "bugzilla-password"))
+DELIVERED = ("github-user", "github-token", "bugzilla-user", "bugzilla-password", "litellm-key")
 RC = {"linux": ".bashrc", "mac": ".zshrc"}
 CA = "injector-ca.pem"
 LOGIN_DIR = "claude-login"
@@ -86,7 +86,7 @@ def gather(inv):
             warn("%s is not in the store, so it is not delivered: `wk key set %s`" % (name, name))
     vault = inv.fleet.credential.name
     far = inv.machine(vault)
-    ca = far.read("%s/wk/injector/ca.pem" % far.home)
+    ca = far.read(inv.wk_home_on(far) + "/injector/ca.pem")
     if ca is None:
         warn("%s has no injector yet, so its CA is not delivered: `wk machine setup %s`" % (vault, vault))
     url, pi = inv.fleet.here.get("litellm_url"), None
@@ -134,14 +134,15 @@ def lines(home, wk_home, kind):
 def server(inv, conf, material):
     """Converge one server; prints a row per item and returns whether anything changed."""
     machine = inv.machine(conf.name)
-    home = machine.home
-    wk_home, changed = home + "/wk", False
+    home, wk_home, changed = machine.home, inv.wk_home_on(machine), False
     dirs = [wk_home + "/secrets", wk_home + "/secrets/deploy"]
     items = files(home, wk_home, material)
-    have = status(machine, dirs + [path for path, _, _ in items])
+    asked = dirs + [path for path, _, _ in items]
+    have = status(machine, asked)
     if have is None:
-        die("%s could not say what it holds (python3 -I failed there), so nothing is delivered to it\n    `wk machine setup %s` installs what a server needs"
-            % (conf.name, conf.name), NEEDS_PERSON)
+        barrier("%s could not say what it holds (python3 -I failed there), so nothing is delivered to it\n"
+                "    `wk machine setup %s` installs what a server needs" % (conf.name, conf.name), NEEDS_PERSON)
+        have = dict.fromkeys(asked)     # forced: everything is written as if absent
 
     def row(same, path):
         print("%-12s %-10s %s" % (conf.name, "unchanged" if same else "changed", path))

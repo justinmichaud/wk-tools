@@ -43,6 +43,7 @@ class TestLsOnAServer(unittest.TestCase):
         r = self.w.wk("ls", "--json")
         self.assertEqual((r.code, r.out), (1, ""))
         self.assertIn("error: cannot tell whether a `wk new x` is running on lin: pgrep failed (exit 127): pgrep: not found\n", r.err)
+        self.assertEqual(self.w.wk("ls", "--force").out.split()[-1], "broken")
 
     def test_listing_changes_nothing(self):
         self.w.workspace("x", state=seams.BROKEN)

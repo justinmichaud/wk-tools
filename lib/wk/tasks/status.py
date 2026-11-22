@@ -13,11 +13,6 @@ CODES = {seams.QUEUED: BUSY, seams.RUNNING: BUSY, STALLED_STATE: STALLED, OOM: S
          seams.DONE: OK}
 
 
-def of(tasks, ws):
-    """The tasks a workspace asked for: a label is `<ws>:<what>:<preset>`."""
-    return [t for t in tasks if t.label.split(":")[0] == ws]
-
-
 def rows(tasks, quiet, now):
     """`quiet` is {id: seconds since its log grew}, asked for only when a task is running."""
     last = {t.label: t.id for t in tasks}

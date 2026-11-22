@@ -2,17 +2,16 @@ import contextlib
 import io
 import json
 import os
-import types
 import unittest
 
 from tests import ROOT
-from tests.pueue import FakePueue, iso
+from tests.pueue import FakePueue, bare, iso
 from wk.core import act, seams
 from wk.core.errors import Refused
 from wk.core.fakes import Fake, FakeClock
 from wk.core.machine import Result
 from wk.tasks import tasks
-from wk.tasks.pueue import MTIMES, Job, job, jobs, stamp
+from wk.tasks.pueue import MTIMES, job, jobs, stamp
 
 BIN = "/home/u/wk/cache/pueue-4.0.5/pueue --config /home/u/wk/pueue/pueue.yml"
 
@@ -35,7 +34,7 @@ class TestParse(unittest.TestCase):
     def test_a_killed_task_has_no_exit_code_and_a_label_is_kept(self):
         done = {"enqueued_at": "2024-07-18T14:55:02Z", "start": "2024-07-18T14:55:03Z", "end": "2024-07-18T14:55:09Z"}
         self.assertEqual(job(row({"Done": dict(done, result="Killed")})),
-                         Job(7, "x:build:jsc-release", "build", seams.KILLED, "make", None, 1721314509.0))
+                         seams.Task(7, "x:build:jsc-release", "build", seams.KILLED, "make", None, 1721314509.0))
 
     def test_a_task_that_ended_any_other_way_failed_with_exit_1(self):
         done = {"enqueued_at": "2024-07-18T14:55:02Z", "start": "2024-07-18T14:55:03Z", "end": "2024-07-18T14:55:09Z"}
@@ -58,21 +57,20 @@ class TestClient(unittest.TestCase):
         self.clock = FakeClock()
         self.m = Fake("srv")
         self.daemon = FakePueue(self.m, self.clock)
-        self.t = tasks(types.SimpleNamespace(env={}, clock=self.clock), self.m)
+        self.t = tasks(bare(self.clock), self.m)
 
     def effects(self):
         return [line.replace(BIN, "pueue") for line in self.m.journal.effects()]
 
     def test_wk_home_places_the_binaries_the_config_and_the_logs(self):
-        t = tasks(types.SimpleNamespace(env={"WK_HOME": "/srv/wk"}, clock=self.clock), self.m)
-        self.assertEqual(t.argv("status"), ["/srv/wk/cache/pueue-4.0.5/pueue", "--config", "/srv/wk/pueue/pueue.yml", "status"])
+        self.assertEqual(self.t.argv("status"), ["/home/u/wk/cache/pueue-4.0.5/pueue", "--config", "/home/u/wk/pueue/pueue.yml", "status"])
 
     def test_add_queues_one_shell_string_in_the_group_under_the_label_and_returns_the_id(self):
         self.assertEqual((self.t.add(["make", "a b"], "x:test:jsc-release"), self.t.add(["ls"], "y", cwd="/w")), (0, 1))
         self.assertEqual(self.effects(), ["[srv] pueue add --print-task-id --group default --label x:test:jsc-release --working-directory /home/u -- 'make '\"'\"'a b'\"'\"''",
                                           "[srv] pueue add --print-task-id --group default --label y --working-directory /w -- ls"])
-        self.assertEqual(self.t.status(), [Job(0, "x:test:jsc-release", "default", "running", "make 'a b'", None, 1000.0),
-                                           Job(1, "y", "default", "queued", "ls", None, 1000.0)])
+        self.assertEqual(self.t.status(), [seams.Task(0, "x:test:jsc-release", "default", "running", "make 'a b'", None, 1000.0),
+                                           seams.Task(1, "y", "default", "queued", "ls", None, 1000.0)])
 
     def test_the_first_build_makes_the_build_group_with_a_limit_of_one(self):
         self.t.add(["make"], "x", group="build")
@@ -96,6 +94,15 @@ class TestClient(unittest.TestCase):
         del self.m.files[self.daemon.path]
         with self.assertRaisesRegex(Refused, "pueue does not answer on srv: Error: Failed to connect to the daemon\n    `wk machine setup srv` installs and starts it"):
             self.t.status()
+
+    def test_a_daemon_setup_has_yet_to_start_has_no_group_so_a_dry_run_plans_the_group_and_a_wet_run_fails_at_pueue(self):
+        del self.m.files[self.daemon.path]
+        with self.assertRaisesRegex(Refused, "pueue group failed on srv: Error: Failed to connect to the daemon\n    `wk doctor` says"):
+            self.t.limit("build", 1)
+        act.begin(act.Flags(dry_run=True))
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertTrue(self.t.limit("build", 1))
+        self.assertEqual(err.getvalue(), "would: [srv] %s group add build --parallel 1\n" % BIN)
 
     def test_a_refused_add_is_refused_with_pueues_words(self):
         with self.assertRaisesRegex(Refused, 'pueue add failed on srv: Group "nightly" does not exist'):

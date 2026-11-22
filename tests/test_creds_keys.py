@@ -43,6 +43,13 @@ class TestKeySet(unittest.TestCase):
         self.assertEqual((r.code, r.effects), (1, []))
         self.assertIn("error: github-token: GitHub does not accept this token (HTTP 401)", r.err)
 
+    def test_force_stores_a_value_its_issuer_refuses_and_says_so_again_at_exit(self):
+        w = world()
+        with Http({("GET", GH + "/user"): (401, {})}).patch():
+            r = w.wk("key", "set", "github-token", "--force", stdin=TOKEN)
+        self.assertEqual((r.code, w.secrets.values), (0, {"github-token": TOKEN}))
+        self.assertIn("warning: this command was forced past: github-token: GitHub does not accept this token (HTTP 401)", r.err)
+
     def test_a_value_nobody_could_verify_is_stored_and_said_to_be_unverified(self):
         r = self.set("github-token", TOKEN, {("GET", GH + "/user"): net.NoAnswer("down")})
         self.assertEqual((r.code, self.w.secrets.values), (0, {"github-token": TOKEN}))
@@ -85,7 +92,7 @@ class TestKeyCheck(unittest.TestCase):
         rows = [line.split(None, 3) for line in r.out.splitlines()]
         self.assertEqual((r.code, r.effects, [row[:3] for row in rows]),
                          (0, [], [["github-user", "present", "ok"], ["github-token", "present", "ok"], ["bugzilla-user", "absent", "-"],
-                                  ["bugzilla-key", "absent", "-"], ["litellm-key", "absent", "-"], ["claude-login", "absent", "-"],
+                                  ["bugzilla-password", "absent", "-"], ["litellm-key", "absent", "-"], ["claude-login", "absent", "-"],
                                   ["tailnet-auth-key", "present", "unknown"], ["deploy-key/o/r", "present", "unknown"]]))
         self.assertEqual(rows[2][3], "your https://bugs.webkit.org login, an email address: `wk key set bugzilla-user`")
         self.assertEqual(rows[7][3], "GET /repos/o/r/keys did not answer (down)")

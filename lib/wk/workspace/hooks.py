@@ -1,15 +1,11 @@
-"""What setup converges, doctor reports and gc reclaims for workspaces: the mirror, the build environment (podman,
-subordinate ids and the SDK image for the container driver; git for the plain one) and half-made workspaces."""
+"""What setup converges, doctor reports and gc reclaims for workspaces: the mirror, the container driver's build
+environment (podman, subordinate ids and the SDK image) and half-made workspaces."""
 
-from wk.core.act import die
+from wk.core.act import die, must
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow, GcRow, Stage
 from wk.core.seams import BROKEN
 from wk.workspace import lifecycle, mirror
-from wk.workspace.place import image, must, place
-
-
-def tool(m, name, remedy):
-    return DoctorRow(name, OK if m.run([name, "--version"]).ok else MISSING, "", remedy)
+from wk.workspace.place import image, place
 
 
 def subids(m):
@@ -28,10 +24,11 @@ def sdk(m, conf):
 
 
 def environment(m, conf):
-    """The rows of the build environment, the SDK image last."""
+    """The rows of the container driver's build environment, the SDK image last; the plain driver has none."""
     if conf.driver == "plain":
-        return [tool(m, "git", "install git on %s (on a Mac: xcode-select --install)" % conf.name)]
-    return [tool(m, "podman", "install podman on %s" % conf.name), subids(m), sdk(m, conf)]
+        return []
+    return [DoctorRow("podman", OK if m.run(["podman", "--version"]).ok else MISSING, "", "install podman on %s" % conf.name),
+            subids(m), sdk(m, conf)]
 
 
 def prepare(m, conf):
@@ -50,7 +47,8 @@ def stages(inv, conf):
     if not conf.holds_workspaces:
         return []
     m = inv.machine(conf.name)
-    return [Stage(30, "mirror", lambda: mirror.setup(m, place(inv, m)[1])), Stage(40, "build environment", lambda: prepare(m, conf))]
+    found = [Stage(30, "mirror", lambda: mirror.setup(m, place(inv, m)[1]))]
+    return found + [Stage(40, "build environment", lambda: prepare(m, conf))] if conf.driver == "container" else found
 
 
 def doctor(inv, conf, ws):

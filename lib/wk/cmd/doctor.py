@@ -8,12 +8,11 @@ import dataclasses
 import json
 
 from wk.core import hooks, route
-from wk.core.act import die
 from wk.core.decl import Command, Opt
 from wk.core.errors import FAILED, NEEDS_PERSON, Unreachable
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
-from wk.core.seams import Workspace
 from wk.provision import rows
+from wk.workspace import lifecycle
 
 COMMAND = Command(takes=("ws?",), opts=(Opt("--all", "every workspace too"), Opt("--json", "print the rows as JSON")), readonly=True)
 LABEL = {OK: "ok", MISSING: "MISSING", UNKNOWN: "unknown"}
@@ -30,11 +29,13 @@ def machine(inv, conf):
 
 def held(inv, ws):
     """A workspace's groups, from the server that holds it."""
-    r = inv.machine(ws.server).run(["wk", "doctor", ws.name, "--json"])
     try:
-        return [(group["group"], [DoctorRow(**row) for row in group["rows"]]) for group in json.loads(r.out)]
+        said = inv.machine(ws.server).run(["wk", "doctor", ws.name, "--json"])
+        return [(group["group"], [DoctorRow(**row) for row in group["rows"]]) for group in json.loads(said.out)]
+    except Unreachable as e:
+        return [(ws.name, [DoctorRow("reachable", UNKNOWN, str(e).split("\n")[0], "tailscale status")])]
     except ValueError:
-        return [(ws.name, [DoctorRow("doctor", UNKNOWN, "`wk doctor %s --json` on %s answered %s" % (ws.name, ws.server, r.err.strip() or "nothing"),
+        return [(ws.name, [DoctorRow("doctor", UNKNOWN, "`wk doctor %s --json` on %s answered %s" % (ws.name, ws.server, said.err.strip() or "nothing"),
                                      "wk machine setup %s" % ws.server)])]
 
 
@@ -50,12 +51,8 @@ def on_client(args, inv):
 
 
 def on_server(args, inv):
-    here, wanted = inv.fleet.here, []
-    if args.ws or args.all:
-        listed = json.loads(inv.here.run(["wk", "ls", "--json"]).out)["workspaces"]
-        wanted = [Workspace(server=here.name, **row) for row in listed if args.ws in (None, row["name"])]
-    if args.ws and not wanted:
-        die("no workspace named %s on %s: `wk ls` lists them" % (args.ws, here.name))
+    here = inv.fleet.here
+    wanted = [lifecycle.need(inv, args.ws)] if args.ws else lifecycle.listing(inv, inv.here) if args.all else []
     return ([] if args.ws else [machine(inv, here)]) + [("%s (workspace on %s)" % (ws.name, here.name), hooks.collect("doctor", inv, here, ws))
                                                         for ws in wanted]
 

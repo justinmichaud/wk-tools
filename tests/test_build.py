@@ -31,8 +31,8 @@ class TestBuild(unittest.TestCase):
                                       "[lin] pueue add --print-task-id --group build --label x:build:jsc-release --working-directory /home/u"])
         with open(guard.__file__) as f:
             self.assertEqual(w.machines["lin"].files[OUT + "/guard.py"], f.read())
-        self.assertEqual(added(w, "lin"), [["fake-exec", "x", SRC, "python3", "-I", OUT + "/guard.py", "24576", "1"]
-                                           + webkit.build_argv(webkit.resolve("jsc-release", "linux"), SRC, OUT, 16)])
+        line = webkit.build_argv(webkit.resolve("jsc-release", "linux"), SRC, OUT, 16)
+        self.assertEqual(added(w, "lin"), [["fake-exec", "x", SRC, "python3", "-I", OUT + "/guard.py", "24576", "1", "env", "WK_BUILD=1"] + line[1:]])
         self.assertEqual([c for c in r.calls if c.startswith("[lin] fake-exec ")], ["[lin] fake-exec x %s %s" % (SRC, shlex.join(sizing.PROBE))])
 
     def test_the_budget_is_never_under_8192_mb(self):
@@ -58,7 +58,7 @@ class TestBuild(unittest.TestCase):
     def test_on_a_mac_it_builds_with_xcode_sized_from_total_memory(self):
         w = held("mac")
         r = w.wk("build", "x", "mac-release", "--detach")
-        self.assertEqual((r.code, added(w, "mac")[0][6:]), (0, ["30720", "0", "env", "WEBKIT_OUTPUTDIR=" + OUT, "Tools/Scripts/build-webkit", "--release", "-jobs", "10"]))
+        self.assertEqual((r.code, added(w, "mac")[0][6:]), (0, ["30720", "0", "env", "WK_BUILD=1", "WEBKIT_OUTPUTDIR=" + OUT, "Tools/Scripts/build-webkit", "--release", "-jobs", "10"]))
 
     def test_the_servers_environment_caps_the_jobs(self):
         w = held(here="lin")
@@ -89,7 +89,10 @@ class TestBuild(unittest.TestCase):
         w.wk("build", "x", "jsc-release", "--detach")
         r = w.wk("build", "x", "jsc-debug")
         self.assertEqual((r.code, r.err, r.effects), (2, "error: x is already building (x:build:jsc-release)\n"
-                                                         "    `wk status x --wait` waits for it, `wk build x --kill` ends it\n", []))
+                                                         "    `wk status x --wait` waits for it, `wk build x --kill` ends it\n    --force crosses this\n", []))
+        r = w.wk("build", "x", "jsc-debug", "--detach", "--force")
+        self.assertEqual((r.code, [t["label"] for t in w.pueue["lin"].tasks.values()]), (0, ["x:build:jsc-release", "x:build:jsc-debug"]))
+        self.assertIn("warning: this command was forced past: x is already building", r.err)
 
     def test_a_busy_server_queues_the_build_and_says_so(self):
         w = held()
@@ -142,16 +145,14 @@ class TestBuild(unittest.TestCase):
     def test_a_workspace_that_is_not_ready_or_not_here_is_refused(self):
         w = world(here="lin")
         w.workspace("half", state="broken")
-        for name, said in (("half", "error: workspace half is broken, not ready: `wk rm half` then `wk new half` remakes it\n"),
+        w.workspace("stopped")
+        w.made.discard(("lin", "stopped"))
+        for name, said in (("half", "error: workspace half on lin is not made (broken): wait for its `wk new`, or `wk new half` remakes a broken one\n"),
+                           ("stopped", "error: workspace stopped on lin is broken, not ready\n    `wk enter stopped`, typed on the client, starts its container\n"
+                                       "    --force crosses this\n"),
                            ("gone", "error: no workspace named gone on lin: `wk ls` lists them, `wk new gone` makes it\n")):
             r = w.wk("build", name, "jsc-release")
             self.assertEqual((r.code, r.err), (1, said))
-
-    def test_a_server_whose_listing_cannot_be_read_is_refused(self):
-        w = world(here="lin")
-        w.machines["lin"].on(("wk", "ls", "--json"), "Traceback")
-        r = w.wk("build", "x", "jsc-release")
-        self.assertEqual((r.code, r.err), (1, "error: cannot list the workspaces on lin: `wk ls --json` printed Traceback\n"))
 
     def test_it_converges_killed_at_any_point_and_its_dry_run_is_its_plan(self):
         converges(self, held, "build", "x", "jsc-release", "--detach")

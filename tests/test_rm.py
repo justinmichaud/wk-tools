@@ -60,6 +60,8 @@ class TestRm(unittest.TestCase):
         r = w.wk("rm", "x", "--yes")
         self.assertEqual((r.code, r.effects), (2, []))
         self.assertIn("error: a `wk new x` is making it on lin: wait for it to end\n", r.err)
+        self.assertEqual(w.wk("rm", "x", "--yes", "--force").code, 0)
+        self.assertEqual(w.machines["lin"].listdir("/home/u/wk/ws"), [])
 
     def test_a_name_the_server_does_not_hold_is_refused(self):
         r = self.w.wk("rm", "y", "--yes", on="lin")

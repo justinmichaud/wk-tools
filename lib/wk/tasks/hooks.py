@@ -3,7 +3,6 @@
 import json
 
 from wk.core.act import die
-from wk.core.errors import Unreachable
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow, Stage
 from wk.tasks.pueue import CONFIG, LIMITS, VERSION, Pueue
 
@@ -69,17 +68,17 @@ def stages(inv, conf):
             Stage(20, "build group", lambda: pueue.limit("build", LIMITS["build"]))]
 
 
+def pins(inv, conf):
+    return ["pueue-" + VERSION]
+
+
 def doctor(inv, conf, ws):
     if ws is not None or not conf.holds_workspaces:
         return []
-    remedy = "wk machine setup %s" % conf.name
-    try:
-        m = inv.machine(conf.name)
-        pueue = Pueue(inv, m)
-        installed = all(m.exists("%s/%s" % (pueue.bin, tool)) for tool in ("pueue", "pueued"))
-        r = m.run(pueue.argv("status", "--json"))
-    except Unreachable:
-        return [DoctorRow(name, UNKNOWN, "%s did not answer" % conf.name, remedy) for name in ("pueue", "pueued", "build group")]
+    m, remedy = inv.machine(conf.name), "wk machine setup %s" % conf.name
+    pueue = Pueue(inv, m)
+    installed = all(m.exists("%s/%s" % (pueue.bin, tool)) for tool in ("pueue", "pueued"))
+    r = m.run(pueue.argv("status", "--json"))
     rows = [DoctorRow("pueue", OK, VERSION) if installed else DoctorRow("pueue", MISSING, "%s is not in %s" % (VERSION, pueue.bin), remedy)]
     if not r.ok:
         return rows + [DoctorRow("pueued", MISSING, "the daemon does not answer", remedy),

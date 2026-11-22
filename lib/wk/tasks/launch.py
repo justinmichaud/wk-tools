@@ -1,7 +1,5 @@
-"""What `wk build` and `wk test` share: finding the workspace on this server, choosing its preset, and starting a
-sized, guarded task and reporting how it ended."""
-
-import json
+"""What `wk build`, `wk run` and `wk test` share: choosing the workspace's preset, and starting a sized, guarded task
+and reporting how it ended."""
 
 from wk import webkit
 from wk.core import seams
@@ -9,21 +7,9 @@ from wk.core.act import die, info
 from wk.core.errors import STALLED
 from wk.tasks import guard, sizing
 
-
-def workspace(inv, name):
-    """The ready Workspace called `name` on this server."""
-    here = inv.fleet.hostname
-    r = inv.here.run(["wk", "ls", "--json"])
-    try:
-        rows = json.loads(r.out)["workspaces"]
-    except ValueError:
-        die("cannot list the workspaces on %s: `wk ls --json` printed %s" % (here, r.out.strip()))
-    found = [seams.Workspace(server=here, **row) for row in rows if row["name"] == name]
-    if not found:
-        die("no workspace named %s on %s: `wk ls` lists them, `wk new %s` makes it" % (name, here, name))
-    if found[0].state != seams.READY:
-        die("workspace %s is %s, not ready: `wk rm %s` then `wk new %s` remakes it" % (name, found[0].state, name, name))
-    return found[0]
+def allowed(argv):
+    """`argv`, an `env` line, with WK_BUILD set: without it the build-tool shims on an agent's PATH refuse (lib/wk/agent/shim.sh)."""
+    return argv[:1] + ["WK_BUILD=1"] + argv[1:]
 
 
 def builds(tasks, ws):
@@ -52,7 +38,8 @@ def start(inv, ws, preset, what, group, detach, line):
     guarded = ["python3", "-I", path, str(budget), "1" if ws.driver == "container" else "0"]
     label = "%s:%s:%s" % (ws.name, what, preset.name)
     info("%s: %d jobs at %d MB each, a %d MB budget%s" % (label, jobs, mb, budget, ", niced: %s is borrowed" % here.name if borrowed else ""))
-    id = tasks.add(driver.exec_argv(ws, guarded + (sizing.POLITE if borrowed else []) + line(jobs)), label, group=group)
+    argv = guarded + (sizing.POLITE if borrowed else []) + allowed(line(jobs))
+    id = tasks.add(driver.exec_argv(ws, argv, task=True), label, group=group)
     if id is None:
         return 0
     if detach:

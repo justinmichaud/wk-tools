@@ -155,7 +155,7 @@ class TestConfig(unittest.TestCase):
 
     def test_the_agents_instructions_name_the_wk_commands_and_forbid_a_push(self):
         text = install.source("CLAUDE.md")
-        for said in ("wk build $WK_WORKSPACE <preset>", "wk run $WK_WORKSPACE -- <args>", "wk test $WK_WORKSPACE <args>",
+        for said in ("wk build $WK_WORKSPACE <preset>", "wk run $WK_WORKSPACE -- <args>", "wk test $WK_WORKSPACE -- <tests>",
                      "wk status $WK_WORKSPACE", "Commit freely", "You cannot push, and must not try.", "The network is not restricted."):
             self.assertIn(said, text)
 

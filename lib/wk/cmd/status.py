@@ -30,7 +30,7 @@ def local(inv, ws):
     """(this server's rows, the servers that did not answer: none)."""
     tasks = inv.tasks(inv.here)
     found = tasks.status()
-    rows = status.rows(found if ws is None else status.of(found, ws), tasks.quiet, inv.clock.now())
+    rows = status.rows([t for t in found if ws in (None, t.ws)], tasks.quiet, inv.clock.now())
     return [dict(row, server=inv.fleet.hostname) for row in rows], []
 
 
@@ -55,7 +55,7 @@ def main(args, inv):
     read = (lambda: fleet(inv)) if client else (lambda: local(inv, args.ws))
     if args.log or args.follow:
         tasks = inv.tasks(inv.here)
-        mine = status.of(tasks.status(), args.ws)
+        mine = [t for t in tasks.status() if t.ws == args.ws]
         if not mine:
             die("%s has run no task: `wk build %s <preset>` starts one" % (args.ws, args.ws))
         if args.follow:

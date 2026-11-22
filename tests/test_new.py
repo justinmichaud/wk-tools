@@ -122,15 +122,21 @@ class TestNewOnTheClient(unittest.TestCase):
         r = self.w.wk("new", "x", "--on", "lin")
         self.assertEqual((r.code, r.effects), (0, WIPE + MAKE))
 
-    def test_a_server_that_does_not_answer_is_warned_about_and_not_counted_as_holding_nothing(self):
+    def test_while_a_server_does_not_answer_no_name_can_be_shown_free_so_it_is_refused(self):
         self.w.machines["mac"].down = True
         r = self.w.wk("new", "x", "--on", "lin")
-        self.assertEqual((r.code, r.effects), (0, MAKE))
-        self.assertIn("warning: mac did not answer: whether it holds a workspace named x is unknown\n", r.err)
+        self.assertEqual((r.code, r.effects, r.err), (4, [], "error: mac did not answer, so a workspace named x cannot be shown to be on no server\n"
+                                                             "    check `tailscale status`\n    --force crosses this\n"))
 
-    def test_the_chosen_server_not_answering_needs_a_person(self):
+    def test_force_makes_it_while_another_server_does_not_answer_and_says_so_again_at_exit(self):
+        self.w.machines["mac"].down = True
+        r = self.w.wk("new", "x", "--on", "lin", "--force")
+        self.assertEqual((r.code, r.effects), (0, MAKE))
+        self.assertTrue(r.err.splitlines()[-2].startswith("warning: this command was forced past: mac did not answer, so"), r.err)
+
+    def test_the_chosen_server_not_answering_cannot_be_forced(self):
         self.w.machines["lin"].down = True
-        r = self.w.wk("new", "x", "--on", "lin")
+        r = self.w.wk("new", "x", "--on", "lin", "--force")
         self.assertEqual((r.code, r.effects), (4, []))
         self.assertIn("error: cannot reach lin", r.err)
 

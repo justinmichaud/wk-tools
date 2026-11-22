@@ -1,9 +1,15 @@
-"""The build presets and the Tools/Scripts command lines, each run from the checkout. WebKit is named here and nowhere else."""
+"""The project's names (project.json), the build presets and the Tools/Scripts command lines, each run from the
+checkout. WebKit is named here and nowhere else."""
 
 import dataclasses
+import json
+import os
 import re
 
 from wk.core.act import die
+
+with open(os.path.join(os.path.dirname(__file__), "project.json")) as _f:
+    PROJECT = json.load(_f)
 
 CMAKE, XCODE = "cmake", "xcode"
 LINUX, MAC = ("linux", "borrowed"), ("mac",)

@@ -3,7 +3,7 @@
 self=${0##*/}
 if [ -n "${WK_AGENT:-}" ] && [ -z "${WK_BUILD:-}" ]; then
     echo "$self: refused: an agent builds and tests through wk, which sizes the job count to this machine." >&2
-    echo "    use: wk build <ws> <preset>  |  wk test <ws> <args>  |  wk run <ws> -- <args>" >&2
+    echo "    use: wk build <ws> <preset>  |  wk test <ws> -- <args>  |  wk run <ws> -- <args>" >&2
     exit 1
 fi
 rest=$PATH:
