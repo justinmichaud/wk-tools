@@ -18,8 +18,8 @@ from wk.core.machine import Result
 from wk.creds import injector
 from wk.webkit import PROJECT
 
-CONFS = {"desk": "kind=client\nlitellm_url=https://llm.example/v1\ndefault_server=lin", "lin": "kind=linux\nrole=credential\ninjector_port=3129",
-         "mac": "kind=mac\ncmake=/opt/cmake", "box": "kind=borrowed"}
+CONFS = {"desk": "kind=client\nlitellm_url=https://llm.example/v1\ndefault_server=lin", "lin": "kind=linux\nuser=jm",
+         "mac": "kind=mac\ncmake=/opt/cmake", "box": "kind=borrowed", "vault": "kind=credential\ninjector_port=3129"}
 PLAYBOOK = ["ansible-playbook", "-i", ROOT + "/ansible/inventory.py"]
 SITE = [ROOT + "/ansible/site.yml"]
 ROLES = ["agents", "borrowed-claude", "credentials", "injector", "mirror", "openbao", "pueue", "sdk", "wk"]
@@ -43,20 +43,21 @@ class TestInventory(unittest.TestCase):
     def setUp(self):
         self.inventory = json.loads(make().wk("machine", "inventory").out)
 
-    def test_there_is_a_group_per_kind_and_one_for_the_credential_server_and_the_client_is_no_host(self):
+    def test_there_is_a_group_per_kind_and_the_client_is_no_host(self):
         self.assertEqual({name: group["hosts"] for name, group in self.inventory.items() if "hosts" in group},
-                         {"linux": ["lin"], "mac": ["mac"], "borrowed": ["box"], "credential": ["lin"]})
+                         {"linux": ["lin"], "mac": ["mac"], "borrowed": ["box"], "credential": ["vault"]})
 
-    def test_a_servers_kind_role_and_literals_are_its_variables(self):
+    def test_a_machines_kind_and_literals_are_its_variables_and_its_user_is_ansibles_login(self):
         self.assertEqual(self.inventory["_meta"]["hostvars"], {
-            "lin": {"wk_kind": "linux", "wk_role": "credential", "wk_injector_port": "3129"},
-            "mac": {"wk_kind": "mac", "wk_role": "", "wk_cmake": "/opt/cmake"},
-            "box": {"wk_kind": "borrowed", "wk_role": ""}})
+            "lin": {"wk_kind": "linux", "wk_user": "jm", "ansible_user": "jm"},
+            "mac": {"wk_kind": "mac", "wk_cmake": "/opt/cmake"},
+            "box": {"wk_kind": "borrowed"},
+            "vault": {"wk_kind": "credential", "wk_injector_port": "3129"}})
 
     def test_every_host_gets_the_clients_literals_the_commit_the_store_and_the_project(self):
         self.assertEqual(self.inventory["all"]["vars"], {
-            "wk_kind": "client", "wk_role": "", "wk_litellm_url": "https://llm.example/v1", "wk_default_server": "lin",
-            "wk_root": ROOT, "wk_commit": SHA, "wk_project": PROJECT, "wk_credential_server": "lin", "wk_bao_addr": "http://lin:8200",
+            "wk_kind": "client", "wk_litellm_url": "https://llm.example/v1", "wk_default_server": "lin",
+            "wk_root": ROOT, "wk_commit": SHA, "wk_project": PROJECT, "wk_credential_server": "vault", "wk_bao_addr": "http://vault:8200",
             "wk_claude_placeholder": json.loads(injector.placeholder()),
             "ansible_ssh_common_args": "-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"})
 
@@ -68,7 +69,7 @@ class TestInventory(unittest.TestCase):
     def test_a_fleet_with_no_credential_server_is_refused_naming_the_remedy(self):
         w = World(confs={"desk": "kind=client", "lin": "kind=linux"})
         checkout(w.machines["desk"])
-        self.assertEqual(w.wk("machine", "inventory").err, "error: no credential server: set role=credential in one machines/<name>.conf\n")
+        self.assertEqual(w.wk("machine", "inventory").err, "error: no credential server: set kind=credential in one machines/<name>.conf\n")
 
 
 class TestMachineSetup(unittest.TestCase):
@@ -76,6 +77,7 @@ class TestMachineSetup(unittest.TestCase):
         self.w = make()
 
     def test_it_is_one_ansible_playbook_limited_to_the_server_whose_exit_code_it_returns(self):
+        self.assertEqual(played(self.w.wk("machine", "setup", "vault"))[1], PLAYBOOK + ["--limit", "vault"] + SITE)
         r = self.w.wk("machine", "setup", "lin")
         self.assertEqual((r.code, played(r)), (0, [["ansible-playbook", "--version"], PLAYBOOK + ["--limit", "lin"] + SITE]))
         self.assertEqual(r.effects, ["[desk] " + " ".join(PLAYBOOK + ["--limit", "lin"] + SITE)])
@@ -124,8 +126,8 @@ class TestMachineSetup(unittest.TestCase):
                          (1, "error: %s has no commit to give a machine: run wk from a clone of its repository\n" % ROOT, []))
 
     def test_the_client_and_an_unknown_machine_are_refused(self):
-        self.assertEqual(self.w.wk("machine", "setup", "desk").err, "error: desk is the client, which holds no workspace\n    servers: box, lin, mac\n")
-        self.assertEqual(self.w.wk("machine", "setup", "nope").err, "error: no machine named nope: machines/ has box, desk, lin, mac\n")
+        self.assertEqual(self.w.wk("machine", "setup", "desk").err, "error: desk is the client, and setup converges a server: `wk doctor` reports what the client needs\n")
+        self.assertEqual(self.w.wk("machine", "setup", "nope").err, "error: no machine named nope: machines/ has box, desk, lin, mac, vault\n")
 
 
 class TestKeySync(unittest.TestCase):
@@ -139,9 +141,10 @@ class TestKeySync(unittest.TestCase):
     def test_a_dry_run_is_check_mode(self):
         self.assertEqual(played(self.w.wk("key", "sync", "mac", "-n"))[1], PLAYBOOK + ["--limit", "mac", "--tags", "credentials", "--check", "--diff"] + SITE)
 
-    def test_the_client_is_no_server_to_deliver_to(self):
-        r = self.w.wk("key", "sync", "desk")
-        self.assertEqual((r.code, r.calls), (1, []))
+    def test_the_client_and_the_credential_server_are_delivered_nothing(self):
+        for name in ("desk", "vault"):
+            r = self.w.wk("key", "sync", name)
+            self.assertEqual((r.code, r.calls), (1, []))
 
 
 class TestThePlaybook(unittest.TestCase):
@@ -179,7 +182,7 @@ class TestTheInventoryScript(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.machines = tmp.name
-        for name, text in (("srv-a", "kind=linux\nrole=credential"), ("srv-b", "kind=borrowed"), (self.host, "kind=client")):
+        for name, text in (("srv-a", "kind=credential"), ("srv-b", "kind=borrowed"), (self.host, "kind=client")):
             with open(os.path.join(self.machines, name + ".conf"), "w") as f:
                 f.write(text + "\n")
 

@@ -29,6 +29,8 @@ def node(m):
 
 
 def doctor(inv, conf, ws):
+    if not conf.holds_workspaces:
+        return []
     m, fix = inv.machine(conf.name), "wk machine setup %s" % conf.name
     if ws:
         verdict, why, _ = Session(inv, conf, ws, {}).measure()

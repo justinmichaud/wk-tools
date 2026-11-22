@@ -24,7 +24,7 @@ SRC, OUT = WS + "/src", WS + "/build"
 MIRROR = HOME + "/git/WebKit.git"
 SECRETS = HOME + "/secrets"
 PUEUE = "%s/cache/pueue-4.0.5/pueue --config %s/pueue/pueue.yml" % (HOME, HOME)
-IMAGE = "ghcr.io/igalia/wkdev-sdk:latest"
+IMAGE = "ghcr.io/igalia/wkdev-sdk:2.55-v5-94a7493"
 SEEN = "HOME=/home/u\0USER=u\0PATH=/usr/bin:/bin\0TERM=dumb\0SSH_AUTH_SOCK=/tmp/agent\0GH_TOKEN=leaked\0"
 ANSWERS = {("GET", "http://vault:3128/"): (200, b"wk injector\nlogin held\n"),
            ("GET", "http://vault:8200/v1/sys/seal-status"): (200, {"initialized": True, "sealed": False})}
@@ -92,8 +92,9 @@ def world():
     provision.checkout(w.machines["desk"])
     provision.client(w.machines["desk"])
     w.machines["desk"].on(("ansible-playbook", "-i"), "")
-    for name in ("lin", "mac", "box", "vault"):
+    for name in ("lin", "mac", "box"):
         machine(w, name)
+    w.machines["vault"].on(("true",), "")
     w.machines["vault"].files[HOME + "/cache/openbao-2.7.3/bao"] = ""
     w.secrets.values.update({"github-user": "me", "github-token": TOKEN, "bugzilla-user": "me@example.test", "bugzilla-password": "pw",
                              "litellm-key": "sk-1", "claude-login": login(), "deploy-key/Me/WebKit": private_key()})
@@ -101,17 +102,15 @@ def world():
 
 
 PODMAN, PLAIN = ["podman", "exec", "--interactive", "--workdir", SRC, "wk-x"], ["sh", "-c", 'cd "$0" && exec "$@"', SRC]
-EXEC = {"lin": PODMAN, "vault": PODMAN, "mac": PLAIN, "box": PLAIN}
-EXEC_TTY = dict(EXEC, **{name: PODMAN[:3] + ["--tty"] + PODMAN[3:] for name in ("lin", "vault")})
+EXEC = {"lin": PODMAN, "mac": PLAIN, "box": PLAIN}
+EXEC_TTY = dict(EXEC, lin=PODMAN[:3] + ["--tty"] + PODMAN[3:])
 RUN = ("[%s] podman run --detach --replace --pull=never --name wk-x --init --userns=keep-id --uts=host --pids-limit=-1 "
        "--security-opt seccomp=unconfined --volume /home/u:/home/u --volume {h}:{h} --volume {m}:{m}:ro --env HOME=/home/u "
        "--env WK_WORKSPACE=x --workdir {s} {i} sleep infinity").format(h=HOME, m=MIRROR, s=SRC, i=IMAGE)
 SKIP = ["--dangerously-skip-permissions"]
-MODE = {"lin": SKIP, "vault": SKIP, "mac": SKIP, "box": ["--permission-mode", "auto"]}
-LINUX_BUILD = ["24576", "1", "env", "WK_BUILD=1", "CC=clang"]
-BUILD = {"lin": LINUX_BUILD, "vault": LINUX_BUILD, "mac": ["30720", "0", "env", "WK_BUILD=1", "WEBKIT_OUTPUTDIR=" + OUT],
+MODE = {"lin": SKIP, "mac": SKIP, "box": ["--permission-mode", "auto"]}
+BUILD = {"lin": ["24576", "1", "env", "WK_BUILD=1", "CC=clang"], "mac": ["30720", "0", "env", "WK_BUILD=1", "WEBKIT_OUTPUTDIR=" + OUT],
          "box": ["12288", "0", "nice", "-n", "19", "ionice", "-c", "3", "env", "WK_BUILD=1", "CC=clang"]}
-HIDDEN = {"lin": [SECRETS], "mac": [SECRETS], "box": [SECRETS], "vault": [SECRETS, HOME + "/injector", HOME + "/openbao"]}
 
 
 class EndToEnd(unittest.TestCase):
@@ -148,7 +147,7 @@ class EndToEnd(unittest.TestCase):
     def agent(self, w, name, env=CLAUDE_ENV):
         """`wk ai claude x`: measured, then started under the kind's wrapper with the injector's environment."""
         run = self.ok(w.wk("ai", "claude", "x"))
-        start = EXEC_TTY[name] + wrap(w.confs[name].kind, [CLAUDE] + MODE[name] + ["--remote-control", "x"], HIDDEN[name], env)
+        start = EXEC_TTY[name] + wrap(w.confs[name].kind, [CLAUDE] + MODE[name] + ["--remote-control", "x"], [SECRETS], env)
         self.assertEqual(run.effects, ["[%s] write /home/u/.claude.json" % name, "[%s] %s" % (name, shlex.join(start))])
         for hidden in ("GH_TOKEN", "GITHUB_COM_TOKEN", "SSH_AUTH_SOCK", "leaked"):
             self.assertNotIn(hidden, run.effects[-1])
@@ -200,8 +199,11 @@ class TestYourServers(EndToEnd):
     def test_a_mac_server_from_provisioned_to_a_build_and_an_agent_in_its_checkout_and_back(self):
         self.journey("mac", "a Seatbelt profile", [])
 
-    def test_the_credential_server_holds_workspaces_too_and_hides_the_injector_and_the_store_from_its_agents(self):
-        self.journey("vault", "bwrap", ["[vault] podman rm --force --ignore wk-x"])
+    def test_the_credential_server_holds_no_workspace_and_is_asked_only_for_the_injector_and_the_store(self):
+        w = world()
+        self.assertIn("error: vault holds no workspace: it is the credential server", self.ok(w.wk("new", "x", "--on", "vault"), 1).err)
+        self.assertIn("vault\n  ok       reachable\n  ok       injector       it holds the claude.ai login\n"
+                      "  ok       openbao        HTTP 200, initialized True, sealed False\n", self.ok(w.wk("doctor")).out)
 
     def test_wk_typed_inside_the_container_queues_a_build_the_servers_daemon_starts(self):
         w = world()

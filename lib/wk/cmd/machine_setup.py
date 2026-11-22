@@ -15,7 +15,9 @@ COMMAND = Command(where="client", takes=("server",), opts=(Opt("--stage", "run t
 
 
 def main(args, inv):
-    conf = inv.fleet.server(args.server)
+    conf = inv.fleet.get(args.server)
+    if conf.kind == "client":
+        die("%s is the client, and setup converges a server: `wk doctor` reports what the client needs" % conf.name)
     roles = ansible.roles(inv)
     if args.stage not in [None] + roles:
         die("no stage named %s: the stages are %s" % (args.stage, ", ".join(roles)))

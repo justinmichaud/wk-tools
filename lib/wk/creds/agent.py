@@ -1,5 +1,5 @@
-"""What an agent session takes from the credentials lane: the environment that points it at the injector, the forward
-that brings the injector to a borrowed box, and the directories the wrapper hides."""
+"""What an agent session takes from the credentials lane: the environment that points it at the injector, and the
+forward that brings the injector to a borrowed box."""
 
 from wk.core import route
 from wk.core.act import die
@@ -34,8 +34,3 @@ def agent_env(inv):
     return {"HTTPS_PROXY": "http://" + at, "https_proxy": "http://" + at, "NODE_EXTRA_CA_CERTS": "%s/%s" % (inv.wk_home, CA),
             "CLAUDE_SECURESTORAGE_CONFIG_DIR": "%s/%s" % (inv.wk_home, LOGIN_DIR)}
 
-
-def hidden(conf, wk_home):
-    """The delivered credentials; on the credential server also the injector's directory (the real login) and
-    OpenBao's (the store and its unseal key)."""
-    return [wk_home + "/" + name for name in ("secrets",) + (("injector", "openbao") if conf.role else ())]

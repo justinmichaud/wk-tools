@@ -45,46 +45,41 @@ class TestDoctor(unittest.TestCase):
                                                           "%s/injector-ca.pem" % (HOME, HOME), "wk machine setup box")])
         self.assertEqual(self.w.machines["box"].calls[-1].argv, ("ls", "-ld") + tuple(SESSION))
 
-    def test_the_credential_server_also_answers_for_the_injector_and_the_store(self):
+    def test_the_credential_server_answers_for_the_injector_and_the_store_and_is_delivered_nothing(self):
         fix = "wk machine setup vault"
-        self.assertEqual(self.rows("vault", DELIVERED, {INJECTOR: HELD, STORE: UNSEALED})[1:],
+        self.assertEqual(self.rows("vault", {}, {INJECTOR: HELD, STORE: UNSEALED}),
                          [DoctorRow("injector", OK, "it holds the claude.ai login", fix),
                           DoctorRow("openbao", OK, "HTTP 200, initialized True, sealed False", fix)])
 
     def test_an_injector_without_a_login_or_something_else_at_its_port_is_missing(self):
         for body, detail in ((b"wk injector\nno login\n", "no login: `wk key set claude-login`, then the fix below"),
                              (b"<html>nginx</html>", "something else answers there"), (b"", "something else answers there")):
-            self.assertEqual(self.rows("vault", DELIVERED, {INJECTOR: (200, body), STORE: UNSEALED})[1],
+            self.assertEqual(self.rows("vault", {}, {INJECTOR: (200, body), STORE: UNSEALED})[0],
                              DoctorRow("injector", MISSING, detail, "wk machine setup vault"))
 
     def test_a_sealed_or_uninitialised_store_or_one_that_answers_an_error_is_missing(self):
         for answer, detail in (((200, {"initialized": True, "sealed": True}), "HTTP 200, initialized True, sealed True"),
                                ((200, {"initialized": False, "sealed": True}), "HTTP 200, initialized False, sealed True"),
                                ((503, b"busy"), "HTTP 503, initialized None, sealed None")):
-            self.assertEqual(self.rows("vault", DELIVERED, {INJECTOR: HELD, STORE: answer})[2],
+            self.assertEqual(self.rows("vault", {}, {INJECTOR: HELD, STORE: answer})[1],
                              DoctorRow("openbao", MISSING, detail, "wk machine setup vault"))
 
     def test_a_service_that_does_not_answer_is_unknown_never_missing(self):
-        rows = self.rows("vault", DELIVERED, {INJECTOR: net.NoAnswer("timed out"), STORE: net.NoAnswer("refused")})
-        self.assertEqual([(r.status, r.detail) for r in rows[1:]], [(UNKNOWN, "http://vault:3128/ did not answer (timed out)"),
+        rows = self.rows("vault", {}, {INJECTOR: net.NoAnswer("timed out"), STORE: net.NoAnswer("refused")})
+        self.assertEqual([(r.status, r.detail) for r in rows], [(UNKNOWN, "http://vault:3128/ did not answer (timed out)"),
                                                                     (UNKNOWN, "http://vault:8200/v1/sys/seal-status did not answer (refused)")])
 
     def test_a_workspace_has_no_row_of_its_own(self):
         self.assertEqual(hooks.doctor(self.inv, self.w.confs["lin"], self.w.workspace("x")), [])
 
-    def test_the_pinned_openbao_is_kept_by_gc_on_the_credential_server_alone(self):
-        self.assertEqual([hooks.pins(self.inv, self.w.confs[name]) for name in ("vault", "lin")], [["openbao-2.7.3"], []])
+    def test_the_pinned_openbao_is_kept_by_gc(self):
+        self.assertEqual(hooks.pins(self.inv, self.w.confs["vault"]), ["openbao-2.7.3"])
 
 
 class TestWhatASessionTakes(unittest.TestCase):
-    def test_the_secrets_are_hidden_everywhere_and_on_the_credential_server_the_injector_and_the_store_too(self):
-        w = World()
-        self.assertEqual([creds.hidden(w.confs[name], "/w") for name in ("lin", "mac", "box", "vault")],
-                         [["/w/secrets"]] * 3 + [["/w/secrets", "/w/injector", "/w/openbao"]])
-
     def test_only_a_borrowed_box_is_brought_the_injector_at_the_credential_servers_port(self):
         w = World(confs=dict(CONFS, vault=CONFS["vault"] + "\ninjector_port=9000"))
-        self.assertEqual([creds.forward(inv(w), w.confs[name]) for name in ("lin", "mac", "box", "vault")], [None, None, "vault:9000", None])
+        self.assertEqual([creds.forward(inv(w), w.confs[name]) for name in ("lin", "mac", "box")], [None, None, "vault:9000"])
 
     def test_on_a_server_of_the_owners_the_session_is_pointed_at_the_injector_itself(self):
         w = World()

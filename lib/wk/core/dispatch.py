@@ -104,5 +104,5 @@ def entry(root):
     import wk.cmd
     env = os.environ
     fleet = Fleet(lambda: load(env.get("WK_MACHINES_DIR") or os.path.join(root, "machines")),
-                  socket.gethostname().split(".")[0].lower(), Ssh, Local())
+                  socket.gethostname().split(".")[0].lower(), lambda name: Ssh(name, fleet.get(name).get("user")), Local())
     sys.exit(main(sys.argv[1:], Inv(root, env, fleet, Clock(), sys.stdin, discover(wk.cmd))))

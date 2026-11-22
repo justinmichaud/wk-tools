@@ -11,7 +11,7 @@ def pins(inv, conf):
 
 
 def doctor(inv, conf, ws):
-    if ws is not None:
+    if ws is not None or not conf.holds_workspaces:
         return []
     m, remedy = inv.machine(conf.name), "wk machine setup %s" % conf.name
     pueue = Pueue(inv, m)

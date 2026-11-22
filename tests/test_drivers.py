@@ -12,7 +12,7 @@ from wk.workspace import driver
 from wk.workspace.drivers import ENTER, INSIDE, Container, Plain
 from wk.workspace.place import place
 
-IMAGE = "ghcr.io/igalia/wkdev-sdk:latest"
+IMAGE = "ghcr.io/igalia/wkdev-sdk:2.55-v5-94a7493"
 X = seams.Workspace("x", "lin", HOME + "/ws/x", "container", seams.READY)
 EXISTS = "[lin] podman container exists wk-x"
 STATUS = "[lin] podman container inspect --format '{{.State.Status}}' wk-x"

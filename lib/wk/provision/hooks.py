@@ -6,7 +6,7 @@ from wk.provision import rows
 
 
 def doctor(inv, conf, ws):
-    return [] if ws else rows.server(inv, conf)
+    return rows.server(inv, conf) if ws is None and conf.holds_workspaces else []
 
 
 def stale(m, path):

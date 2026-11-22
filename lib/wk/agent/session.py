@@ -50,7 +50,7 @@ class Session:
         self.m = inv.machine(conf.name)
         self.driver = inv.driver(ws.driver, self.m)
         self.home = inv.wk_home_on(self.m)
-        self.hidden = creds.hidden(conf, self.home)
+        self.hidden = [self.home + "/secrets"]
 
     def inside(self, argv):
         return self.m.run(self.driver.exec_argv(self.ws, argv), timeout=30)

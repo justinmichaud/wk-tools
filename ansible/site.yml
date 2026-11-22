@@ -33,6 +33,14 @@
       check_mode: false
       tags: [always]
 
+    # A user unit runs without a login session only while the user lingers.
+    - name: Let the user's units run without a login
+      ansible.builtin.command:
+        argv: [loginctl, enable-linger, "{{ ansible_facts['user_id'] }}"]
+        creates: "/var/lib/systemd/linger/{{ ansible_facts['user_id'] }}"
+      when: "'linux' in group_names or 'credential' in group_names"
+      tags: [pueue, openbao, injector]
+
   tasks:
     - name: Run the roles under the login shell's PATH
       environment:
@@ -41,16 +49,19 @@
         - name: Install wk itself
           ansible.builtin.import_role:
             name: wk
+          when: "'credential' not in group_names"
           tags: [wk]
 
         - name: Install pueue and keep its daemon running
           ansible.builtin.import_role:
             name: pueue
+          when: "'credential' not in group_names"
           tags: [pueue]
 
         - name: Make the mirror
           ansible.builtin.import_role:
             name: mirror
+          when: "'credential' not in group_names"
           tags: [mirror]
 
         - name: Prepare the SDK container's build environment
@@ -62,6 +73,7 @@
         - name: Install the agents
           ansible.builtin.import_role:
             name: agents
+          when: "'credential' not in group_names"
           tags: [agents]
 
         - name: Install OpenBao
@@ -79,7 +91,7 @@
         - name: Deliver the credentials
           ansible.builtin.import_role:
             name: credentials
-          when: "'borrowed' not in group_names"
+          when: "'linux' in group_names or 'mac' in group_names"
           tags: [credentials]
 
         - name: Deliver what a Claude session reads on a borrowed box

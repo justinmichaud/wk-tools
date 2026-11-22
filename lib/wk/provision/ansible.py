@@ -25,20 +25,21 @@ def head(inv):
 
 
 def host(conf):
-    """A conf as Ansible's variables: its kind, its role, and each of its literals, as wk_<key>."""
-    return dict({"wk_" + key: value for key, value in conf.values.items()}, wk_kind=conf.kind, wk_role=conf.role)
+    """A conf as Ansible's variables: its kind and each of its literals, as wk_<key>; its user= is also Ansible's login."""
+    return dict({"wk_" + key: value for key, value in conf.values.items()}, wk_kind=conf.kind,
+                **({"ansible_user": conf.get("user")} if conf.get("user") else {}))
 
 
 def inventory(inv):
-    """What Ansible's script inventory plugin reads: a group per kind, `credential`, and each server's variables. The
-    client's literals are every host's defaults."""
+    """What Ansible's script inventory plugin reads: a group per kind and each machine's variables. The client is no
+    host: its literals are every host's defaults."""
     fleet = inv.fleet
-    servers, vault = fleet.servers(), fleet.credential
-    groups = {kind: {"hosts": [c.name for c in servers if c.kind == kind]} for kind in ("linux", "mac", "borrowed")}
+    servers, vault = [c for c in fleet.machines() if c.kind != "client"], fleet.credential
+    groups = {kind: {"hosts": [c.name for c in servers if c.kind == kind]} for kind in ("linux", "mac", "borrowed", "credential")}
     shared = dict(host(fleet.here), wk_root=inv.root, wk_commit=head(inv), wk_project=PROJECT, wk_credential_server=vault.name,
                   wk_bao_addr=bao.address(inv), wk_claude_placeholder=json.loads(injector.placeholder()),
                   ansible_ssh_common_args=" ".join(ALIVE))
-    return dict(groups, credential={"hosts": [vault.name]}, all={"vars": shared}, _meta={"hostvars": {c.name: host(c) for c in servers}})
+    return dict(groups, all={"vars": shared}, _meta={"hostvars": {c.name: host(c) for c in servers}})
 
 
 def given(inv):

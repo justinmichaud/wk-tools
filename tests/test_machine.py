@@ -188,6 +188,9 @@ class TestSsh(OnDisk):
         self.m.run(["true"], forward=(20123, "vault:3128"))
         self.assertIn("-R\n127.0.0.1:20123:vault:3128\n", self.sent("argv"))
 
+    def test_a_conf_that_names_a_user_logs_in_as_that_user(self):
+        self.assertEqual(Ssh("srv", "jm").argv(["true"])[-2], "jm@srv")
+
     def test_an_interactive_run_asks_for_a_terminal(self):
         self.assertEqual(self.m.argv(["wk", "enter", "x"], tty=True)[-3:-1], ["-t", "srv"])
 

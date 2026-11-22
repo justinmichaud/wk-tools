@@ -4,5 +4,5 @@
   "branches": ["main"],
   "fork": "https://github.com/justinmichaud/WebKit.git",
   "bugzilla": "https://bugs.webkit.org",
-  "sdk_image": "ghcr.io/igalia/wkdev-sdk:latest"
+  "sdk_image": "ghcr.io/igalia/wkdev-sdk:2.55-v5-94a7493"
 }

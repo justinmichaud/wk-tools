@@ -7,7 +7,7 @@ from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
 from wk.core.machine import Result
 from wk.workspace import hooks as mine
 
-IMAGE = "ghcr.io/igalia/wkdev-sdk:latest"
+IMAGE = "ghcr.io/igalia/wkdev-sdk:2.55-v5-94a7493"
 USERMOD = "on lin: sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 u"
 
 

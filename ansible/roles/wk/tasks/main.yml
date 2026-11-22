@@ -65,11 +65,3 @@
     line: 'export PATH={{ (wk_home ~ "/bin") | quote }}:"$PATH"'
     create: true
     mode: "0644"
-
-# A user unit runs without a login session only while the user lingers.
-- name: Let the user's units run without a login
-  ansible.builtin.command:
-    argv: [loginctl, enable-linger, "{{ ansible_facts['user_id'] }}"]
-    creates: "/var/lib/systemd/linger/{{ ansible_facts['user_id'] }}"
-  when: "'linux' in group_names"
-  tags: [pueue, openbao, injector]

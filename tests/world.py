@@ -25,7 +25,7 @@ from wk.core.inv import Inv
 from wk.core.machine import Result
 
 CONFS = {"desk": "kind=client", "lin": "kind=linux", "mac": "kind=mac", "box": "kind=borrowed",
-         "vault": "kind=linux\nrole=credential"}
+         "vault": "kind=credential"}
 
 
 class Stdin(io.StringIO):

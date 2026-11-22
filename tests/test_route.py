@@ -21,7 +21,7 @@ class TestHandOver(unittest.TestCase):
 
     def test_every_server_is_asked_where_the_workspace_is_and_nothing_else_runs_on_the_client(self):
         r = self.w.wk("far", "x")
-        self.assertEqual(r.calls, ["[box] wk ls --json", "[lin] wk ls --json", "[mac] wk ls --json", "[vault] wk ls --json", "[mac] wk far x",
+        self.assertEqual(r.calls, ["[box] wk ls --json", "[lin] wk ls --json", "[mac] wk ls --json", "[mac] wk far x",
                                    "[mac] write /far/x"])
 
     def test_global_flags_cross_as_environment_not_as_words(self):
@@ -43,9 +43,9 @@ class TestHandOver(unittest.TestCase):
         r = self.w.wk("far", "new", "--on", "lin")
         self.assertEqual(r.calls, ["[lin] wk far new --on lin", "[lin] write /far/new"])
 
-    def test_on_takes_the_credential_server_which_is_a_server_too_and_refuses_the_client(self):
-        self.assertEqual(self.w.wk("far", "new", "--on", "vault").effects, ["[vault] write /far/new"])
-        self.assertIn("error: desk is the client, which holds no workspace\n    servers: box, lin, mac, vault", self.w.wk("far", "--on", "desk").err)
+    def test_on_refuses_a_machine_that_holds_no_workspace(self):
+        self.assertIn("error: vault holds no workspace: it is the credential server\n    servers: box, lin, mac", self.w.wk("far", "--on", "vault").err)
+        self.assertIn("error: desk holds no workspace: it is the client", self.w.wk("far", "--on", "desk").err)
 
     def test_on_refuses_an_unknown_machine(self):
         self.assertEqual(self.w.wk("far", "--on", "nope").err, "error: no machine named nope: machines/ has box, desk, lin, mac, vault\n")

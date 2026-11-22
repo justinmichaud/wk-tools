@@ -31,7 +31,7 @@ def environment(m, conf):
 
 
 def doctor(inv, conf, ws):
-    if ws is not None:
+    if ws is not None or not conf.holds_workspaces:
         return []
     m = inv.machine(conf.name)
     home = place(inv, m)[1]
@@ -40,6 +40,8 @@ def doctor(inv, conf, ws):
 
 
 def gc(inv, conf):
+    if not conf.holds_workspaces:
+        return []
     m = inv.machine(conf.name)
     return [GcRow("workspace %s" % ws.name, "half-made on %s: no .ready, and no `wk new` is making it" % conf.name,
                   lambda ws=ws: lifecycle.wipe(inv, m, ws))

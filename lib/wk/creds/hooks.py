@@ -10,7 +10,7 @@ from wk.creds import agent, bao, injector, net
 
 
 def pins(inv, conf):
-    return ["openbao-" + VARS["wk_openbao_version"]] if conf.role else []
+    return ["openbao-" + VARS["wk_openbao_version"]]
 
 
 def delivered(conf, m, wk):
@@ -55,8 +55,7 @@ def doctor(inv, conf, ws):
     if ws is not None:
         return []
     m, remedy = inv.machine(conf.name), "wk machine setup %s" % conf.name
-    rows = [delivered(conf, m, inv.wk_home_on(m))]
-    if conf.role:
-        rows += [asked("injector", "http://%s/" % agent.injector(inv), remedy, holds),
-                 asked("openbao", bao.address(inv) + "/v1/sys/seal-status", remedy, unsealed)]
-    return rows
+    if conf.holds_workspaces:
+        return [delivered(conf, m, inv.wk_home_on(m))]
+    return [asked("injector", "http://%s/" % agent.injector(inv), remedy, holds),
+            asked("openbao", bao.address(inv) + "/v1/sys/seal-status", remedy, unsealed)]

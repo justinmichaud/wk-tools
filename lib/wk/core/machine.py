@@ -139,10 +139,10 @@ FORWARD = ["-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes"]
 
 
 class Ssh(Shell):
-    """A server, by its tailnet name."""
+    """A server, by its tailnet name; `user` is its conf's user=, the login there when it is not this one's."""
 
-    def __init__(self, name):
-        self.name = name
+    def __init__(self, name, user=None):
+        self.name, self.to = name, "%s@%s" % (user, name) if user else name
 
     def argv(self, argv, cwd=None, env=None, tty=False, forward=None):
         """`forward` is (port, "host:port"): 127.0.0.1:port on the server reaches host:port from this side."""
@@ -151,7 +151,7 @@ class Ssh(Shell):
             remote = "cd %s && %s" % (shlex.quote(cwd), remote)
         # sshd runs a command under a non-login shell, whose PATH lacks ~/.local/bin and Homebrew.
         carried = FORWARD + ["-R", "127.0.0.1:%d:%s" % forward] if forward else []
-        return ["ssh"] + carried + SSH + (["-t"] if tty else []) + [self.name, '"$SHELL" -lc ' + shlex.quote(remote)]
+        return ["ssh"] + carried + SSH + (["-t"] if tty else []) + [self.to, '"$SHELL" -lc ' + shlex.quote(remote)]
 
     def _run(self, argv, input=None, timeout=None, cwd=None, env=None, stream=False, tty=False, forward=None):
         r = local_run(self.argv(argv, cwd, env, tty, forward), input, timeout, stream=stream, tty=tty)

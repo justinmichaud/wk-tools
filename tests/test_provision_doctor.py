@@ -7,7 +7,7 @@ from tests.world import World
 from wk.core.errors import Unreachable
 from wk.core.machine import Result
 
-SMALL = {"desk": "kind=client", "lin": "kind=linux\nrole=credential", "mac": "kind=mac"}
+SMALL = {"desk": "kind=client", "lin": "kind=linux", "mac": "kind=mac", "vault": "kind=credential"}
 CLIENT = ("desk\n  ok       ssh            OpenSSH_9.6\n  ok       git            git version 2.43.0\n"
           "  ok       tailscale      100.64.0.1 desk\n  ok       ansible        ansible-playbook [core 2.19.3]\n"
           "  ok       bao            OpenBao v2.7.3\n  ok       store login    {\"data\": {\"policies\": [\"root\"]}}\n")
@@ -18,7 +18,7 @@ class Toy(unittest.TestCase):
         lanes(self, "tests.provision.toy")
         self.w = World(confs=SMALL)
         client(self.w.machines["desk"])
-        for name in ("lin", "mac"):
+        for name in ("lin", "mac", "vault"):
             self.w.machines[name].on(("true",), "")
         self.lin = self.w.machines["lin"]
 
@@ -30,7 +30,7 @@ class TestDoctor(Toy):
     def test_on_the_client_it_reports_the_client_then_each_server_as_a_group(self):
         self.lin.files["/rows/mirror"] = "ok|fetched today|wk sync"
         r = self.doctor()
-        self.assertEqual((r.code, r.out), (0, CLIENT + "lin\n  ok       reachable\n  ok       mirror         fetched today\nmac\n  ok       reachable\n"))
+        self.assertEqual((r.code, r.out), (0, CLIENT + "lin\n  ok       reachable\n  ok       mirror         fetched today\nmac\n  ok       reachable\nvault\n  ok       reachable\n"))
 
     def test_it_changes_nothing(self):
         self.assertEqual(self.doctor().effects, [])
@@ -106,7 +106,7 @@ class TestDoctorWorkspace(Toy):
         self.w.workspace("x", on="mac")
         self.w.workspace("y", on="lin")
         r = self.doctor("--all")
-        self.assertEqual((r.code, r.out), (0, CLIENT + "lin\n  ok       reachable\nmac\n  ok       reachable\n"
+        self.assertEqual((r.code, r.out), (0, CLIENT + "lin\n  ok       reachable\nmac\n  ok       reachable\nvault\n  ok       reachable\n"
                                               "y (workspace on lin)\n  ok       checkout       /home/u/wk/ws/y\n"
                                               "x (workspace on mac)\n  ok       checkout       /home/u/wk/ws/x\n"))
 
@@ -171,6 +171,7 @@ class TestServerRows(Own):
         provisioned(self.lin)
         client(self.w.machines["desk"])
         server(self.w.machines["mac"])
+        self.w.machines["vault"].down = True
         checkout(self.w.machines["desk"], sha="ab" * 20)
         r = self.w.wk("doctor")
         self.assertEqual(r.code, 1)
@@ -217,7 +218,7 @@ class TestClientRows(Own):
         super().setUp()
         self.desk = self.w.machines["desk"]
         client(self.desk)
-        for name in ("lin", "mac"):
+        for name in ("lin", "mac", "vault"):
             self.w.machines[name].down = True
 
     def rows(self):
@@ -226,9 +227,9 @@ class TestClientRows(Own):
 
     def test_the_store_is_asked_at_the_credential_servers_address_whether_this_login_holds(self):
         self.assertEqual(self.rows()["store login"][0], "ok")
-        self.assertEqual(self.desk.calls[-1].env, {"BAO_ADDR": "http://lin:8200"})
+        self.assertEqual(self.desk.calls[-1].env, {"BAO_ADDR": "http://vault:8200"})
         self.desk.on(("bao", "token", "lookup"), Result(2, "", "Error looking up token: permission denied\n"))
-        self.assertEqual(self.rows()["store login"], ("missing", "Error looking up token: permission denied", "BAO_ADDR=http://lin:8200 bao login"))
+        self.assertEqual(self.rows()["store login"], ("missing", "Error looking up token: permission denied", "BAO_ADDR=http://vault:8200 bao login"))
 
     def test_ansible_and_the_bao_cli_are_checked(self):
         self.desk.on(("ansible-playbook", "--version"), Result(127, "", "sh: ansible-playbook: command not found\n"))

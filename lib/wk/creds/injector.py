@@ -270,6 +270,8 @@ def pipe(a, b):
             other[s].sendall(data)
 
 
+# The key identifiers are stated: a strict verifier (Python 3.13 on) refuses a leaf without an authority key
+# identifier, and OpenSSL 4 no longer adds one by itself.
 CERT_CONF = """[req]
 distinguished_name = dn
 prompt = no
@@ -278,8 +280,11 @@ CN = %s
 [ca_ext]
 basicConstraints = critical,CA:true
 keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
 [leaf_ext]
 basicConstraints = critical,CA:false
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid
 keyUsage = critical,digitalSignature,keyEncipherment
 extendedKeyUsage = serverAuth
 subjectAltName = %s

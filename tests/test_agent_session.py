@@ -110,15 +110,6 @@ class TestStart(unittest.TestCase):
         handed = [c for c in w.machines["lin"].calls if c.argv[:2] == ("wk", "ai")][0]
         self.assertEqual((handed.forward, handed.env), (None, {}))
 
-    def test_on_the_credential_server_the_injectors_and_the_stores_directories_are_hidden_too(self):
-        confs = dict(CONFS, lin="kind=linux\nrole=credential", vault="kind=mac")
-        r = make(confs=confs).wk("ai", "pi", "x", on="lin")
-        hidden = [HOME + "/secrets", HOME + "/injector", HOME + "/openbao"]
-        self.assertEqual(r.calls[-1], "[lin] " + shlex.join(["fake-exec", "-t", "x", SRC] + wrap("linux", PI, hidden, ENV)))
-        self.assertEqual([c.split(" -- ")[1] for c in r.calls[2:5]], ["ls -A " + path for path in hidden])
-        for path in hidden:
-            self.assertIn("--tmpfs %s " % path, r.calls[-1])
-
     def test_the_words_after_the_dashes_go_to_the_agent_and_its_exit_code_comes_back(self):
         w = make()
         w.machines["lin"].on(("fake-exec", "-t"), Result(3))
