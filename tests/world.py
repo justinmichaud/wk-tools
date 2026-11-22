@@ -1,7 +1,7 @@
 """A World: fake machines, a fake clock and a fleet, into which a test types a command.
 
     w = World()                              # desk (client), lin (linux), mac, box (borrowed), vault (credential)
-    w.workspace("x", on="lin")               # `wk ls --json` on lin now lists x
+    w.workspace("x", on="lin")               # lin now holds x: its files, and its driver's part made
     r = w.wk("build", "x", "jsc-release")    # typed on the client; a hand-over really runs the command on the fake server
     r.code, r.out, r.err                     # exit code and the two streams
     r.calls                                  # every command and effect, in order: "[lin] git fetch"
@@ -16,7 +16,6 @@ World(here=, confs={name: conf text}, commands=[extra packages of command module
 import contextlib
 import dataclasses
 import io
-import json
 
 import wk.cmd
 from tests import ROOT
@@ -56,24 +55,26 @@ class World:
         self.commands = dict(dispatch.discover(wk.cmd))
         for package in commands:
             self.commands.update(dispatch.discover(package))
-        self.secrets, self.made, self.listed = fakes.FakeSecrets(self.journal), set(), {}
+        self.secrets, self.made = fakes.FakeSecrets(self.journal), set()
         self._tasks = {name: fakes.FakeTasks(machine, self.clock, self.journal) for name, machine in self.machines.items()}
         self.seams = {"driver": lambda inv, kind, machine: fakes.FakeDriver(kind, machine, self.journal, self.made),
                       "tasks": lambda inv, machine: self.tasks(machine.name), "secrets": lambda inv: self.secrets}
         self.seams.update(seams or {})
         for name, machine in self.machines.items():
             machine.on(("wk",), lambda call, name=name: self._far(name, call))
-            # TODO: the workspace lane's `wk ls` replaces this stub, and `workspace` then makes the files it reads.
-            self.listed[name] = []
-            machine.on(("wk", "ls", "--json"), lambda call, name=name: json.dumps({"workspaces": self.listed[name]}))
+            machine.on(("pgrep",), Result(1))       # no `wk new` is in flight
 
     def tasks(self, name):
         return self._tasks[name]
 
     def workspace(self, name, on="lin", state=seams.READY):
-        row = {"name": name, "driver": self.confs[on].driver, "state": state, "path": "/home/u/wk/ws/" + name}
-        self.listed[on].append(row)
-        return seams.Workspace(server=on, **row)
+        """The files of a ready workspace, or of a broken one: a checkout with no `.ready`."""
+        path = "/home/u/wk/ws/" + name
+        self.machines[on].files[path + "/src/.git/HEAD"] = "ref: refs/heads/main\n"
+        if state == seams.READY:
+            self.machines[on].files[path + "/.ready"] = ""
+            self.made.add((on, name))
+        return seams.Workspace(name, on, path, self.confs[on].driver, state)
 
     def state(self):
         return {"files": {n: dict(m.files) for n, m in self.machines.items()},
