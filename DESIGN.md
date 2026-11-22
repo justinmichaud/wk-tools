@@ -248,8 +248,11 @@ converges. A half-made workspace is wiped, never repaired.
   workspace is running, the others are unknown, a command for it runs
   directly, and a task is still a `podman exec`, because the server's pueue
   daemon starts it.
-- `wk enter <ws>` is a normal shell in the workspace with normal credentials:
-  a login shell, which in a container has first sourced `secrets/env.sh`.
+- `wk enter <ws>` is the person's door, with or without a terminal: a login
+  shell in the checkout that has first sourced `secrets/env.sh` where the
+  server holds one. `wk enter <ws> -- <command>` has that same shell run the
+  command. Both drivers use the one wrapper. A task and an agent session
+  never pass through it.
 - `wk rm <ws>` refuses under a queued or running task, asks, then removes
   container and directory. The `.ready` marker goes first.
 

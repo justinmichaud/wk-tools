@@ -157,8 +157,8 @@ class FakeDriver(seams.Driver):
     def exec_argv(self, ws, argv, cwd=None, tty=False, task=False):
         return ["fake-exec"] + ["-t"] * tty + [ws.name, cwd or ws.path + "/src"] + list(argv)
 
-    def enter_argv(self, ws):
-        return ["fake-enter", ws.name]
+    def enter_argv(self, ws, argv=(), tty=False):
+        return ["fake-enter"] + ["-t"] * tty + [ws.name] + list(argv)
 
 
 class FakeTasks(seams.Tasks):

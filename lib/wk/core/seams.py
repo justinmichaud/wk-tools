@@ -42,8 +42,9 @@ class Driver:
         `tty`. `task` says the server's task daemon will run it, not this process."""
         raise NotImplementedError
 
-    def enter_argv(self, ws):
-        """The argv of an interactive login shell in the workspace."""
+    def enter_argv(self, ws, argv=(), tty=False):
+        """The argv of the person's login shell in the checkout, with the delivered credentials where the server
+        holds any: it runs `argv`, or with none is interactive; on this terminal when `tty`."""
         raise NotImplementedError
 
 

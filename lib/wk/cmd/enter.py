@@ -1,9 +1,8 @@
 """Open a shell in a workspace, or run one command there.
 
-`wk enter <ws>` is a login shell in the checkout. `wk enter <ws> -- <command>` runs the command there and returns
-its exit code; it gets a terminal when wk has one. A container that is not running is started first."""
-
-import shlex
+`wk enter <ws>` is a login shell in the checkout, with the credentials delivered to the server: `git push`,
+`git-webkit` and `gh` work in it. `wk enter <ws> -- <command>` has that shell run the command and returns its exit
+code; it gets a terminal when wk has one. A container that is not running is started first."""
 
 from wk.core.act import die
 from wk.core.decl import Command
@@ -21,8 +20,4 @@ def main(args, inv):
         die("a shell needs a terminal and there is none: name a command, `wk enter %s -- <command>`" % ws.name, NEEDS_PERSON)
     if ws.state != READY:
         driver.create(ws)
-    if tty:
-        argv = driver.enter_argv(ws) + (["-c", shlex.join(args.tail)] if args.tail else [])
-    else:
-        argv = driver.exec_argv(ws, args.tail)
-    return inv.here.act(argv, stream=True, tty=tty).rc
+    return inv.here.act(driver.enter_argv(ws, args.tail, tty), stream=True, tty=tty).rc

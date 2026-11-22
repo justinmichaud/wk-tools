@@ -106,16 +106,19 @@ class TestContainer(unittest.TestCase):
         self.assertEqual(self.d.exec_argv(X, ["ls"], cwd=X.path + "/build")[3:5], ["--workdir", X.path + "/build"])
         self.assertEqual(self.d.exec_argv(X, ["claude"], tty=True)[:4], ["podman", "exec", "--interactive", "--tty"])
 
-    def test_a_shell_is_an_interactive_login_shell_in_the_checkout_that_has_sourced_the_delivered_environment(self):
-        self.assertEqual(self.d.enter_argv(X), ["podman", "exec", "--interactive", "--tty", "--workdir", X.path + "/src", "wk-x",
-                                                "/bin/bash", "-c", '. "$0" && exec /bin/bash -l "$@"', ENV_SH])
+    def test_the_persons_shell_is_the_one_wrapper_run_by_bash_in_the_container_on_the_terminal_when_there_is_one(self):
+        inside = ["env", "SHELL=/bin/bash", "sh", "-c", ENTER, X.path + "/src", ENV_SH]
+        self.assertEqual(self.d.enter_argv(X, tty=True), ["podman", "exec", "--interactive", "--tty", "--workdir", X.path + "/src", "wk-x"] + inside)
+        self.assertEqual(self.d.enter_argv(X, ["git", "push", "a b"]),
+                         ["podman", "exec", "--interactive", "--workdir", X.path + "/src", "wk-x"] + inside + ["-c", "git push 'a b'"])
 
-    def test_the_shell_line_really_sources_the_file_then_runs_what_follows(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with open(tmp + "/env.sh", "w") as f:
-                f.write("export WK_SOURCED=yes\n")
-            r = Local().run(["/bin/bash", "-c", ENTER, tmp + "/env.sh", "-c", 'echo "$WK_SOURCED"'])
-            self.assertEqual((r.rc, r.out), (0, "yes\n"))
+    def test_typed_inside_a_container_the_persons_shell_is_the_wrapper_with_no_podman(self):
+        self.m.files[INSIDE] = ""
+        self.assertEqual(self.d.enter_argv(X, ["true"])[4:], ["env", "SHELL=/bin/bash", "sh", "-c", ENTER, X.path + "/src", ENV_SH, "-c", "true"])
+
+    def test_a_task_or_a_plain_command_never_sources_the_delivered_environment(self):
+        for d in (self.d, Plain(HOME)):
+            self.assertNotIn("env.sh", " ".join(d.exec_argv(X, ["make"]) + d.exec_argv(X, ["make"], task=True)))
 
     def test_typed_inside_a_container_its_own_workspace_is_running_and_no_other_can_be_asked(self):
         self.m.files[INSIDE] = ""
@@ -148,14 +151,15 @@ class TestContainer(unittest.TestCase):
 
 class TestPlain(unittest.TestCase):
     def setUp(self):
-        self.d, self.ws = Plain(), seams.Workspace("x", "mac", HOME + "/ws/x", "plain", seams.READY)
+        self.d, self.ws = Plain(HOME), seams.Workspace("x", "mac", HOME + "/ws/x", "plain", seams.READY)
 
     def test_there_is_nothing_to_create_destroy_or_find_broken(self):
         self.assertEqual((self.d.create(self.ws), self.d.destroy(self.ws), self.d.state(self.ws)), (None, None, seams.READY))
 
-    def test_a_command_and_a_shell_start_in_the_checkout(self):
+    def test_a_command_starts_in_the_checkout_and_the_persons_shell_is_the_one_wrapper(self):
         self.assertEqual(self.d.exec_argv(self.ws, ["make"]), ["sh", "-c", 'cd "$0" && exec "$@"', HOME + "/ws/x/src", "make"])
-        self.assertEqual(self.d.enter_argv(self.ws), ["sh", "-c", 'cd "$0" && exec "$SHELL" -l "$@"', HOME + "/ws/x/src"])
+        self.assertEqual(self.d.enter_argv(self.ws, tty=True), ["sh", "-c", ENTER, HOME + "/ws/x/src", ENV_SH])
+        self.assertEqual(self.d.enter_argv(self.ws, ["echo", "a b"]), ["sh", "-c", ENTER, HOME + "/ws/x/src", ENV_SH, "-c", "echo 'a b'"])
 
     def test_the_argv_really_runs_there(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -164,5 +168,19 @@ class TestPlain(unittest.TestCase):
             ws = seams.Workspace("x", "mac", tmp, "plain", seams.READY)
             self.assertEqual(Local().run(self.d.exec_argv(ws, ["pwd"])).out, tmp + "/src\n")
             self.assertEqual(Local().run(self.d.exec_argv(ws, ["sh", "-c", "pwd; exit 3"], cwd=tmp + "/src/sub")).rc, 3)
-            r = Local().run(self.d.enter_argv(ws) + ["-c", "pwd"], env={"SHELL": "/bin/sh"})
-            self.assertEqual((r.rc, r.out), (0, tmp + "/src\n"))
+
+    def test_the_wrapper_really_sources_the_environment_where_there_is_one_and_runs_the_command_in_the_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = os.path.realpath(tmp)
+            os.makedirs(tmp + "/ws/x/src")
+            d, ws = Plain(tmp), seams.Workspace("x", "mac", tmp + "/ws/x", "plain", seams.READY)
+            said = ["sh", "-c", 'pwd; echo "${WK_SOURCED:-no} $1"; exit 3', "sh", "a b"]
+            r = Local().run(d.enter_argv(ws, said), env={"SHELL": "/bin/sh"})
+            self.assertEqual((r.rc, r.out), (3, tmp + "/ws/x/src\nno a b\n"))
+            os.makedirs(tmp + "/secrets")
+            with open(tmp + "/secrets/env.sh", "w") as f:
+                f.write("export WK_SOURCED=yes\n")
+            r = Local().run(d.enter_argv(ws, said), env={"SHELL": "/bin/sh"})
+            self.assertEqual((r.rc, r.out), (3, tmp + "/ws/x/src\nyes a b\n"))
+            r = Local().run(d.enter_argv(ws), env={"SHELL": "/bin/sh"}, input="echo $WK_SOURCED\n")
+            self.assertEqual((r.rc, r.out), (0, "yes\n"))

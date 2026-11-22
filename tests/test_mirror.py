@@ -73,7 +73,7 @@ class TestRealGit(unittest.TestCase):
 
         w = World(here="mac")
         fleet = Fleet(lambda: w.confs, "mac", None, self.m)
-        lifecycle.make(Inv("/", {"WK_HOME": self.home}, fleet, w.clock, None, {}, {"driver": lambda inv, kind, machine: Plain()}), "x")
+        lifecycle.make(Inv("/", {"WK_HOME": self.home}, fleet, w.clock, None, {}, {"driver": lambda inv, kind, machine: Plain(self.home)}), "x")
         src = self.home + "/ws/x/src"
         self.assertEqual(self.m.listdir(self.home + "/ws/x"), [".ready", "build", "src"])
         self.assertEqual(self.m.read(src + "/.git/objects/info/alternates"), self.store + "/objects\n")

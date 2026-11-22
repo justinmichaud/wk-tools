@@ -1,15 +1,23 @@
 """The two drivers: `container` (rootless podman and the SDK image) and `plain` (the checkout itself)."""
 
+import shlex
+
 from wk.core.act import die, must
 from wk.core.seams import ABSENT, BROKEN, READY, UNKNOWN, Driver
 from wk.workspace import mirror
 
 INSIDE = "/run/.containerenv"       # podman makes it in every container
-ENTER = '. "$0" && exec /bin/bash -l "$@"'
+ENTER = 'cd "$0" && if [ -r "$1" ]; then . "$1"; fi && shift && exec "$SHELL" -l "$@"'
 
 
 def direct(ws, argv, cwd):
     return ["sh", "-c", 'cd "$0" && exec "$@"', cwd or ws.path + "/src"] + list(argv)
+
+
+def entered(ws, home, argv):
+    """The person's door: a login shell in the checkout that has sourced the delivered environment where there is
+    one. It runs `argv`, or with none is interactive."""
+    return ["sh", "-c", ENTER, ws.path + "/src", home + "/secrets/env.sh"] + (["-c", shlex.join(argv)] if argv else [])
 
 
 class Container(Driver):
@@ -60,14 +68,18 @@ class Container(Driver):
             return direct(ws, argv, cwd)
         return ["podman", "exec", "--interactive"] + ["--tty"] * tty + ["--workdir", cwd or ws.path + "/src", "wk-" + ws.name] + list(argv)
 
-    def enter_argv(self, ws):
-        return self.exec_argv(ws, ["/bin/bash", "-c", ENTER, self.home + "/secrets/env.sh"], tty=True)
+    def enter_argv(self, ws, argv=(), tty=False):
+        # podman exec sets no SHELL.
+        return self.exec_argv(ws, ["env", "SHELL=/bin/bash"] + entered(ws, self.home, argv), tty=tty)
 
 
 class Plain(Driver):
     """The checkout is the whole workspace: there is nothing to create, destroy or find broken."""
 
     kind = "plain"
+
+    def __init__(self, home):
+        self.home = home
 
     def create(self, ws):
         pass
@@ -81,5 +93,5 @@ class Plain(Driver):
     def exec_argv(self, ws, argv, cwd=None, tty=False, task=False):
         return direct(ws, argv, cwd)
 
-    def enter_argv(self, ws):
-        return ["sh", "-c", 'cd "$0" && exec "$SHELL" -l "$@"', ws.path + "/src"]
+    def enter_argv(self, ws, argv=(), tty=False):
+        return entered(ws, self.home, argv)
