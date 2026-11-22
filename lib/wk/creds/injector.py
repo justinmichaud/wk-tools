@@ -169,10 +169,18 @@ class Holder:
         return oauth
 
     def state(self):
+        """One line: "login held", or why no request can be given the login."""
         try:
-            self.read()
+            oauth = self.read()
         except LoginError as e:
             return str(e)
+        if fresh(oauth, self.clock()):
+            return "login held"
+        if self.failed and self.failed[0] == oauth["refreshToken"]:
+            return self.failed[2]
+        gone = oauth.get("refreshTokenExpiresAt")
+        if isinstance(gone, (int, float)) and gone <= self.clock() * 1000:
+            return "the claude.ai login here has expired, its refresh token too: log in to Claude again, `wk key set claude-login`, then `wk machine setup` this machine"
         return "login held"
 
 

@@ -183,6 +183,24 @@ class TestHolder(Held):
         self.hold(login())
         self.assertEqual(self.holder.state(), "login held")
 
+    def test_a_login_due_a_refresh_is_held_until_the_refresh_is_refused_and_then_its_state_is_the_refusal(self):
+        self.hold(login(0))
+        self.assertEqual(self.holder.state(), "login held")
+        self.answers = [LoginError("refused: invalid_grant")]
+        self.assertRaises(LoginError, self.holder.access_token)
+        self.assertEqual(self.holder.state(), "refused: invalid_grant")
+        self.hold(login(0, refresh="refresh-new"))
+        self.assertEqual(self.holder.state(), "login held")
+
+    def test_a_login_whose_refresh_token_has_expired_is_not_held(self):
+        dead = json.loads(login(0))
+        dead["claudeAiOauth"]["refreshTokenExpiresAt"] = 999000
+        self.hold(json.dumps(dead))
+        self.assertIn("has expired, its refresh token too: log in to Claude again, `wk key set claude-login`", self.holder.state())
+        dead["claudeAiOauth"]["refreshTokenExpiresAt"] = 1001000
+        self.hold(json.dumps(dead))
+        self.assertEqual(self.holder.state(), "login held")
+
 
 class TestRequestRewriting(unittest.TestCase):
     def test_the_request_line_is_method_and_target_or_nothing(self):
