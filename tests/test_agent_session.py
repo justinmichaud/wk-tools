@@ -167,10 +167,10 @@ class TestRefusals(unittest.TestCase):
         self.refused(make(state="broken"), "workspace x on lin is not made (broken): wait for its `wk new`, or `wk new x` remakes a broken one")
 
     def test_an_agent_that_is_not_installed(self):
-        for agent, path in (("claude", session.claude_bin(HOME)), ("pi", session.pi_bin(HOME))):
+        for agent, path, needs in (("claude", session.claude_bin(HOME), ""), ("pi", session.pi_bin(HOME), "install node >= 22.19 and npm on lin, then: ")):
             w = make()
             del w.machines["lin"].files[path]
-            self.refused(w, "%s is not installed on lin: there is no %s\n    wk machine setup lin" % (agent, path), "ai", agent, "x")
+            self.refused(w, "%s is not installed on lin: there is no %s\n    %swk machine setup lin" % (agent, path, needs), "ai", agent, "x")
 
     def test_a_workspace_without_bwrap(self):
         w = make()

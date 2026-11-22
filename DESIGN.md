@@ -40,9 +40,10 @@ two is a bug.
 - An agent builds, runs, tests and debugs through `wk`; the raw build tools
   refuse it, so job sizing always applies.
 - On your own servers an agent asks permission for nothing: Claude runs with
-  `--dangerously-skip-permissions`. A borrowed box is not yours, and a login
-  there may be root, to which Claude refuses that flag: there it runs with
-  `--permission-mode auto`.
+  `--dangerously-skip-permissions`. A borrowed box is not yours, other people
+  work on it, and a login there may be root, to which Claude refuses that
+  flag: there it runs with `--permission-mode auto`. Claude's settings say
+  the dialog of each mode is answered, so a session starts.
 
 **A way through**
 
@@ -323,6 +324,8 @@ converges. A half-made workspace is wiped, never repaired.
 
 - `wk ai claude|pi <ws>` starts the agent in the workspace under the
   credential wrapper, with Remote Control on and named after the workspace.
+  The words after `--` are the agent's; given any, it runs without a
+  terminal too (`-- -p <prompt>`).
 - The wrapper: on Linux, `bwrap` mounting an empty directory over
   `secrets/`; on macOS, a Seatbelt profile denying reads of it; on a borrowed
   box, which holds no credential, nothing. All three give the agent a minimal

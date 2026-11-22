@@ -41,6 +41,8 @@ def pi(inv, conf, ws, home):
 
 
 START = {"claude": claude, "pi": pi}
+# What the playbook installs an agent from; it installs none of it.
+NEEDS = {"claude": "", "pi": "install node >= %s and npm on %%s, then: " % VARS["wk_node"]}
 
 
 class Session:
@@ -92,7 +94,8 @@ def start(inv, agent, name, tail):
     conf, m, ws = inv.fleet.here, inv.here, lifecycle.ready(inv, name)
     argv, extra = START[agent](inv, conf, ws, inv.wk_home)
     if not m.exists(argv[0]):
-        die("%s is not installed on %s: there is no %s\n    wk machine setup %s" % (agent, conf.name, argv[0], conf.name))
+        die("%s is not installed on %s: there is no %s\n    %swk machine setup %s"
+            % (agent, conf.name, argv[0], NEEDS[agent] and NEEDS[agent] % conf.name, conf.name))
     session = Session(inv, conf, ws, extra)
     verdict, why, env = session.measure()
     if verdict != wrapper.HOLDS:
