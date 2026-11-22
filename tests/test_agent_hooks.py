@@ -77,6 +77,8 @@ class TestWhatTheRoleInstalls(unittest.TestCase):
         self.assertEqual(doc["permissions"]["deny"][:2] + doc["permissions"]["deny"][-2:],
                          ["Bash(build-webkit *)", "Bash(*/build-webkit *)", "Bash(run-javascriptcore-tests *)", "Bash(*/run-javascriptcore-tests *)"])
         self.assertIn('"Bash({{ tool }} *)", "Bash(*/{{ tool }} *)"', loop)
+        # Claude Code stops a session at a dialog for each of its two permission modes until its settings say they were answered.
+        self.assertEqual((doc["skipDangerousModePermissionPrompt"], doc["skipAutoPermissionPrompt"]), (True, True))
 
     def test_the_agents_instructions_name_the_wk_commands_and_forbid_a_push(self):
         text = self.read("files", "CLAUDE.md")
