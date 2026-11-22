@@ -135,6 +135,7 @@ class TestSeamFakes(Wet):
         d = FakeDriver("plain", self.m, self.journal, set())
         self.assertEqual(d.exec_argv(self.ws, ["make", "-j4"]), ["fake-exec", "x", "/home/u/wk/ws/x/src", "make", "-j4"])
         self.assertEqual((d.exec_argv(self.ws, ["ls"], cwd="/c")[2], d.enter_argv(self.ws)), ("/c", ["fake-enter", "x"]))
+        self.assertEqual(d.exec_argv(self.ws, ["claude"], tty=True), ["fake-exec", "-t", "x", "/home/u/wk/ws/x/src", "claude"])
 
     def test_a_task_runs_until_finished_and_keeps_its_log(self):
         t = FakeTasks(self.m, self.clock, self.journal)
