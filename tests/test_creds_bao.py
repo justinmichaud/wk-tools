@@ -59,7 +59,7 @@ class TestBao(unittest.TestCase):
         self.assertEqual(self.bao.list(), ["deploy-key/o/q", "deploy-key/o/r", "github-token"])
 
     def test_an_empty_store_lists_nothing(self):
-        self.m.on(LIST, Result(2, "", "No value found at secret/metadata/wk\n"))
+        self.m.on(LIST, Result(2, "{}\n", ""))
         self.assertEqual(self.bao.list(), [])
 
     def refused(self, answer, ask, *said):

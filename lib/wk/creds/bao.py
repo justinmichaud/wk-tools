@@ -13,7 +13,8 @@ from wk.core.vars import VARS
 
 KV = "-mount=secret"
 PREFIX = "wk/"
-ABSENT = "No value found"       # what `bao kv get` and `bao kv list` say of a path that holds nothing; both exit 2
+ABSENT = "No value found"       # what `bao kv get` says of a path that holds nothing, with exit 2
+EMPTY = "{}"                    # what `bao kv list -format=json` prints for one, on stdout, with exit 2 (2.7.3)
 
 
 def address(inv):
@@ -26,7 +27,7 @@ class Bao(Secrets):
 
     def _bao(self, run, words, input=None):
         r = run(["bao", "kv"] + words, env={"BAO_ADDR": self.addr}, input=input)
-        if not r.ok and ABSENT not in r.err:
+        if not r.ok and ABSENT not in r.err and r.out.strip() != EMPTY:
             die("`bao kv %s` failed (exit %d): %s\n    the store is %s: it is asked with the bao CLI (brew install openbao), "
                 "logged in (BAO_ADDR=%s bao login)" % (" ".join(words), r.rc, r.err.strip(), self.addr, self.addr), NEEDS_PERSON)
         return r
