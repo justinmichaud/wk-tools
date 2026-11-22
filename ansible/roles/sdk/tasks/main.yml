@@ -1,0 +1,25 @@
+---
+# The container driver's build environment: rootless podman with subordinate ids, and the SDK image.
+
+# Rootless podman maps a container's other users onto the ranges /etc/subuid and /etc/subgid grant this one.
+- name: Read the subordinate id ranges
+  ansible.builtin.slurp:
+    src: "{{ item }}"
+  loop: [/etc/subuid, /etc/subgid]
+  register: wk_subids
+
+- name: Assert the user has subordinate ids
+  ansible.builtin.assert:
+    that: (item.content | b64decode) is search('(?m)^' ~ (ansible_facts['user_id'] | regex_escape) ~ ':')
+    fail_msg: >-
+      no range for {{ ansible_facts['user_id'] }} in {{ item.item }}, which rootless podman needs: on {{ inventory_hostname }},
+      sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 {{ ansible_facts['user_id'] }}
+    quiet: true
+  loop: "{{ wk_subids.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Pull the SDK image
+  containers.podman.podman_image:
+    name: "{{ wk_sdk_image | default(wk_project.sdk_image) }}"
+    state: present

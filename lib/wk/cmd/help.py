@@ -1,7 +1,8 @@
 """List the commands, or print a section of the design.
 
 `wk help` lists every command and every topic. `wk help <topic>` prints the section of DESIGN.md whose heading
-starts with the topic (`wk help seams`); `wk help design` prints all of it. `wk <command> -h` explains one command."""
+starts with the topic (`wk help seams`); `wk help design` prints all of it, and `wk help status` prints STATUS.md:
+what is implemented, tested and verified on a real machine. `wk <command> -h` explains one command."""
 
 import importlib
 import os
@@ -13,9 +14,9 @@ COMMAND = Command(takes=("topic?",), readonly=True)
 
 
 def main(args, inv):
-    with open(os.path.join(inv.root, "DESIGN.md")) as f:
-        design = f.read()
-    sections = {"design": design}
+    with open(os.path.join(inv.root, "DESIGN.md")) as f, open(os.path.join(inv.root, "STATUS.md")) as g:
+        design, status = f.read(), g.read()
+    sections = {"design": design, "status": status}
     for part in design.split("\n## ")[1:]:
         sections[part.split("\n")[0].lower()] = "## " + part
     if args.topic is None:

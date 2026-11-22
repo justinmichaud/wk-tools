@@ -1,0 +1,115 @@
+---
+# pueue: the pinned binaries, wk's own config, the daemon kept running, and the one-at-a-time build group.
+
+- name: Assert this platform has a pinned pueue
+  ansible.builtin.assert:
+    that: wk_pueue_platform in wk_pueue_assets
+    fail_msg: >-
+      pueue {{ wk_pueue_version }} has no pinned binary for {{ inventory_hostname }} ({{ wk_pueue_platform }}):
+      wk's servers are {{ wk_pueue_assets | join(', ') }}
+    quiet: true
+
+- name: Make pueue's directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop: ["{{ wk_pueue_bin }}", "{{ wk_pueue_dir }}"]
+
+- name: Fetch the pinned binaries
+  ansible.builtin.get_url:
+    url: "https://github.com/Nukesor/pueue/releases/download/v{{ wk_pueue_version }}/{{ item }}-{{ wk_pueue_assets[wk_pueue_platform].target }}"
+    dest: "{{ wk_pueue_bin }}/{{ item }}"
+    checksum: "sha256:{{ wk_pueue_assets[wk_pueue_platform][item] }}"
+    mode: "0755"
+  loop: [pueue, pueued]
+
+# wk's own config: one socket and one log directory, wherever a login's XDG variables point.
+- name: Write pueue's config
+  ansible.builtin.template:
+    src: pueue.yml.j2
+    dest: "{{ wk_pueue_dir }}/pueue.yml"
+    mode: "0644"
+
+- name: Keep pueued running as a systemd user unit
+  when: "'linux' in group_names"
+  environment: "{{ wk_user_bus }}"
+  block:
+    - name: Write pueued's unit
+      ansible.builtin.template:
+        src: wk-pueued.service.j2
+        dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/wk-pueued.service"
+        mode: "0644"
+
+    - name: Enable and start pueued
+      ansible.builtin.systemd_service:
+        name: wk-pueued.service
+        scope: user
+        enabled: true
+        state: started
+        daemon_reload: true
+
+- name: Keep pueued running as a launchd agent
+  when: "'mac' in group_names"
+  block:
+    - name: Write pueued's launchd agent
+      ansible.builtin.template:
+        src: wk.pueued.plist.j2
+        dest: "{{ wk_pueue_agent }}"
+        mode: "0644"
+
+    - name: Ask launchd whether the agent is loaded
+      ansible.builtin.command:
+        argv: [launchctl, print, "{{ wk_launchd_domain }}/wk.pueued"]
+      register: wk_pueued_loaded
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    # launchd reads a plist only at bootstrap.
+    - name: Load the agent
+      ansible.builtin.command:
+        argv: [launchctl, bootstrap, "{{ wk_launchd_domain }}", "{{ wk_pueue_agent }}"]
+      when: wk_pueued_loaded.rc != 0
+      changed_when: true
+
+# Someone else's container has no systemd and no launchd to keep a daemon.
+- name: Start pueued where nothing supervises it
+  when: "'borrowed' in group_names and not ansible_check_mode"
+  block:
+    - name: Ask whether pueued answers
+      ansible.builtin.command:
+        argv: "{{ wk_pueue + ['status'] }}"
+      register: wk_pueued_answers
+      changed_when: false
+      failed_when: false
+
+    - name: Start pueued
+      ansible.builtin.command:
+        argv: "{{ wk_pueued + ['--daemonize'] }}"
+      when: wk_pueued_answers.rc != 0
+      changed_when: true
+
+- name: Give the build group one build at a time
+  when: not ansible_check_mode
+  block:
+    - name: Wait for pueued to answer
+      ansible.builtin.command:
+        argv: "{{ wk_pueue + ['status', '--json'] }}"
+      register: wk_pueue_status
+      changed_when: false
+      until: wk_pueue_status.rc == 0
+      retries: 10
+      delay: 1
+
+    - name: Add the build group
+      ansible.builtin.command:
+        argv: "{{ wk_pueue + ['group', 'add', 'build', '--parallel', '1'] }}"
+      when: "'build' not in (wk_pueue_status.stdout | from_json)['groups']"
+      changed_when: true
+
+    - name: Limit the build group to one task
+      ansible.builtin.command:
+        argv: "{{ wk_pueue + ['parallel', '1', '--group', 'build'] }}"
+      when: "((wk_pueue_status.stdout | from_json)['groups'].build | default({'parallel_tasks': 1})).parallel_tasks != 1"
+      changed_when: true

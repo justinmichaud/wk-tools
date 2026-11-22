@@ -85,7 +85,7 @@ def main(argv, inv):
             raise Refused("wk %s runs on the client, and this is the server %s: type it there"
                           % (" ".join(key), inv.fleet.hostname))
         if cmd.where == "server" and here == "client":
-            return route.hand_over(inv, target(args, inv))
+            return route.hand_over(inv, target(args, inv), cmd.forward)
         return module.main(args, inv) or 0
     except Usage as e:
         sys.stderr.write("error: %s\n%s\n" % (e, usage))

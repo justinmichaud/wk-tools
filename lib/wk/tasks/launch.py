@@ -8,7 +8,7 @@ from wk.core.errors import STALLED
 from wk.tasks import guard, sizing
 
 def allowed(argv):
-    """`argv`, an `env` line, with WK_BUILD set: without it the build-tool shims on an agent's PATH refuse (lib/wk/agent/shim.sh)."""
+    """`argv`, an `env` line, with WK_BUILD set: without it the build-tool shims on an agent's PATH refuse (the agents role's shim.sh)."""
     return argv[:1] + ["WK_BUILD=1"] + argv[1:]
 
 

@@ -1,8 +1,12 @@
-"""`wk ai`: one agent session in a workspace, under the credential wrapper, measured before it starts."""
+"""`wk ai`: one agent session in a workspace, under the credential wrapper, measured before it starts. The agents
+themselves are the playbook's agents role's to install, under <wk_home>/cache/agents."""
+
+import json
 
 from wk import creds
-from wk.agent import install, wrapper
+from wk.agent import wrapper
 from wk.core.act import barrier, die, info
+from wk.core.vars import VARS
 from wk.workspace import lifecycle
 
 # On a server of the owner's an agent asks permission for nothing (DESIGN.md, Trust).
@@ -17,14 +21,22 @@ REMEDY = {wrapper.HOLDS: "",
           wrapper.UNKNOWN: "check that the workspace runs: wk enter %(ws)s"}
 
 
+def claude_bin(home):
+    return "%s/cache/agents/claude/%s/.local/share/claude/versions/%s" % (home, VARS["wk_claude_version"], VARS["wk_claude_version"])
+
+
+def pi_bin(home):
+    return home + "/cache/agents/pi/node_modules/.bin/pi"
+
+
 def claude(inv, conf, ws, home):
     """(the start line, what the session's environment adds)."""
-    return ([install.claude_bin(home)] + CLAUDE_MODE[conf.kind] + ["--remote-control", ws.name],
+    return ([claude_bin(home)] + CLAUDE_MODE[conf.kind] + ["--remote-control", ws.name],
             dict(creds.agent_env(inv), DISABLE_AUTOUPDATER="1"))
 
 
 def pi(inv, conf, ws, home):
-    return [install.pi_bin(home)], {}
+    return [pi_bin(home)], {}
 
 
 START = {"claude": claude, "pi": pi}
@@ -38,7 +50,7 @@ class Session:
         self.m = inv.machine(conf.name)
         self.driver = inv.driver(ws.driver, self.m)
         self.home = inv.wk_home_on(self.m)
-        self.hidden = [self.home + "/secrets"]
+        self.hidden = creds.hidden(conf, self.home)
 
     def inside(self, argv):
         return self.m.run(self.driver.exec_argv(self.ws, argv), timeout=30)
@@ -88,11 +100,21 @@ def start(inv, agent, name, tail):
     return m.act(session.driver.exec_argv(ws, session.wrap(argv + tail, env), tty=True), stream=True, tty=True).rc
 
 
+def answered(text, checkout):
+    """~/.claude.json with onboarding, the Remote Control dialog and trust in `checkout` answered, or None when it
+    already says so. `text` is the file as it is, None when there is none."""
+    doc = json.loads(text or "{}")
+    before = json.dumps(doc, sort_keys=True)
+    doc.update(hasCompletedOnboarding=True, remoteDialogSeen=True)
+    doc.setdefault("projects", {}).setdefault(checkout, {})["hasTrustDialogAccepted"] = True
+    return None if json.dumps(doc, sort_keys=True) == before else json.dumps(doc, indent=2) + "\n"
+
+
 def trust(m, checkout):
     """Claude's start-up dialogs answered for `checkout`, so a session starts instead of stopping at one."""
     path = m.home + "/.claude.json"
     try:
-        text = install.answered(m.read(path), checkout)
+        text = answered(m.read(path), checkout)
     except (ValueError, AttributeError, TypeError):
         die("%s is not the JSON object Claude Code keeps there, so its start-up answers cannot be recorded\n"
             "    remove it and start again" % path)

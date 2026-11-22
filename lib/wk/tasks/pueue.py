@@ -1,5 +1,5 @@
 """The Tasks seam over pueue: one daemon per machine, run from wk's pinned binaries under wk's own config, so its
-socket and logs are at one path whatever XDG variables a login has.
+socket and logs are at one path whatever XDG variables a login has. The playbook's pueue role installs both.
 
 Coded against pueue VERSION; tests/data/pueue-status.json is its pueue_lib/tests/data/v4.0.0_state.json:
     status --json            {"tasks": {"<id>": {id, created_at, command, group, label, status}}, "groups": {name: {parallel_tasks}}}
@@ -17,10 +17,10 @@ import sys
 
 from wk.core import seams
 from wk.core.act import die
+from wk.core.vars import VARS
 
-VERSION = "4.0.5"
+VERSION = VARS["wk_pueue_version"]
 LIMITS = {"build": 1}
-CONFIG = "shared:\n  pueue_directory: %s\n  runtime_directory: %s\n"
 MTIMES = """import os, sys
 for name in os.listdir(sys.argv[1]):
     if name.endswith(".log"):
@@ -78,15 +78,12 @@ class Pueue(seams.Tasks):
         return r.out
 
     def limit(self, group, parallel):
-        """Make `group` run `parallel` tasks at once; True when that changed anything. A daemon that does not answer
-        has no group yet: under --dry-run that is the daemon setup has still to start."""
-        r = self.m.run(self.argv("status", "--json"))
-        have = json.loads(r.out)["groups"].get(group) if r.ok else None
+        """Make `group` run `parallel` tasks at once."""
+        have = self.state()["groups"].get(group)
         if have is None:
             self._act("group", "add", group, "--parallel", str(parallel))
         elif have["parallel_tasks"] != parallel:
             self._act("parallel", str(parallel), "--group", group)
-        return have is None or have["parallel_tasks"] != parallel
 
     def add(self, argv, label, group="default", cwd=None):
         if group in LIMITS:

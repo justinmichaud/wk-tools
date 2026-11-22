@@ -1,0 +1,162 @@
+---
+# OpenBao, the one credential store: a pinned release, a systemd user unit listening on the tailnet address, sealed
+# by a static key it reads at start, initialised once, with the KV version 2 mount `secret`.
+
+- name: Assert this platform has a pinned OpenBao
+  ansible.builtin.assert:
+    that: wk_openbao_platform in wk_openbao_assets
+    fail_msg: >-
+      OpenBao {{ wk_openbao_version }} has no pinned release for {{ inventory_hostname }} ({{ wk_openbao_platform }}):
+      the credential server is one of {{ wk_openbao_assets | join(', ') }}
+    quiet: true
+
+- name: Make OpenBao's directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ wk_openbao_bin }}", mode: "0755"}
+    - {path: "{{ wk_openbao_dir }}", mode: "0700"}
+    - {path: "{{ wk_openbao_dir }}/data", mode: "0700"}
+  loop_control:
+    label: "{{ item.path }}"
+
+- name: Fetch the pinned release
+  ansible.builtin.get_url:
+    url: "https://github.com/openbao/openbao/releases/download/v{{ wk_openbao_version }}/{{ wk_openbao_archive }}"
+    dest: "{{ wk_openbao_bin }}/{{ wk_openbao_archive }}"
+    checksum: "sha256:{{ wk_openbao_assets[wk_openbao_platform].sha256 }}"
+    mode: "0644"
+
+- name: Unpack bao
+  ansible.builtin.unarchive:
+    src: "{{ wk_openbao_bin }}/{{ wk_openbao_archive }}"
+    dest: "{{ wk_openbao_bin }}"
+    remote_src: true
+    include: [bao]
+    creates: "{{ wk_openbao_bin }}/bao"
+
+# A 32-byte AES-256-GCM key (openbao.org/docs/configuration/seal/static). It lies beside the data it unseals: what
+# guards both is the directory's mode and the agent wrapper, which hides the directory.
+- name: Make the unseal key
+  ansible.builtin.command:
+    argv: [openssl, rand, -out, "{{ wk_openbao_dir }}/unseal.key", "32"]
+    creates: "{{ wk_openbao_dir }}/unseal.key"
+
+- name: Keep the unseal key the user's alone
+  ansible.builtin.file:
+    path: "{{ wk_openbao_dir }}/unseal.key"
+    mode: "0600"
+
+- name: Ask Tailscale for this machine's address
+  ansible.builtin.command:
+    argv: [tailscale, ip, "-4"]
+  register: wk_tailnet
+  changed_when: false
+  check_mode: false
+
+- name: Write OpenBao's config
+  ansible.builtin.template:
+    src: config.hcl.j2
+    dest: "{{ wk_openbao_dir }}/config.hcl"
+    mode: "0600"
+  vars:
+    wk_tailnet_address: "{{ wk_tailnet.stdout | trim }}"
+  notify: Restart OpenBao
+
+- name: Write OpenBao's unit
+  ansible.builtin.template:
+    src: wk-openbao.service.j2
+    dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/wk-openbao.service"
+    mode: "0644"
+  notify: Restart OpenBao
+
+- name: Enable and start OpenBao
+  ansible.builtin.systemd_service:
+    name: wk-openbao.service
+    scope: user
+    enabled: true
+    state: started
+    daemon_reload: true
+  environment: "{{ wk_user_bus }}"
+
+- name: Restart OpenBao now if its config or unit changed
+  ansible.builtin.meta: flush_handlers
+
+# Asked from the client, which is where the store is used from; the init output never touches the server.
+- name: Initialise the store and enable its mount (not under --check, which asks no running server)
+  when: not ansible_check_mode
+  delegate_to: localhost
+  environment: "{{ wk_client_env }}"
+  block:
+    - name: Wait for OpenBao to answer
+      ansible.builtin.uri:
+        url: "{{ wk_bao_addr }}/v1/sys/init"
+      register: wk_openbao_state
+      until: wk_openbao_state.status == 200
+      retries: 30
+      delay: 1
+
+    - name: Look for the client's copy of the init output
+      ansible.builtin.stat:
+        path: "{{ wk_openbao_init }}"
+      register: wk_openbao_kept
+
+    - name: Assert an initialised store's root token is still on the client
+      ansible.builtin.assert:
+        that: wk_openbao_kept.stat.exists or not wk_openbao_state.json.initialized
+        fail_msg: >-
+          the store on {{ inventory_hostname }} is initialised and this client has no {{ wk_openbao_init }}, the one
+          copy of its root token: restore the file, or, to start an empty store, stop wk-openbao.service there, remove
+          {{ wk_openbao_dir }}/data and run this again
+        quiet: true
+
+    - name: Make the client's wk configuration directory
+      ansible.builtin.file:
+        path: "{{ wk_openbao_init | dirname }}"
+        state: directory
+        mode: "0700"
+
+    # A static seal unseals by itself, so init returns recovery keys and a root token, not unseal keys.
+    - name: Initialise the store
+      ansible.builtin.command:
+        argv: [bao, operator, init, -format=json, -recovery-shares=1, -recovery-threshold=1]
+      when: not wk_openbao_state.json.initialized
+      register: wk_openbao_made
+      changed_when: true
+      no_log: true
+
+    - name: Keep the init output on the client alone
+      ansible.builtin.copy:
+        content: "{{ wk_openbao_made.stdout | from_json | to_nice_json }}\n"
+        dest: "{{ wk_openbao_init }}"
+        mode: "0600"
+      when: not wk_openbao_state.json.initialized
+      no_log: true
+      diff: false
+
+    - name: Ask the store for its mounts
+      ansible.builtin.uri:
+        url: "{{ wk_bao_addr }}/v1/sys/mounts"
+        headers: "{{ wk_openbao_root }}"
+      register: wk_openbao_mounts
+      until: wk_openbao_mounts.status == 200
+      retries: 30
+      delay: 1
+      no_log: true
+
+    - name: Enable the KV version 2 mount the client reads
+      ansible.builtin.uri:
+        url: "{{ wk_bao_addr }}/v1/sys/mounts/secret"
+        method: POST
+        headers: "{{ wk_openbao_root }}"
+        body_format: json
+        body:
+          type: kv
+          options:
+            version: "2"
+        status_code: [200, 204]
+      when: "'secret/' not in wk_openbao_mounts.json.data"
+      changed_when: true
+      no_log: true

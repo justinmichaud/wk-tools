@@ -14,6 +14,8 @@ two is a bug.
 - One machine is interactive: the **client**. Every other machine is a
   **server** that `wk` manages from a cold boot. There is no workstation role
   and no peer.
+- One Linux server is also the **credential server**. It is a server like the
+  others: it holds workspaces too.
 - A server is yours (Linux or macOS) or **borrowed**: a shared build box where
   you are root inside someone else's container, podman does not work, and
   other people are root too.
@@ -53,19 +55,34 @@ two is a bug.
 **Credentials**
 
 - One store: OpenBao, on the **credential server**. It is a plain store: no
-  approval flow.
-- The client reads the store as the person and delivers credentials to each of
-  your servers over ssh at provisioning. A server never talks to the store.
+  approval flow. The playbook installs it, initialises it once and gives it
+  an unattended unseal.
+- The client reads the store as the person, through the `bao` CLI, and
+  delivers credentials to each of your servers over ssh at provisioning. A
+  server never talks to the store.
 - A borrowed box holds no credential. ssh agent forwarding makes `git push`
   work there.
 - Nobody logs in to Claude or pi on a server. Remote Control is required, and
   it needs a full claude.ai login, so one **injector** on the credential
-  server holds the real login and every server holds a placeholder.
+  server holds the real login and every server, a borrowed box included,
+  holds a placeholder.
+
+**Provisioning**
+
+- Provisioning is Ansible; `wk machine setup` only generates the inventory
+  and runs it. There is no provisioning code in `wk`.
+- Nothing is installed with a package manager and nothing needs root: sudo on
+  your servers asks for a password. What a server must already have is
+  asserted, and named when it is absent.
 
 **Off the shelf**
 
+- Provisioning: Ansible, the full `ansible` package on the client. Beside
+  `ansible.builtin` the playbook uses two collections that package bundles,
+  `containers.podman` and `community.general`, so there is no
+  `requirements.yml`.
 - Tasks: `pueue`, one daemon per machine.
-- Secrets: OpenBao.
+- Secrets: OpenBao, and its `bao` CLI on the client.
 - Network and identity: Tailscale, including Tailscale SSH.
 - Linux build environment: the WebKit container SDK image under rootless
   podman, on your own Linux servers.
@@ -76,7 +93,7 @@ two is a bug.
 | --- | --- |
 | client | The one interactive machine. Holds no workspace. |
 | server | A machine `wk` manages: `linux`, `mac` or `borrowed`. |
-| credential server | The server that runs OpenBao and the injector. Runs nothing else. |
+| credential server | The one Linux server that also runs OpenBao and the injector. |
 | workspace | A named, disposable checkout for one task, on one server. |
 | driver | How a workspace's commands run: `container` or `plain`. |
 | mirror | A server's one bare WebKit repository. Every workspace clones from it. |
@@ -96,7 +113,7 @@ wk <cmd> <ws> ...   --ssh-->   wk <cmd> <ws> ...     (the same program)
                                  |- agent:     wrapper hiding credential paths
                                  '- mirror:    ~/wk/git/WebKit.git
 
-credential server:  OpenBao (the one store)   injector (the one claude.ai login)
+credential server:  a linux server that also runs OpenBao (the one store) and the injector (the one claude.ai login)
 ```
 
 The same `wk` runs on every machine. A command that names a workspace is
@@ -117,6 +134,10 @@ These are enforced once, in the dispatcher, from a table each command declares.
   server named by `--on`, else to the one holding its `<ws>`; that one is
   found by asking every server for `wk ls --json`. A command that needs both
   ends is `any` and hands itself over.
+- A command may declare a `forward`: something the client reaches that the
+  command needs on its server. The hand-over's ssh then carries it as a
+  reverse forward, on a connection of its own, to a port of the server's
+  loopback that the command's words choose and `$WK_FORWARD` names.
 - `inv` is the one object a command reaches machines, the clock, the fleet,
   drivers, tasks and secrets through. A test builds it of fakes. A machine's
   wk home is asked of it and computed nowhere else.
@@ -143,7 +164,7 @@ fake in a unit test.
 | `Clock` | now, sleep, wait_until | real, fake |
 | `Driver` | create, destroy, state, exec argv, enter argv | `Container`, `Plain`, fake |
 | `Tasks` | add, status, log, kill, wait, follow, quiet | pueue, fake |
-| `Secrets` | get, put, list | OpenBao HTTP API, fake |
+| `Secrets` | get, put, list | the `bao` CLI run through `Machine`, fake |
 
 `run` reads and `act` changes state: `act` and every other mutator end in the
 one gate that `--dry-run` turns into a printed line. A server that does not
@@ -174,17 +195,22 @@ a `wk` typed on that machine itself.
 | `ws/<name>/build` | build output and the workspace's ccache |
 | `ws/<name>/build/guard.py` | the memory guard, copied in by each build and test run |
 | `ws/<name>/.ready` | written last by `wk new`; absent means half-made |
-| `cache/` | pinned downloads: `pueue-<version>/`, `agents/`. `wk gc` reclaims an entry no lane pins |
+| `cache/` | pinned downloads: `pueue-<version>/`, `agents/`, `openbao-<version>/`. `wk gc` reclaims an entry no lane pins |
 | `pueue/` | pueue's config, socket, state and task logs |
 | `shims/` | the build-tool shims an agent's `PATH` starts with |
 | `secrets/` | delivered credentials, mode 0700: deploy keys, `ssh_config`, `env.sh`. Hidden from agents |
 | `claude-login/` | the placeholder claude.ai login an agent session reads |
 | `injector-ca.pem` | the injector's CA, which an agent session trusts |
-| `injector/` | on the credential server alone: the injector, its CA key and the real login |
+| `injector/` | on the credential server alone: the injector, its CA key and the real login. Hidden from agents |
+| `openbao/` | on the credential server alone: OpenBao's config, its data and its unseal key. Hidden from agents |
 
 Outside it, in the login's home: `~/.claude/` (the agents' instructions and
 settings), `~/.claude.json` (Claude's start-up answers), `~/.pi/` (pi's
-models), the `Include` line in `~/.ssh/config`, and the profile lines.
+models), the `Include` line in `~/.ssh/config`, the profile lines, and the
+unit or launchd agent that keeps a daemon running.
+
+On the client, `~/.config/wk/openbao-init.json` (mode 0600) is the one copy of
+what initialising the store printed: its recovery key and its root token.
 
 Every mutating command is crash-only: killed at any point and re-run, it
 converges. A half-made workspace is wiped, never repaired.
@@ -201,7 +227,9 @@ converges. A half-made workspace is wiped, never repaired.
   tool.
 - `wk sync [<ws>]` fetches the mirror from GitHub, then `origin` in one
   workspace or in every one; on the client with no `<ws>`, on every server.
-  Only remote-tracking branches move.
+  Only remote-tracking branches move. `wk sync` owns the mirror's
+  configuration: the playbook runs it once, on a server whose mirror lacks a
+  branch.
 - Drivers:
   - `container`: your Linux servers. Rootless podman and the SDK image, one
     idle container per workspace; a command is a `podman exec`.
@@ -213,7 +241,7 @@ converges. A half-made workspace is wiped, never repaired.
   the ssh configuration, and `wk` on the profile's `PATH`. The home is mounted
   whole because Claude replaces `~/.claude.json` by rename, which a mount of
   the one file does not survive. An agent in a container sees what an agent
-  on a Mac sees: everything but `secrets/`, hidden at the same path.
+  on a Mac sees: everything but the hidden directories, at the same paths.
 - `wk` typed inside a container has no podman. It knows it is inside
   (`/run/.containerenv`) and which workspace's (`$WK_WORKSPACE`): that
   workspace is running, the others are unknown, a command for it runs
@@ -228,7 +256,9 @@ converges. A half-made workspace is wiped, never repaired.
 
 - pueue runs from wk's pinned binaries, by absolute path, under wk's own
   config in `pueue/`: one daemon per server, wherever a login's XDG variables
-  point.
+  point. A systemd user unit keeps it running on a Linux server and a launchd
+  agent on a Mac; on a borrowed box nothing supervises it, and setup starts
+  it when it does not answer.
 - `wk build <ws> [<preset>] [--detach]` adds a pueue task in the server's
   `build` group, whose parallel limit is 1: one build per machine. With no
   preset it repeats the one the workspace built last.
@@ -251,7 +281,13 @@ converges. A half-made workspace is wiped, never repaired.
 ## Credentials
 
 - `wk key set <name>` writes OpenBao. `wk key check` runs each credential's
-  live probe (one that writes nothing). `wk key sync [<server>]` delivers.
+  live probe (one that writes nothing). `wk key ls` lists the names.
+  `wk key sync [<server>]` delivers: it is the playbook's `credentials` role.
+- The store is asked with the `bao` CLI on the client, at
+  `http://<credential server>:8200`, with the token `bao login` keeps:
+  `bao kv get -field=value`, `bao kv put ... value=-` with the value on
+  stdin, `bao kv list -format=json`. One value per name, in the KV version 2
+  mount `secret`, under `wk/`.
 - The names: `github-user`, `github-token`, `bugzilla-user`,
   `bugzilla-password` (unmodified `git-webkit` sends Bugzilla a login and a
   password), `litellm-key`, `claude-login`, `tailnet-auth-key`, and
@@ -261,8 +297,14 @@ converges. A half-made workspace is wiped, never repaired.
   `git-webkit` and `gh` look for, all under `secrets/`.
 - pi's model key (`litellm-key`, in `~/.pi/agent/models.json`) is the one key
   an agent can read.
-- Values travel on stdin, never argv. Delivery compares digests and reports
-  what changed.
+- Values are read on the client and travel inside a module's arguments, never
+  argv; the tasks that carry one log nothing and show no diff.
+- OpenBao listens on the credential server's tailnet address alone, without
+  TLS of its own: the tailnet is the encryption. Its seal is a static key
+  beside its data, which it reads at start, so a reboot needs no person; the
+  directory's mode and the agent wrapper are what guard the key.
+- The store is initialised once, from the client. What that prints is kept on
+  the client alone and never touches the server.
 - The injector is a forward proxy on the credential server, reachable only on
   the tailnet. For Claude's three hosts it terminates TLS with its own CA and
   replaces the placeholder with the real login, which it alone refreshes,
@@ -277,40 +319,71 @@ converges. A half-made workspace is wiped, never repaired.
 
 - `wk ai claude|pi <ws>` starts the agent in the workspace under the
   credential wrapper, with Remote Control on and named after the workspace.
-- The wrapper: on Linux, `bwrap` mounting an empty directory over
-  `secrets/`; on macOS, a Seatbelt profile denying reads of it; on a borrowed
+- The wrapper: on Linux, `bwrap` mounting an empty directory over each hidden
+  directory; on macOS, a Seatbelt profile denying reads of them; on a borrowed
   box, which holds no credential, nothing. All three give the agent a minimal
   environment: no credential variable and no ssh-agent socket.
+- The hidden directories are `secrets/`, and on the credential server also
+  `injector/` and `openbao/`. One function names them.
 - An agent's `PATH` starts with `shims/`, then `bin/`. The shims are the
   build tools' names: they refuse an agent and name `wk build`.
 - `wk doctor <ws>` measures the wrapper with a stand-in process that tries to
   read a credential and must fail. A probe that dies is reported unmeasured,
   never passed.
 - Claude Code is pinned and fetched once per server; pi is installed from npm.
+- **A borrowed box** is off the tailnet, the one network the injector listens
+  on, and it holds only the placeholder login and the injector's CA.
+  `wk ai claude <ws>` typed on the client carries the injector to it: the
+  hand-over's ssh holds a reverse forward from a port of the box's loopback
+  to the injector for as long as the session lasts, and that port is the
+  session's proxy. A port already taken ends the ssh before anything starts.
+  Typed on the box itself there is no forward, and the command is refused
+  naming the client.
+- While such a session runs, the forwarded port is reachable by the other
+  users of the box.
 
 ## Provisioning
 
-- `wk machine setup <server>` runs from the client and converges the server in
-  idempotent stages: wk itself (a git bundle of HEAD), pueue (pinned, hash
-  checked), the mirror, the SDK image, the agents, the credentials. On the
-  credential server: wk itself and the injector. A second run reports no
-  changes, and `--dry-run` prints the whole plan on a bare server.
+- `wk machine setup <server>` runs, from the client,
+  `ansible-playbook -i ansible/inventory.py --limit <server> ansible/site.yml`
+  and returns its exit code. `--stage <role>` adds `--tags <role>`;
+  `--dry-run` adds `--check --diff`. The same line typed by hand does the
+  same.
+- The inventory is `machines/*.conf` and nothing else: `ansible/inventory.py`
+  prints `wk machine inventory`. A host per server, a group per kind
+  (`linux`, `mac`, `borrowed`) and `credential`, each conf literal as the
+  host variable `wk_<key>`, and for every host the client's literals, this
+  checkout's commit and the store's address.
+- The roles, each tagged with its own name: `wk` (the client's commit at
+  `tools/`, the layout, `wk` on the login `PATH`), `pueue`, `mirror`, `sdk`
+  (Linux: subordinate ids asserted, the SDK image), `agents`, `openbao` and
+  `injector` (the credential server), `credentials` (your servers) and
+  `borrowed-claude` (a borrowed box: the placeholder login and the injector's
+  CA, nothing else).
+- A server fetches exactly the client's commit from the repository's public
+  URL. Uncommitted changes, and a commit on no remote branch, are barriers.
+- Every task is idempotent: a second run reports `changed=0`, which is how
+  convergence is verified, and a run killed anywhere converges when typed
+  again. A task that needs a person stops the run with its remedy.
+- Under `--dry-run` a task that asks a running daemon or a server's API is
+  skipped: Ansible's check mode reports files, downloads and units.
+- `ansible/group_vars/all.json` holds what the playbook installs by and the
+  program names: the pinned versions with their digests, and the ports. It
+  is the one copy; both read it.
 - `wk doctor` reports each thing a server needs as ok, missing or unknown,
   with the command that fixes it. Unknown is never reported as ok. A server
   that does not answer is one unknown row; the others keep theirs.
 - `wk gc` reclaims what loses no work and names the flag for the rest.
 - A machine is one `machines/<name>.conf`: `kind` and literal values. Code
   never names a machine. The file's name must equal the machine's short
-  hostname, which is also its tailnet name: that is how `wk` knows which
-  machine it is on, and no key overrides it.
-- Setup stages, doctor rows, gc rows and cache pins are collected from a
-  `hooks` module in each package under `lib/wk/`; no file lists them.
+  hostname, which is also its tailnet name (for a borrowed box, its ssh-config
+  name): that is how `wk` knows which machine it is on, and no key overrides
+  it. `role=credential` goes on one `kind=linux` conf.
+- Doctor rows, gc rows and cache pins are collected from a `hooks` module in
+  each package under `lib/wk/`; no file lists them.
 
 ## Open decisions
 
-- **Claude on a borrowed box.** Nothing is delivered there, so a session has
-  no placeholder login and no CA to trust. Neither is a credential;
-  delivering those two would make `wk ai claude` work on a borrowed box.
 - **Refusals `--force` does not cross.** A build whose place cannot be
   measured has no job count to use, and a command whose podman or pueue does
   not answer has nothing to act through. Crossing either needs a stated
@@ -320,22 +393,27 @@ converges. A half-made workspace is wiped, never repaired.
 
 ```
 wk                      launcher (python3 -I)
-DESIGN.md
+DESIGN.md               the design
+STATUS.md               what is implemented, tested and verified on a real machine (`wk help status`)
 machines/               one conf per machine
+ansible/site.yml        the playbook: provisioning, whole
+ansible/inventory.py    Ansible's inventory script: prints `wk machine inventory`
+ansible/group_vars/     all.json: the pins and ports the playbook and the program share
+ansible/roles/          wk, pueue, mirror, sdk, agents, openbao, injector, credentials, borrowed-claude
 lib/wk/core/            dispatch, decl, act, inv, route, machine, clock, conf, fleet,
                         errors, seams and hooks (the contracts between lanes), fakes
 lib/wk/cmd/             one module per command: COMMAND table + main
 lib/wk/workspace/       drivers, mirror, git wiring, lifecycle
 lib/wk/tasks/           pueue client, sizing, memory guard, status
 lib/wk/webkit/          project.json, presets, Tools/Scripts command lines (the only WebKit names)
-lib/wk/creds/           OpenBao client, credential rules, delivery, injector
-lib/wk/agent/           wrapper, session, install, build-tool shims
-lib/wk/provision/       wk itself on a server, the rows no other lane owns
+lib/wk/creds/           the bao CLI's client, credential rules, the injector, what a session takes
+lib/wk/agent/           wrapper, session
+lib/wk/provision/       the inventory and the ansible-playbook line, the rows no other lane owns
 tests/                  unittest, one test per behaviour, against fakes
 ```
 
 Python, standard library only, 3.9 syntax. Shell only where the shell is the
-point (the build-tool shim).
+point (the build-tool shim). YAML only in `ansible/`.
 
 ## Testing
 
@@ -344,13 +422,18 @@ point (the build-tool shim).
   recorded in order, and the final state.
 - Crash safety is enumerated: each mutating command is killed after every
   effect and re-run, and must reach the uninterrupted final state.
-- In unit tests every real machine tool (`ssh`, `podman`, `pueue`, `git` on a
-  remote) is unreachable; a test that reaches one fails.
+- In unit tests every real machine tool (`ssh`, `podman`, `pueue`, `bao`,
+  `ansible-playbook`, `git` on a remote) is unreachable; a test that reaches
+  one fails. So the playbook is not run by them: the front is tested (the
+  inventory, the exact `ansible-playbook` line, the refusals), and the
+  journeys start from fake servers holding what the playbook leaves.
 - A lane's tests ask that lane's hooks alone. `tests/test_end_to_end.py` is
-  where every real lane runs together, over fake machines: a Linux, a Mac and
-  a borrowed server from bare to a build and an agent session and back.
-- A behaviour that needs a real server is a test marked `live`, skipped by
-  name when the server is absent.
+  where every real lane runs together, over fake machines: a Linux server, a
+  Mac, a borrowed box and the credential server, from provisioned to a build
+  and an agent session and back.
+- A behaviour that needs a real tool or server is a test marked `live`,
+  skipped by name when it is absent: `ansible-playbook --syntax-check` of the
+  playbook is one.
 
 ## Plan
 
@@ -360,20 +443,13 @@ point (the build-tool shim).
    `wk help`, `wk selftest`.
 2. Workspaces: mirror, `new`, `rm`, `ls`, `enter`, `sync`, both drivers.
 3. Tasks: pueue, sizing, memory guard, `build`, `run`, `test`, `status`, `stop`.
-4. Credentials: OpenBao client, `wk key`, delivery, the injector.
-5. Agent sessions: wrapper, shims, `wk ai`, install, the wrapper's probe.
-6. Provisioning: `wk machine setup`, `wk doctor`, `wk gc`.
+4. Credentials: the store's client, `wk key`, the injector.
+5. Agent sessions: wrapper, shims, `wk ai`, the wrapper's probe, the forward
+   to a borrowed box.
+6. Provisioning: the playbook, `wk machine setup`, `wk doctor`, `wk gc`.
 
 **Pass 2: the bench lab.** Boards, images, boot selection, the benchmark
 pipeline and its statistics, the dedicated bench Mac.
 
-**Owed, needs a real machine**
-
-- TODO: a live run of every pass 1 command on a Linux server, a Mac and a borrowed box, from a client its owner configured.
-- TODO: pueue 4.0.5: the pinned binaries' digests, the daemon under wk's config, the JSON of `status` and `log`, a task's environment (it is the `pueue add`'s), and the client reaching the socket from inside a container.
-- TODO: podman and the SDK image: the `podman run` line (keep-id, the host's name, `HOME`, the home mounted) with the real image, subordinate ids, and `wk` typed inside the container.
-- TODO: the wrapper: the Seatbelt profile on macOS, `bwrap` inside a container, and whether WebKit's own bubblewrap sandbox runs inside it.
-- TODO: the injector and Remote Control: Claude reading the placeholder from `claude-login/`, TLS through the injector's CA, a refresh, and Remote Control through the proxy.
-- TODO: OpenBao: the client against a real KV version 2 store and a `bao login` token.
-- TODO: git wiring with `git-webkit`: `env.sh` as `git-webkit` and `gh` read it, a push through the deploy-key alias, a pull request, a Bugzilla login with `bugzilla-password`.
-- TODO: a borrowed box: a writable child cgroup, `nice` and `ionice`, and Claude as root under `--permission-mode auto`.
+What of pass 1 is implemented, tested and verified on a real machine, and
+every check still owed on one, is in `STATUS.md`.

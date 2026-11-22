@@ -1,0 +1,8 @@
+---
+wk_pueue_bin: "{{ wk_home }}/cache/pueue-{{ wk_pueue_version }}"
+wk_pueue_dir: "{{ wk_home }}/pueue"
+wk_pueue: ["{{ wk_pueue_bin }}/pueue", "--config", "{{ wk_pueue_dir }}/pueue.yml"]
+wk_pueued: ["{{ wk_pueue_bin }}/pueued", "--config", "{{ wk_pueue_dir }}/pueue.yml"]
+wk_pueue_platform: "{{ ansible_facts['system'] }} {{ ansible_facts['architecture'] }}"
+wk_pueue_agent: "{{ ansible_facts['env']['HOME'] }}/Library/LaunchAgents/wk.pueued.plist"
+wk_launchd_domain: "gui/{{ ansible_facts['user_uid'] }}"

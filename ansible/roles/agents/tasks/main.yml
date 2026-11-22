@@ -1,0 +1,107 @@
+---
+# The agents: Claude Code pinned and fetched once, pi from npm, the build-tool shims, and Claude's configuration.
+
+- name: Look for the pinned Claude Code
+  ansible.builtin.stat:
+    path: "{{ wk_claude_dir }}/{{ wk_claude_under }}"
+  register: wk_claude
+
+# The official installer installs into HOME, so it runs with a staging HOME that is then moved into place whole.
+- name: Install Claude Code {{ wk_claude_version }}
+  when: not wk_claude.stat.exists and not ansible_check_mode
+  block:
+    - name: Clear the staging home
+      ansible.builtin.file:
+        path: "{{ wk_claude_stage }}"
+        state: absent
+
+    - name: Make the staging home
+      ansible.builtin.file:
+        path: "{{ wk_claude_stage }}"
+        state: directory
+        mode: "0755"
+
+    - name: Fetch the official installer
+      ansible.builtin.get_url:
+        url: https://claude.ai/install.sh
+        dest: "{{ wk_claude_stage }}/install.sh"
+        mode: "0644"
+
+    - name: Run the installer for the pinned version
+      ansible.builtin.command:
+        argv: [bash, "{{ wk_claude_stage }}/install.sh", "{{ wk_claude_version }}"]
+        creates: "{{ wk_claude_stage }}/{{ wk_claude_under }}"
+      environment:
+        HOME: "{{ wk_claude_stage }}"
+
+    - name: Look for what the installer left
+      ansible.builtin.stat:
+        path: "{{ wk_claude_stage }}/{{ wk_claude_under }}"
+      register: wk_claude_staged
+
+    - name: Assert the installer left the pinned version
+      ansible.builtin.assert:
+        that: wk_claude_staged.stat.exists and wk_claude_staged.stat.executable
+        fail_msg: >-
+          the installer left no Claude Code {{ wk_claude_version }} on {{ inventory_hostname }}:
+          claude.ai must answer from there; then wk machine setup {{ inventory_hostname }}
+        quiet: true
+
+    - name: Move the staging home into place
+      ansible.builtin.command:
+        argv: [mv, "{{ wk_claude_stage }}", "{{ wk_claude_dir }}"]
+        creates: "{{ wk_claude_dir }}"
+
+- name: Ask node for its version
+  ansible.builtin.command:
+    argv: [node, --version]
+  register: wk_node_found
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Say why pi is not installed
+  ansible.builtin.debug:
+    msg: >-
+      pi is not installed on {{ inventory_hostname }}: it needs node >= {{ wk_node }} and npm,
+      and node --version says {{ wk_node_found.stdout | default('', true) | trim or 'nothing' }}
+  when: not wk_node_usable
+
+# --prefix: without it npm installs into the nearest directory above that holds a package.json.
+- name: Install pi
+  ansible.builtin.command:
+    argv: [npm, install, --ignore-scripts, --prefix, "{{ wk_pi_dir }}", "{{ wk_pi_package }}"]
+    creates: "{{ wk_pi_dir }}/node_modules/.bin/pi"
+  when: wk_node_usable
+
+- name: Make the shims' directory
+  ansible.builtin.file:
+    path: "{{ wk_home }}/shims"
+    state: directory
+    mode: "0755"
+
+- name: Put a shim on an agent's PATH for each build tool
+  ansible.builtin.copy:
+    src: shim.sh
+    dest: "{{ wk_home }}/shims/{{ item }}"
+    mode: "0755"
+  loop: "{{ wk_build_tools }}"
+
+- name: Make Claude's configuration directory
+  ansible.builtin.file:
+    path: "{{ ansible_facts['env']['HOME'] }}/.claude"
+    state: directory
+    mode: "0755"
+
+- name: Write the agent's instructions
+  ansible.builtin.copy:
+    src: CLAUDE.md
+    dest: "{{ ansible_facts['env']['HOME'] }}/.claude/CLAUDE.md"
+    mode: "0644"
+
+# The deny rules cover a build tool named by its path, which no shim on PATH meets.
+- name: Write Claude's settings
+  ansible.builtin.template:
+    src: settings.json.j2
+    dest: "{{ ansible_facts['env']['HOME'] }}/.claude/settings.json"
+    mode: "0644"

@@ -1,7 +1,7 @@
 """machines/<name>.conf: one machine, as `key=value` lines of one literal word each.
 
-    kind=linux            client | linux | mac | borrowed      (required)
-    role=credential       the credential server                (optional)
+    kind=linux            client | linux | mac | borrowed                   (required)
+    role=credential       this Linux server is also the credential server   (optional)
 
 The file is named for the machine's tailnet name, which is also its hostname. Any other lowercase key is a literal
 a lane reads with `conf.get("key")`."""
@@ -34,10 +34,6 @@ class Conf:
         return self.values.get(key, default)
 
     @property
-    def holds_workspaces(self):
-        return self.kind != "client" and not self.role
-
-    @property
     def driver(self):
         return DRIVERS[self.kind]
 
@@ -63,6 +59,8 @@ def parse(name, text, path="<conf>"):
         raise ConfError("%s: kind=%s is not a kind: set kind= to one of %s" % (path, kind, ", ".join(KINDS)))
     if role not in ("", "credential"):
         raise ConfError("%s: role=%s is not a role: the only role is credential" % (path, role))
+    if role and kind != "linux":
+        raise ConfError("%s: role=credential needs kind=linux: OpenBao and the injector run as systemd user units" % path)
     return Conf(name, kind, role, values)
 
 

@@ -15,11 +15,15 @@ class TestConf(unittest.TestCase):
         self.assertEqual((c.name, c.kind, c.role, c.get("jobs_cap"), c.get("fork"), c.get("absent", "d")),
                          ("srv", "linux", "credential", "8", "git@github.com:me/WebKit.git", "d"))
 
-    def test_the_kind_decides_the_driver_and_who_holds_workspaces(self):
+    def test_the_kind_decides_the_driver(self):
         self.assertEqual([(k, conf.parse("m", "kind=" + k).driver) for k in ("linux", "mac", "borrowed")],
                          [("linux", "container"), ("mac", "plain"), ("borrowed", "plain")])
-        self.assertEqual([conf.parse("m", text).holds_workspaces for text in ("kind=mac", "kind=client", "kind=linux\nrole=credential")],
-                         [True, False, False])
+
+    def test_the_credential_server_is_a_linux_server_and_no_other_kind(self):
+        self.assertEqual(conf.parse("m", "kind=linux\nrole=credential").driver, "container")
+        for kind in ("mac", "borrowed", "client"):
+            self.refused("kind=%s\nrole=credential" % kind,
+                         "machines/m.conf: role=credential needs kind=linux: OpenBao and the injector run as systemd user units")
 
     def refused(self, text, why):
         with self.assertRaises(conf.ConfError) as caught:
@@ -79,7 +83,7 @@ class TestLoad(unittest.TestCase):
         with self.assertRaisesRegex(conf.ConfError, "a and b say kind=client and only one machine may"):
             conf.load(self.dir)
         self.put("b.conf", "kind=linux\nrole=credential")
-        self.put("c.conf", "kind=mac\nrole=credential")
+        self.put("c.conf", "kind=linux\nrole=credential")
         with self.assertRaisesRegex(conf.ConfError, "b and c say role=credential and only one machine may"):
             conf.load(self.dir)
 
@@ -95,9 +99,12 @@ class TestFleet(unittest.TestCase):
         self.fakes = {n: Fake(n) for n in self.confs}
         self.fleet = Fleet(lambda: self.confs, "lin", self.fakes.get, self.fakes["lin"], workers=4)
 
-    def test_it_lists_machines_by_name_and_servers_are_those_that_hold_workspaces(self):
+    def test_it_lists_machines_by_name_and_servers_are_all_but_the_client_the_credential_server_among_them(self):
         self.assertEqual(([c.name for c in self.fleet.machines()], [c.name for c in self.fleet.servers()]),
-                         (["desk", "lin", "mac", "vault"], ["lin", "mac"]))
+                         (["desk", "lin", "mac", "vault"], ["lin", "mac", "vault"]))
+        self.assertEqual(self.fleet.server("vault").role, "credential")
+        with self.assertRaisesRegex(Refused, "desk is the client, which holds no workspace\n    servers: lin, mac, vault"):
+            self.fleet.server("desk")
 
     def test_here_is_the_conf_named_for_this_hostname(self):
         self.assertEqual((self.fleet.here.name, self.fleet.here.kind), ("lin", "linux"))
@@ -124,15 +131,15 @@ class TestFleet(unittest.TestCase):
         self.fakes["lin"].files["/f"] = ""
         self.fakes["mac"].down = True
         answers = self.fleet.ask(lambda m: m.listdir("/"))
-        self.assertEqual(answers, {"lin": ["f"], "mac": UNKNOWN})
+        self.assertEqual(answers, {"lin": ["f"], "mac": UNKNOWN, "vault": []})
         self.assertEqual(repr(UNKNOWN), "UNKNOWN")
 
     def test_asking_takes_the_names_it_is_given(self):
         self.assertEqual(self.fleet.ask(lambda m: m.name, ["vault", "desk"]), {"vault": "vault", "desk": "desk"})
 
     def test_the_servers_are_asked_at_the_same_time(self):
-        together = threading.Barrier(2, timeout=10)
-        self.assertEqual(sorted(self.fleet.ask(lambda m: together.wait()).values()), [0, 1])
+        together = threading.Barrier(3, timeout=10)
+        self.assertEqual(sorted(self.fleet.ask(lambda m: together.wait()).values()), [0, 1, 2])
 
     def test_an_error_that_is_not_unreachability_is_not_swallowed(self):
         with self.assertRaises(ZeroDivisionError):

@@ -25,7 +25,7 @@ class TestHelp(unittest.TestCase):
         for key, line in zip(sorted(self.w.commands), listed):
             summary = importlib.import_module(self.w.commands[key]).__doc__.split("\n")[0]
             self.assertTrue(line.startswith("wk %s" % " ".join(key)) and line.endswith(" " + summary) and summary.rstrip(".:`"), line)
-        self.assertIn("\ntopics (wk help <topic>): design, decisions, vocabulary, shape, rules every command obeys, seams,", out)
+        self.assertIn("\ntopics (wk help <topic>): design, status, decisions, vocabulary, shape, rules every command obeys, seams,", out)
 
     def test_a_topic_prints_the_section_whose_heading_starts_with_it(self):
         out = self.w.wk("help", "Rules").out
@@ -36,10 +36,14 @@ class TestHelp(unittest.TestCase):
         with open(os.path.join(ROOT, "DESIGN.md")) as f:
             self.assertEqual(self.w.wk("help", "design").out, f.read().rstrip() + "\n")
 
+    def test_status_prints_what_is_implemented_tested_and_verified(self):
+        with open(os.path.join(ROOT, "STATUS.md")) as f:
+            self.assertEqual(self.w.wk("help", "status").out, f.read().rstrip() + "\n")
+
     def test_an_unknown_topic_is_refused_naming_the_topics(self):
         r = self.w.wk("help", "bogus")
         self.assertEqual(r.code, 1)
-        self.assertIn("error: no topic starts with bogus: the topics are design, decisions,", r.err)
+        self.assertIn("error: no topic starts with bogus: the topics are design, status, decisions,", r.err)
 
 
 class TestSelftest(unittest.TestCase):
@@ -103,11 +107,7 @@ class TestInv(unittest.TestCase):
 
 
 class TestHooks(unittest.TestCase):
-    def test_stages_are_collected_from_every_lane_that_has_hooks_and_run_in_order(self):
-        stages = hooks.collect("stages", None, "srv", package="tests.lanes")
-        self.assertEqual([(s.order, s.name, s.run()) for s in stages], [(10, "alpha-early", True), (20, "gamma-srv", False), (30, "alpha-late", False)])
-
-    def test_doctor_rows_are_ok_missing_or_unknown_with_a_remedy(self):
+    def test_doctor_rows_are_collected_from_every_lane_that_has_hooks_in_lane_order(self):
         rows = hooks.collect("doctor", None, "srv", None, package="tests.lanes")
         self.assertEqual(rows, [hooks.DoctorRow("alpha", hooks.OK), hooks.DoctorRow("gamma", hooks.UNKNOWN, "the probe died", "wk machine setup srv")])
         self.assertEqual(hooks.MISSING, "missing")

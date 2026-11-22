@@ -7,7 +7,8 @@
 
 Paths are absolute; `m.home` is the login's home. `run` and `act` take input= (str or bytes, on stdin), timeout=
 (seconds; rc 124 and the whole process group killed), cwd=, env= (a dict added to the environment; never a secret, it
-is argv on the far side), stream=True (output goes to the terminal, not the Result) and tty=True (interactive).
+is argv on the far side), stream=True (output goes to the terminal, not the Result) and tty=True (interactive). A
+server's also take forward= (Ssh.argv).
 A machine that does not answer raises Unreachable from any method."""
 
 import functools
@@ -131,8 +132,10 @@ class Local(Shell):
 
 
 # ConnectTimeout bounds a dead address; the keep-alives bound a session whose far end vanishes mid-command.
-SSH = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3",
-       "-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/wk-%C", "-o", "ControlPersist=60"]
+ALIVE = ["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
+SSH = ["-o", "BatchMode=yes"] + ALIVE + ["-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/wk-%C", "-o", "ControlPersist=60"]
+# A forward lives as long as its own connection, so it shares no master; ssh takes the first value an option is given.
+FORWARD = ["-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes"]
 
 
 class Ssh(Shell):
@@ -141,15 +144,17 @@ class Ssh(Shell):
     def __init__(self, name):
         self.name = name
 
-    def argv(self, argv, cwd=None, env=None, tty=False):
+    def argv(self, argv, cwd=None, env=None, tty=False, forward=None):
+        """`forward` is (port, "host:port"): 127.0.0.1:port on the server reaches host:port from this side."""
         remote = shlex.join((["env"] + ["%s=%s" % kv for kv in sorted(env.items())] if env else []) + list(argv))
         if cwd:
             remote = "cd %s && %s" % (shlex.quote(cwd), remote)
         # sshd runs a command under a non-login shell, whose PATH lacks ~/.local/bin and Homebrew.
-        return SSH + (["-t"] if tty else []) + [self.name, '"$SHELL" -lc ' + shlex.quote(remote)]
+        carried = FORWARD + ["-R", "127.0.0.1:%d:%s" % forward] if forward else []
+        return ["ssh"] + carried + SSH + (["-t"] if tty else []) + [self.name, '"$SHELL" -lc ' + shlex.quote(remote)]
 
-    def _run(self, argv, input=None, timeout=None, cwd=None, env=None, stream=False, tty=False):
-        r = local_run(self.argv(argv, cwd, env, tty), input, timeout, stream=stream, tty=tty)
+    def _run(self, argv, input=None, timeout=None, cwd=None, env=None, stream=False, tty=False, forward=None):
+        r = local_run(self.argv(argv, cwd, env, tty, forward), input, timeout, stream=stream, tty=tty)
         if r.rc == 255:     # ssh's own failure; a remote command's status is its own
             raise Unreachable(self.name, r.err)
         return Result(r.rc, r.out.replace("\r", ""), r.err.replace("\r", ""), r.raw)

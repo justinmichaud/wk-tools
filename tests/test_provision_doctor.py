@@ -2,15 +2,15 @@ import json
 import unittest
 
 from tests import ROOT
-from tests.provision import DF, HOME, SHA, TOOLS, checkout, client, lanes, server
+from tests.provision import DF, HOME, SHA, TOOLS, checkout, client, lanes, provisioned, server
 from tests.world import World
 from wk.core.errors import Unreachable
 from wk.core.machine import Result
 
-SMALL = {"desk": "kind=client", "lin": "kind=linux", "mac": "kind=mac"}
-ENV = {"BAO_ADDR": "https://vault:8200", "BAO_TOKEN": "t"}
+SMALL = {"desk": "kind=client", "lin": "kind=linux\nrole=credential", "mac": "kind=mac"}
 CLIENT = ("desk\n  ok       ssh            OpenSSH_9.6\n  ok       git            git version 2.43.0\n"
-          "  ok       tailscale      100.64.0.1 desk\n  ok       BAO_ADDR       https://vault:8200\n  ok       store token    BAO_TOKEN\n")
+          "  ok       tailscale      100.64.0.1 desk\n  ok       ansible        ansible-playbook [core 2.19.3]\n"
+          "  ok       bao            OpenBao v2.7.3\n  ok       store login    {\"data\": {\"policies\": [\"root\"]}}\n")
 
 
 class Toy(unittest.TestCase):
@@ -23,7 +23,7 @@ class Toy(unittest.TestCase):
         self.lin = self.w.machines["lin"]
 
     def doctor(self, *words, **how):
-        return self.w.wk("doctor", *words, env=ENV, **how)
+        return self.w.wk("doctor", *words, **how)
 
 
 class TestDoctor(Toy):
@@ -140,7 +140,7 @@ class TestServerRows(Own):
         checkout(self.lin)
 
     def test_a_server_that_was_set_up_is_all_ok(self):
-        self.w.wk("machine", "setup", "lin")
+        provisioned(self.lin)
         r = self.w.wk("doctor", on="lin")
         self.assertEqual((r.code, r.out), (0, "lin\n  ok       reachable\n  ok       python3        3.11\n  ok       git            git version 2.43.0\n"
                                               "  ok       wk commit      %s\n  ok       wk on PATH     %s/bin/wk\n  ok       layout\n"
@@ -154,25 +154,25 @@ class TestServerRows(Own):
         self.assertEqual((rows["wk commit"], rows["wk on PATH"]), (("missing", "lin has no checkout, and this checkout is at %s" % SHA, remedy),
                                                                   ("missing", "the login shell finds no wk", remedy)))
         self.assertEqual(rows["layout"], ("missing", "absent or wrongly moded: %s" % ", ".join(
-            "%s/%s (%s)" % (HOME, name, mode) for name, mode in (("bin", "755"), ("cache", "755"), ("git", "755"), ("ws", "755"), ("secrets", "700"))), remedy))
+            "%s/%s" % (HOME, name) for name in ("bin", "cache", "git", "ws", "secrets")), remedy))
 
     def test_another_commit_or_an_edited_tree_is_missing(self):
-        self.w.wk("machine", "setup", "lin")
+        provisioned(self.lin)
         self.lin.files[TOOLS + "/edited"] = "x"
         self.assertEqual(self.rows()[1]["wk commit"][1], "lin has %s with changes, and this checkout is at %s" % (SHA, SHA))
 
     def test_a_checkout_with_no_commit_to_compare_with_is_unknown(self):
-        self.w.wk("machine", "setup", "lin")
+        provisioned(self.lin)
         checkout(self.lin, sha="")
         code, rows = self.rows()
         self.assertEqual((code, rows["wk commit"][:2]), (4, ("unknown", "%s has no commit to compare with" % ROOT)))
 
     def test_from_the_client_the_commit_is_compared_with_the_clients(self):
-        self.w.wk("machine", "setup", "lin")
+        provisioned(self.lin)
         client(self.w.machines["desk"])
         server(self.w.machines["mac"])
         checkout(self.w.machines["desk"], sha="ab" * 20)
-        r = self.w.wk("doctor", env=ENV)
+        r = self.w.wk("doctor")
         self.assertEqual(r.code, 1)
         self.assertIn("  MISSING  wk commit      lin has %s, and this checkout is at %s\n           fix: wk machine setup lin\n" % (SHA, "ab" * 20), r.out)
 
@@ -181,6 +181,10 @@ class TestServerRows(Own):
         self.assertEqual(self.rows()[1]["python3"], ("missing", "sh: python3: command not found", "install it on lin with the system's package manager"))
         self.lin.on(("python3",), Result(124, "", "timed out after 30s"))
         self.assertEqual(self.rows()[1]["python3"][:2], ("unknown", "`python3 -c 'import sys; print('\"'\"'%d.%d'\"'\"' % sys.version_info[:2])'` did not answer in 30s"))
+
+    def test_a_python_older_than_wk_runs_on_is_missing(self):
+        self.lin.on(("python3",), "3.8\n")
+        self.assertEqual(self.rows()[1]["python3"], ("missing", "3.8 is older than 3.9", "install it on lin with the system's package manager"))
 
     def test_free_disk_under_the_floor_is_missing_and_gc_is_the_remedy(self):
         self.lin.on(("df", "-Pk"), DF % (19 * 2 ** 20))
@@ -216,26 +220,30 @@ class TestClientRows(Own):
         for name in ("lin", "mac"):
             self.w.machines[name].down = True
 
-    def rows(self, env):
-        out = self.w.wk("doctor", "--json", env=env).out
+    def rows(self):
+        out = self.w.wk("doctor", "--json").out
         return {row["name"]: (row["status"], row["detail"], row["remedy"]) for row in json.loads(out)[0]["rows"]}
 
-    def test_the_store_address_and_a_token_are_checked_for_presence_only(self):
-        rows = self.rows({})
-        self.assertEqual(rows["BAO_ADDR"], ("missing", "not set", "export BAO_ADDR=<the credential server's OpenBao address> in your shell's profile"))
-        self.assertEqual(rows["store token"], ("missing", "no BAO_TOKEN and no ~/.vault-token", "bao login"))
+    def test_the_store_is_asked_at_the_credential_servers_address_whether_this_login_holds(self):
+        self.assertEqual(self.rows()["store login"][0], "ok")
+        self.assertEqual(self.desk.calls[-1].env, {"BAO_ADDR": "http://lin:8200"})
+        self.desk.on(("bao", "token", "lookup"), Result(2, "", "Error looking up token: permission denied\n"))
+        self.assertEqual(self.rows()["store login"], ("missing", "Error looking up token: permission denied", "BAO_ADDR=http://lin:8200 bao login"))
 
-    def test_a_token_file_is_a_token(self):
-        self.desk.files["/home/u/.vault-token"] = "t"
-        self.assertEqual(self.rows({})["store token"][:2], ("ok", "~/.vault-token"))
+    def test_ansible_and_the_bao_cli_are_checked(self):
+        self.desk.on(("ansible-playbook", "--version"), Result(127, "", "sh: ansible-playbook: command not found\n"))
+        self.desk.on(("bao", "version"), Result(127, "", "sh: bao: command not found\n"))
+        rows = self.rows()
+        self.assertEqual(rows["ansible"], ("missing", "sh: ansible-playbook: command not found", "brew install ansible, or your distribution's ansible package"))
+        self.assertEqual(rows["bao"], ("missing", "sh: bao: command not found", "brew install openbao, or your distribution's openbao package"))
 
     def test_a_tailscale_that_is_stopped_or_absent_is_missing_and_one_that_hangs_is_unknown(self):
         self.desk.on(("tailscale", "status"), Result(1, "", "Tailscale is stopped.\n"))
-        self.assertEqual(self.rows(ENV)["tailscale"], ("missing", "Tailscale is stopped.", "install Tailscale, then `tailscale up`"))
+        self.assertEqual(self.rows()["tailscale"], ("missing", "Tailscale is stopped.", "install Tailscale, then `tailscale up`"))
         self.desk.on(("tailscale", "status"), Result(124, "", "timed out after 4s"))
-        self.assertEqual(self.rows(ENV)["tailscale"][:2], ("unknown", "`tailscale status --peers=false` did not answer in 4s"))
+        self.assertEqual(self.rows()["tailscale"][:2], ("unknown", "`tailscale status --peers=false` did not answer in 4s"))
 
     def test_ssh_and_git_are_checked(self):
         self.desk.on(("ssh", "-V"), Result(127, "", "sh: ssh: command not found\n"))
-        rows = self.rows(ENV)
+        rows = self.rows()
         self.assertEqual((rows["ssh"], rows["git"][:2]), (("missing", "sh: ssh: command not found", "install OpenSSH"), ("ok", "git version 2.43.0")))

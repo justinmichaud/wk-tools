@@ -1,34 +1,23 @@
-"""Converge a server: wk itself, then what every lane needs on it, stage by stage.
+"""Converge a server with Ansible: the playbook ansible/site.yml, against the inventory made of machines/*.conf.
 
-Each stage is idempotent and prints `changed` or `unchanged`; a second run changes nothing. The server gets exactly
-this checkout's commit, so uncommitted changes are refused. A stage that fails stops the run; killed anywhere and
-typed again, setup converges. Nothing is installed with a package manager: what a server must already have is named."""
+It runs `ansible-playbook --limit <server>` and its exit code is ansible-playbook's. Every task is idempotent: a
+second run reports changed=0, and killed anywhere and typed again, setup converges. `--stage <role>` runs one role
+(wk, pueue, mirror, sdk, agents, openbao, injector, credentials, borrowed-claude); `--dry-run` runs Ansible's check
+mode with diffs. The server fetches exactly this checkout's commit, so uncommitted changes and an unpushed commit
+are refused. Nothing is installed with a package manager, and nothing needs root: what a server must already have is
+asserted, and named when it is absent."""
 
-from wk.core import hooks
 from wk.core.act import die
 from wk.core.decl import Command, Opt
-from wk.core.errors import Refused
+from wk.provision import ansible
 
-COMMAND = Command(where="client", takes=("server",), opts=(Opt("--stage", "run this stage alone", "name"),))
+COMMAND = Command(where="client", takes=("server",), opts=(Opt("--stage", "run this role alone", "role"),))
 
 
 def main(args, inv):
-    conf = inv.fleet.get(args.server)
-    if conf.kind == "client":
-        die("%s is the client, and setup converges a server: `wk doctor` reports what the client needs" % conf.name)
-    stages = hooks.collect("stages", inv, conf)
-    if args.stage:
-        names = ", ".join(s.name for s in stages)
-        stages = [s for s in stages if s.name == args.stage]
-        if not stages:
-            die("no stage named %s: the stages are %s" % (args.stage, names))
-    changed, width = 0, max(len(s.name) for s in stages)
-    for stage in stages:
-        try:
-            did = stage.run()
-        except Refused as e:
-            raise Refused("stage %s failed on %s: %s\n    fix that and re-run it alone: wk machine setup %s --stage %s\n"
-                          "    then the rest: wk machine setup %s" % (stage.name, conf.name, e, conf.name, stage.name, conf.name), e.status)
-        print("%-*s  %s" % (width, stage.name, "changed" if did else "unchanged"))
-        changed += bool(did)
-    print("%s: %s" % (conf.name, "%d changed" % changed if changed else "no changes"))
+    conf = inv.fleet.server(args.server)
+    roles = ansible.roles(inv)
+    if args.stage not in [None] + roles:
+        die("no stage named %s: the stages are %s" % (args.stage, ", ".join(roles)))
+    ansible.given(inv)
+    return ansible.play(inv, conf.name, args.stage)

@@ -64,6 +64,7 @@ class Call:
     input: object = None
     cwd: object = None
     env: object = None
+    forward: object = None
 
 
 class Fake(Machine):
@@ -100,8 +101,8 @@ class Fake(Machine):
         self.journal.read(self.name, shlex.join(argv))
         return self._run(argv, strict=True, **how)
 
-    def _run(self, argv, input=None, timeout=None, cwd=None, env=None, stream=False, tty=False, strict=False):
-        call = Call(tuple(argv), input, cwd, env)
+    def _run(self, argv, input=None, timeout=None, cwd=None, env=None, stream=False, tty=False, forward=None, strict=False):
+        call = Call(tuple(argv), input, cwd, env, forward)
         self.calls.append(call)
         match = max((p for p in self.scripts if call.argv[:len(p)] == p), key=len, default=None)
         if match is None and strict:

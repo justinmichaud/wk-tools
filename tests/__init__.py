@@ -8,8 +8,9 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MACHINE_TOOLS = ("ssh", "scp", "podman", "pueue", "pueued", "tailscale", "bao")
+MACHINE_TOOLS = ("ssh", "scp", "podman", "pueue", "pueued", "tailscale", "bao", "ansible-playbook")
 REACHED = 97
+REAL_PATH = os.environ["PATH"]      # where a test marked live finds a real tool
 
 sys.path.insert(0, os.path.join(ROOT, "lib"))
 for _var in [v for v in os.environ if v.startswith("WK_")]:

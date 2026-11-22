@@ -1,40 +1,62 @@
-"""Credentials in `wk machine setup` and `wk doctor`: delivery to each of your servers, the injector on the credential
-server, and nothing on a borrowed box."""
+"""Credentials in `wk doctor` and `wk gc`: what delivery leaves on a server, and the injector and the store on the
+credential server."""
+
+import json
 
 from wk.core import hooks
-from wk.creds import deliver, service
+from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
+from wk.core.vars import VARS
+from wk.creds import agent, bao, injector, net
 
-MANAGED = ("linux", "mac")
+
+def pins(inv, conf):
+    return ["openbao-" + VARS["wk_openbao_version"]] if conf.role else []
 
 
-def stages(inv, conf):
-    if conf.role:
-        return [hooks.Stage(60, "injector", lambda: service.setup(inv, conf))]
-    if conf.kind in MANAGED:
-        return [hooks.Stage(60, "credentials", lambda: deliver.converge(inv, conf))]
-    return []
+def delivered(conf, m, wk):
+    """One row for what delivery leaves: on a borrowed box, only the two files a Claude session reads."""
+    session = {"%s/%s/.credentials.json" % (wk, agent.LOGIN_DIR): "600", "%s/%s" % (wk, agent.CA): "644"}
+    if conf.kind == "borrowed":
+        name, want, remedy = "claude login", session, "wk machine setup %s" % conf.name
+    else:
+        name, remedy = "credentials", "wk key sync %s" % conf.name
+        want = dict(session, **{wk + "/secrets": "d700", wk + "/secrets/deploy": "d700", wk + "/secrets/env.sh": "600",
+                                wk + "/secrets/ssh_config": "600", m.home + "/.pi/agent/models.json": "600"})
+    lacking = hooks.lacking(m, want)
+    return DoctorRow(name, MISSING if lacking else OK, lacking and "absent or wrongly moded: " + ", ".join(sorted(lacking)) or "", remedy)
+
+
+def asked(name, url, remedy, verdict):
+    """A row for a service asked one plain request: `verdict(status, body)` is (whether it is as it should be, the detail)."""
+    try:
+        good, detail = verdict(*net.request("GET", url))
+    except net.NoAnswer as e:
+        return DoctorRow(name, UNKNOWN, "%s did not answer (%s)" % (url, e), remedy)
+    return DoctorRow(name, OK if good else MISSING, detail, remedy)
+
+
+def holds(status, body):
+    """The injector answers a plain request with its banner and whether it holds a login."""
+    said = body.decode(errors="replace").splitlines()
+    if not said or not said[0].startswith(injector.BANNER.decode()):
+        return False, "something else answers there"
+    if said[1:] != ["login held"]:
+        return False, "".join(said[1:]) + ": `wk key set claude-login`, then the fix below"
+    return True, "it holds the claude.ai login"
+
+
+def unsealed(status, body):
+    said = json.loads(body) if status == 200 else {}
+    return said.get("initialized") is True and said.get("sealed") is False, "HTTP %d, initialized %s, sealed %s" % (
+        status, said.get("initialized"), said.get("sealed"))
 
 
 def doctor(inv, conf, ws):
-    if ws is not None or conf.kind not in MANAGED:
+    if ws is not None:
         return []
+    m, remedy = inv.machine(conf.name), "wk machine setup %s" % conf.name
+    rows = [delivered(conf, m, inv.wk_home_on(m))]
     if conf.role:
-        return [service.doctor(inv, conf)]
-    remedy = "wk key sync %s" % conf.name
-    machine = inv.machine(conf.name)
-    wk = inv.wk_home_on(machine)
-    wanted = [(wk + "/secrets", "700"), (wk + "/secrets/deploy", "700"), (wk + "/secrets/env.sh", "600"),
-              (wk + "/secrets/ssh_config", "600"), ("%s/%s/.credentials.json" % (wk, deliver.LOGIN_DIR), "600"),
-              ("%s/%s" % (wk, deliver.CA), "644"), (machine.home + "/.pi/agent/models.json", "600")]
-    have = deliver.status(machine, [path for path, _ in wanted])
-    if have is None:
-        return [hooks.DoctorRow("credentials", hooks.UNKNOWN, "%s could not say what it holds" % conf.name, remedy)]
-    rows = []
-    for path, mode in wanted:
-        if have[path] is None:
-            rows.append(hooks.DoctorRow(path, hooks.MISSING, "absent", remedy))
-        elif have[path][0] != mode:
-            rows.append(hooks.DoctorRow(path, hooks.MISSING, "mode %s, not %s" % (have[path][0], mode), remedy))
-        else:
-            rows.append(hooks.DoctorRow(path, hooks.OK))
+        rows += [asked("injector", "http://%s/" % agent.injector(inv), remedy, holds),
+                 asked("openbao", bao.address(inv) + "/v1/sys/seal-status", remedy, unsealed)]
     return rows

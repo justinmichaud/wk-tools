@@ -1,140 +1,108 @@
 import io
+import json
 import unittest
 import urllib.error
 from unittest import mock
 
 from tests import toy
-from tests.credsworld import Http
 from tests.world import World
-from wk import creds
 from wk.core import act
 from wk.core.errors import Refused
 from wk.core.fakes import Fake
 from wk.core.fleet import Fleet
 from wk.core.inv import SEAMS, Inv
+from wk.core.machine import Result
 from wk.creds import net
 from wk.creds.bao import Bao
 
-# Pinned from openbao.org/docs/api/secret/kv/kv-v2 and /docs/commands: the token travels in X-Vault-Token, a KV v2
-# value is read and written at <mount>/data/<path> and listed at <mount>/metadata/<path>?list=true, where a folder
-# ends in `/` and an empty one is a 404; the CLI reads BAO_ADDR and BAO_TOKEN, and `bao login` writes ~/.vault-token.
-ADDR = "https://vault.example:8200"
-DATA = ADDR + "/v1/secret/data/wk/"
-META = ADDR + "/v1/secret/metadata/wk/"
-READ = {"data": {"data": {"value": "v1"}, "metadata": {"version": 3}}}
+# Pinned from openbao.org/docs/commands/kv: `kv get -field=value -mount=secret <path>` prints the one field,
+# `kv put -mount=secret <path> value=-` reads the value from stdin, `kv list -format=json -mount=secret <path>` prints
+# a JSON array in which a folder ends in `/`; a path that holds nothing is "No value found at ..." and exit 2.
+ADDR = "http://vault:8200"
+ENV = {"BAO_ADDR": ADDR}
+GET = ("bao", "kv", "get", "-field=value", "-mount=secret")
+LIST = ("bao", "kv", "list", "-format=json", "-mount=secret")
+PUT = ("bao", "kv", "put", "-mount=secret")
+ABSENT = Result(2, "", "No value found at secret/data/wk/nope\n")
 
 
-class Typed(unittest.TestCase):
+class TestBao(unittest.TestCase):
     def setUp(self):
         self.saved = act.flags
         act.begin(act.Flags())
+        self.addCleanup(act.begin, self.saved)
+        self.m = Fake("desk")
+        self.bao = Bao(self.m, ADDR)
 
-    def tearDown(self):
-        act.begin(self.saved)
+    def test_get_asks_the_cli_for_the_one_field_at_the_address_wk_names(self):
+        self.m.on(GET + ("wk/github-token",), "v1\n")
+        self.assertEqual((self.bao.get("github-token"), self.m.calls[-1]), ("v1", self.m.calls[-1].__class__(GET + ("wk/github-token",), None, None, ENV)))
 
-    def bao(self, answers):
-        http = Http(answers)
-        patch = http.patch()
-        patch.start()
-        self.addCleanup(patch.stop)
-        return Bao(ADDR + "/", "tok"), http
-
-
-class TestBao(Typed):
-    def test_get_reads_the_value_from_the_kv2_data_route_with_the_token_header(self):
-        bao, http = self.bao({("GET", DATA + "github-token"): (200, READ)})
-        self.assertEqual((bao.get("github-token"), http.asked), ("v1", [("GET", DATA + "github-token", {"X-Vault-Token": "tok"}, None)]))
+    def test_a_value_of_several_lines_keeps_them(self):
+        self.m.on(GET, "-----BEGIN-----\nabc\n-----END-----\n")
+        self.assertEqual(self.bao.get("deploy-key/o/r"), "-----BEGIN-----\nabc\n-----END-----")
 
     def test_a_name_the_store_lacks_is_none(self):
-        bao, _ = self.bao({("GET", DATA + "nope"): (404, {"errors": []})})
-        self.assertIsNone(bao.get("nope"))
+        self.m.on(GET, ABSENT)
+        self.assertIsNone(self.bao.get("nope"))
 
-    def test_put_posts_the_value_under_data(self):
-        bao, http = self.bao({("POST", DATA + "deploy-key/o/r"): (200, {"data": {"version": 1}})})
-        bao.put("deploy-key/o/r", "v")
-        self.assertEqual(http.asked, [("POST", DATA + "deploy-key/o/r", {"X-Vault-Token": "tok"}, b'{"data": {"value": "v"}}')])
+    def test_put_sends_the_value_on_stdin_and_never_in_the_argv(self):
+        self.bao.put("deploy-key/o/r", "s3cret")
+        call = self.m.calls[-1]
+        self.assertEqual((call.argv, call.input, call.env), (PUT + ("wk/deploy-key/o/r", "value=-"), "s3cret", ENV))
+        self.assertEqual(self.m.journal.effects(), ["[desk] bao kv put -mount=secret wk/deploy-key/o/r value=-"])
 
-    def test_a_put_that_answers_204_is_stored(self):
-        bao, _ = self.bao({("POST", DATA + "n"): (204, b"")})
-        bao.put("n", "v")
-
-    def test_list_walks_the_folders_and_sorts(self):
-        bao, _ = self.bao({("GET", META + "?list=true"): (200, {"data": {"keys": ["github-token", "deploy-key/"]}}),
-                           ("GET", META + "deploy-key/?list=true"): (200, {"data": {"keys": ["o/"]}}),
-                           ("GET", META + "deploy-key/o/?list=true"): (200, {"data": {"keys": ["r", "q"]}})})
-        self.assertEqual(bao.list(), ["deploy-key/o/q", "deploy-key/o/r", "github-token"])
+    def test_list_follows_each_folder_and_returns_the_sorted_names(self):
+        self.m.on(LIST + ("wk/",), json.dumps(["github-token", "deploy-key/"]))
+        self.m.on(LIST + ("wk/deploy-key/",), json.dumps(["o/"]))
+        self.m.on(LIST + ("wk/deploy-key/o/",), json.dumps(["r", "q"]))
+        self.assertEqual(self.bao.list(), ["deploy-key/o/q", "deploy-key/o/r", "github-token"])
 
     def test_an_empty_store_lists_nothing(self):
-        bao, _ = self.bao({("GET", META + "?list=true"): (404, {"errors": []})})
-        self.assertEqual(bao.list(), [])
+        self.m.on(LIST, Result(2, "", "No value found at secret/metadata/wk\n"))
+        self.assertEqual(self.bao.list(), [])
 
-    def refused(self, answer, status, *said):
-        bao, _ = self.bao({("GET", DATA + "n"): answer})
+    def refused(self, answer, ask, *said):
+        self.m.on(("bao",), answer)
         with self.assertRaises(Refused) as e:
-            bao.get("n")
-        self.assertEqual(e.exception.status, status)
+            ask()
+        self.assertEqual(e.exception.status, 4)
         for text in said:
             self.assertIn(text, str(e.exception))
 
-    def test_a_store_that_does_not_answer_is_unknown_not_absent(self):
-        self.refused(net.NoAnswer("URLError: refused"), 4, "did not answer (URLError: refused), so what it holds is unknown", "`bao status`")
+    def test_a_missing_cli_is_refused_naming_how_to_install_it(self):
+        self.refused(Result(127, "", "sh: bao: command not found\n"), lambda: self.bao.get("n"),
+                     "`bao kv get -field=value -mount=secret wk/n` failed (exit 127): sh: bao: command not found", "brew install openbao")
 
-    def test_a_refused_token_names_bao_login(self):
-        self.refused((403, {"errors": ["permission denied"]}), 4, "refuses this token (HTTP 403)", "`bao login`")
-
-    def test_any_other_status_is_a_failure_and_never_absent(self):
-        self.refused((503, {"errors": ["sealed"]}), 1, "answered HTTP 503 to GET secret/data/wk", "sealed")
+    def test_no_login_is_refused_naming_bao_login_at_the_stores_address_and_is_never_absent(self):
+        for ask in (lambda: self.bao.get("n"), self.bao.list, lambda: self.bao.put("n", "v")):
+            self.refused(Result(2, "", "Error making API request.\nCode: 403. Errors:\n* permission denied\n"), ask,
+                         "permission denied", "the store is http://vault:8200", "BAO_ADDR=http://vault:8200 bao login")
 
 
 class TestPutIsAnEffect(unittest.TestCase):
-    def test_a_dry_run_prints_the_put_and_asks_nothing(self):
-        http = Http({})
-        w = World(commands=[toy], here="lin", seams={"secrets": lambda inv: Bao(ADDR, "tok")})
-        with http.patch():
-            r = w.wk("--dry-run", "seamy", "x")
-        self.assertEqual((r.code, http.asked), (0, []))
-        self.assertIn("[store] secret put token", r.plan)
-
-    def test_a_wet_run_posts_once(self):
-        http = Http({("POST", DATA + "token"): (200, {})})
-        w = World(commands=[toy], here="lin", seams={"secrets": lambda inv: Bao(ADDR, "tok")})
-        with http.patch():
-            self.assertEqual(w.wk("seamy", "x").code, 0)
-        self.assertEqual([(method, url) for method, url, _, _ in http.asked], [("POST", DATA + "token")])
+    def test_a_dry_run_prints_the_put_and_runs_no_cli(self):
+        w = World(commands=[toy], here="lin", seams={"secrets": lambda inv: Bao(inv.here, ADDR)})
+        r = w.wk("--dry-run", "seamy", "x")
+        self.assertEqual((r.code, [c for c in r.calls if "bao" in c]), (0, []))
+        self.assertIn("[lin] bao kv put -mount=secret wk/token value=-", r.plan)
 
 
 class TestConnect(unittest.TestCase):
-    def secrets(self, env, token_file=None):
+    def test_the_real_tree_wires_the_seam_to_this_client_and_the_credential_servers_address(self):
         w = World()
-        if token_file is not None:
-            w.machines["desk"].files["/home/u/.vault-token"] = token_file
-        seen = []
-        w.seams["secrets"] = lambda inv: seen.append(creds.secrets(inv)) or w.secrets
-        r = w.wk("key", "check", env=env)
-        return r, seen
+        inv = Inv("/", {}, Fleet(lambda: w.confs, "desk", None, w.machines["desk"]), None, None, {}, SEAMS)
+        store = inv.secrets()
+        self.assertEqual((type(store), store.m, store.addr), (Bao, w.machines["desk"], "http://vault:8200"))
 
-    def test_the_address_and_token_come_from_the_environment(self):
-        _, seen = self.secrets({"BAO_ADDR": ADDR, "BAO_TOKEN": "tok"})
-        self.assertEqual((seen[0].addr, seen[0].token), (ADDR, "tok"))
 
-    def test_without_a_token_variable_the_file_bao_login_writes_is_read(self):
-        _, seen = self.secrets({"BAO_ADDR": ADDR}, "filed\n")
-        self.assertEqual(seen[0].token, "filed")
-
-    def test_no_address_is_refused_naming_the_variable_and_bao_login(self):
-        r, _ = self.secrets({})
-        self.assertEqual(r.code, 4)
-        self.assertIn("error: BAO_ADDR is not set", r.err)
-        self.assertIn("`bao login`", r.err)
-
-    def test_no_token_is_refused_naming_bao_login(self):
-        r, _ = self.secrets({"BAO_ADDR": ADDR})
-        self.assertEqual(r.code, 4)
-        self.assertIn("error: no OpenBao token: BAO_TOKEN is not set and there is no ~/.vault-token\n    log in: `bao login`", r.err)
-
-    def test_the_real_tree_wires_the_seam_to_this_client(self):
-        inv = Inv("/", {"BAO_ADDR": ADDR, "BAO_TOKEN": "tok"}, Fleet(dict, "desk", None, Fake("desk")), None, None, {}, SEAMS)
-        self.assertIsInstance(inv.secrets(), Bao)
+class TestKeyLs(unittest.TestCase):
+    def test_it_prints_the_stores_names_one_to_a_line_which_is_what_the_playbook_reads(self):
+        w = World()
+        w.secrets.values.update({"github-token": "t", "deploy-key/o/r": "k"})
+        r = w.wk("key", "ls")
+        self.assertEqual((r.code, r.out, r.effects), (0, "deploy-key/o/r\ngithub-token\n", []))
+        self.assertEqual(World().wk("key", "ls").out, "")
 
 
 class TestRequest(unittest.TestCase):

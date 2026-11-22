@@ -1,7 +1,7 @@
 """The machines `wk` knows, which one this is, and the one way to ask every server something at once.
 
     inv.fleet.here                    # this machine's Conf; refused when it has no conf
-    inv.fleet.servers()               # the Confs that hold workspaces
+    inv.fleet.servers()               # the Confs of every machine but the client
     inv.fleet.machine("name")         # its Machine: this host itself, or ssh
     answers = inv.fleet.ask(lambda m: m.exists(path))     # {name: answer, or UNKNOWN when unreachable}"""
 
@@ -45,13 +45,12 @@ class Fleet:
         return self.confs[self.hostname]
 
     def servers(self):
-        return [c for c in self.machines() if c.holds_workspaces]
+        return [c for c in self.machines() if c.kind != "client"]
 
     def server(self, name):
         conf = self.get(name)
-        if not conf.holds_workspaces:
-            raise Refused("%s holds no workspace: it is the %s\n    servers: %s"
-                          % (name, conf.role and "credential server" or "client", ", ".join(c.name for c in self.servers())))
+        if conf.kind == "client":
+            raise Refused("%s is the client, which holds no workspace\n    servers: %s" % (name, ", ".join(c.name for c in self.servers())))
         return conf
 
     @property

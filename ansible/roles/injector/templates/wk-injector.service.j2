@@ -1,0 +1,10 @@
+[Unit]
+Description=wk injector: the one holder of the claude.ai login
+
+[Service]
+ExecStart=/usr/bin/env python3 -I {{ wk_injector_dir }}/injector.py {{ wk_injector_dir }} {{ wk_injector_port }}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

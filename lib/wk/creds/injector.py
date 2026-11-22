@@ -7,7 +7,7 @@ the CA in <directory>, and each request's placeholder bearer becomes the real ac
 tunnelled untouched. A plain request is answered with the injector's own state, which is what `wk doctor` reads.
 
 <directory> holds ca.key, ca.pem (what every agent session trusts), the leaf, and login/.credentials.json, which
-this process alone refreshes. The file imports nothing of wk's: setup copies it to the credential server alone."""
+this process alone refreshes. The file imports nothing of wk's: the playbook's injector role copies it there alone."""
 
 import errno
 import fcntl
@@ -24,7 +24,6 @@ import urllib.error
 import urllib.request
 
 HOSTS = ("api.anthropic.com", "claude.ai", "platform.claude.com")
-PORT = "3128"
 PLACEHOLDER = "wk-injects-this"
 SCOPES = ("user:inference", "user:profile", "user:sessions:claude_code")
 NEVER_MS = 4102444800000

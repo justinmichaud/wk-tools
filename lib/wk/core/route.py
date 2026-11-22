@@ -8,13 +8,16 @@ listing the workspaces on that server alone. Anything else it prints makes that 
 
 import json
 import sys
+import zlib
 
 from wk.core import act
-from wk.core.errors import NEEDS_PERSON, Refused
+from wk.core.errors import NEEDS_PERSON, Refused, Unreachable
 from wk.core.fleet import UNKNOWN
 from wk.core.seams import Workspace
 
 ENV = {"dry_run": "WK_DRY_RUN", "yes": "WK_YES", "force": "WK_FORCE", "quiet": "WK_QUIET"}
+FORWARD = "WK_FORWARD"
+FORWARD_PORTS = (20000, 10000)      # the first and how many: below the range Linux gives out by itself (32768 on)
 
 
 def workspaces(inv):
@@ -45,10 +48,23 @@ def locate(inv, name):
     return held[0]
 
 
-def hand_over(inv, server):
-    """Run this same command on `server` and return its exit code. wk's global flags cross as environment."""
+def hand_over(inv, server, forward=None):
+    """Run this same command on `server` and return its exit code. wk's global flags cross as environment. What
+    `forward` (wk.core.decl) names is carried to a port on the server chosen by the command's words, so that typing
+    it again finds the same one."""
     env = {var: "1" for flag, var in ENV.items() if getattr(act.flags, flag)}
-    r = inv.machine(server).run(["wk"] + inv.words, env=env, stream=True, tty=inv.stdin.isatty())
+    to, how = forward and forward(inv, inv.fleet.get(server)), {}
+    if to:
+        port = FORWARD_PORTS[0] + zlib.crc32(" ".join(inv.words).encode()) % FORWARD_PORTS[1]
+        env[FORWARD], how["forward"] = str(port), (port, to)
+    try:
+        r = inv.machine(server).run(["wk"] + inv.words, env=env, stream=True, tty=inv.stdin.isatty(), **how)
+    except Unreachable:
+        if not to:
+            raise
+        raise Refused("ssh to %s ended before `wk %s` ran there: %s did not answer, or its port 127.0.0.1:%d is taken and the forward was "
+                      "refused (ssh said which, above)\n    a taken port is this same command still running from another terminal: end it, "
+                      "then type this again" % (server, " ".join(inv.words), server, port), NEEDS_PERSON)
     sys.stdout.write(r.out)
     sys.stderr.write(r.err)
     return r.rc

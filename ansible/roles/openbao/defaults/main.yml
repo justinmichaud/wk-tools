@@ -1,0 +1,9 @@
+---
+wk_openbao_bin: "{{ wk_home }}/cache/openbao-{{ wk_openbao_version }}"
+wk_openbao_dir: "{{ wk_home }}/openbao"
+wk_openbao_platform: "{{ ansible_facts['system'] }} {{ ansible_facts['architecture'] }}"
+wk_openbao_archive: "openbao_{{ wk_openbao_version }}_{{ wk_openbao_assets[wk_openbao_platform].target }}.tar.gz"
+# The one copy of what `bao operator init` prints: the recovery key and the root token, on the client alone.
+wk_openbao_init: "{{ lookup('ansible.builtin.env', 'HOME') }}/.config/wk/openbao-init.json"
+wk_openbao_root:
+  X-Vault-Token: "{{ (lookup('ansible.builtin.file', wk_openbao_init) | from_json).root_token }}"

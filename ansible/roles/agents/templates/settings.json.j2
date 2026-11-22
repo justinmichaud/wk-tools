@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": ["Bash(*)", "WebSearch", "WebFetch", "Read(//tmp/**)", "Read(//private/tmp/**)"],
+    "deny": [
+{% for tool in wk_build_tools %}
+      "Bash({{ tool }} *)", "Bash(*/{{ tool }} *)"{{ "," if not loop.last }}
+{% endfor %}
+    ],
+    "additionalDirectories": ["/tmp", "/private/tmp"]
+  },
+  "theme": "dark",
+  "autoCompactEnabled": false,
+  "precomputeCompactionEnabled": false,
+  "agentPushNotifEnabled": true
+}

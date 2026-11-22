@@ -28,20 +28,17 @@ class TestMirror(unittest.TestCase):
         self.assertEqual(mirror.where("/srv/wk"), "/srv/wk/git/WebKit.git")
 
     def test_configure_makes_it_and_writes_the_whole_config_once(self):
-        self.assertEqual((mirror.configure(self.m, HOME), self.w.journal.effects()), (True, [INIT, CONFIG]))
-        self.assertEqual((mirror.configure(self.m, HOME), self.w.journal.effects()), (False, [INIT, CONFIG]))
+        mirror.configure(self.m, HOME)
+        self.assertEqual(self.w.journal.effects(), [INIT, CONFIG])
+        mirror.configure(self.m, HOME)
+        self.assertEqual(self.w.journal.effects(), [INIT, CONFIG])
 
     def test_a_config_that_drifted_is_written_again(self):
         mirror.configure(self.m, HOME)
         self.m.files[MIRROR + "/config"] += "[gc]\n\tauto = 6700\n"
-        self.assertEqual((mirror.configure(self.m, HOME), self.w.journal.effects()[2:]), (True, [CONFIG]))
+        mirror.configure(self.m, HOME)
+        self.assertEqual(self.w.journal.effects()[2:], [CONFIG])
         self.assertEqual(self.m.files[MIRROR + "/config"], mirror.CONFIG)
-
-    def test_setup_fetches_a_mirror_that_lacks_a_branch_and_a_second_run_changes_nothing(self):
-        self.assertTrue(mirror.setup(self.m, HOME))
-        self.assertEqual(self.w.journal.effects(), [INIT, CONFIG, "[lin] git -C %s fetch origin" % MIRROR,
-                                                    "[lin] git -C %s symbolic-ref HEAD refs/heads/main" % MIRROR])
-        self.assertEqual((mirror.setup(self.m, HOME), len(self.w.journal.effects())), (False, 4))
 
 
 class TestRealGit(unittest.TestCase):
@@ -66,7 +63,7 @@ class TestRealGit(unittest.TestCase):
         return r.out.strip()
 
     def test_the_mirror_holds_the_named_branch_alone_and_a_new_workspace_fetches_through_it(self):
-        self.assertTrue(mirror.configure(self.m, self.home))
+        mirror.configure(self.m, self.home)
         self.m.write(self.store + "/config", mirror.CONFIG.replace("https://github.com/WebKit/WebKit.git", self.up))
         self.assertFalse(mirror.fetched(self.m, self.home))
         mirror.fetch(self.m, self.home)

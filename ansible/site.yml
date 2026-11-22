@@ -1,0 +1,89 @@
+---
+# Provisioning, whole. `wk machine setup <server>` runs it against the inventory `wk machine inventory` prints:
+#   ansible-playbook -i ansible/inventory.py --limit <server> [--tags <role>] ansible/site.yml
+# Nothing here needs root: sudo on the owner's servers asks for a password.
+
+- name: Converge a server
+  hosts: all
+  gather_facts: false
+  vars:
+    wk_home: "{{ ansible_facts['env']['HOME'] }}/wk"
+    # A user unit is reached over the user's bus, which an ssh session without a login does not name.
+    wk_user_bus:
+      XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts['user_uid'] }}"
+    # A task delegated to the client runs the client's tools, not the server's.
+    wk_client_env:
+      PATH: "{{ lookup('ansible.builtin.env', 'PATH') }}"
+      BAO_ADDR: "{{ wk_bao_addr }}"
+    # One value of the store, read on the client by the bao CLI as the person: a pipe lookup's command line.
+    wk_bao_get: "BAO_ADDR={{ wk_bao_addr | quote }} bao kv get -field=value -mount=secret wk/"
+
+  pre_tasks:
+    - name: Gather the facts the roles read
+      ansible.builtin.setup:
+        gather_subset: [min]
+      tags: [always]
+
+    # sshd runs a command under a non-login shell, whose PATH lacks ~/.local/bin and Homebrew.
+    - name: Read the PATH of a login shell
+      ansible.builtin.command:
+        argv: ["{{ ansible_facts['user_shell'] }}", "-lc", 'printf %s "$PATH"']
+      register: wk_login_path
+      changed_when: false
+      check_mode: false
+      tags: [always]
+
+  tasks:
+    - name: Run the roles under the login shell's PATH
+      environment:
+        PATH: "{{ wk_login_path.stdout }}"
+      block:
+        - name: Install wk itself
+          ansible.builtin.import_role:
+            name: wk
+          tags: [wk]
+
+        - name: Install pueue and keep its daemon running
+          ansible.builtin.import_role:
+            name: pueue
+          tags: [pueue]
+
+        - name: Make the mirror
+          ansible.builtin.import_role:
+            name: mirror
+          tags: [mirror]
+
+        - name: Prepare the SDK container's build environment
+          ansible.builtin.import_role:
+            name: sdk
+          when: "'linux' in group_names"
+          tags: [sdk]
+
+        - name: Install the agents
+          ansible.builtin.import_role:
+            name: agents
+          tags: [agents]
+
+        - name: Install OpenBao
+          ansible.builtin.import_role:
+            name: openbao
+          when: "'credential' in group_names"
+          tags: [openbao]
+
+        - name: Install the injector
+          ansible.builtin.import_role:
+            name: injector
+          when: "'credential' in group_names"
+          tags: [injector]
+
+        - name: Deliver the credentials
+          ansible.builtin.import_role:
+            name: credentials
+          when: "'borrowed' not in group_names"
+          tags: [credentials]
+
+        - name: Deliver what a Claude session reads on a borrowed box
+          ansible.builtin.import_role:
+            name: borrowed-claude
+          when: "'borrowed' in group_names"
+          tags: [borrowed-claude]

@@ -1,6 +1,7 @@
 """The mirror: a server's one bare WebKit repository, which every workspace's checkout borrows objects from.
 
-Its `config` file is wk's whole: written, never edited, so a wrong setting is found by comparing two strings."""
+Its `config` file is wk's whole: written, never edited, so a wrong setting is found by comparing two strings.
+`wk sync` owns it: the playbook's mirror role runs `wk sync` on a server whose mirror lacks a branch."""
 
 from wk.core.act import must
 from wk.webkit import PROJECT
@@ -26,15 +27,12 @@ def where(home):
 
 
 def configure(m, home):
-    """Make the mirror exist with exactly wk's configuration. True when that changed anything."""
-    path, changed = where(home), False
+    """Make the mirror exist with exactly wk's configuration."""
+    path = where(home)
     if not m.exists(path + "/HEAD"):
         must(m, ["git", "init", "--bare", "--quiet", path], "git must be installed on %s" % m.name)
-        changed = True
     if m.read(path + "/config") != CONFIG:
         m.write(path + "/config", CONFIG)
-        changed = True
-    return changed
 
 
 def fetched(m, home):
@@ -48,11 +46,3 @@ def fetch(m, home):
     # `git fetch` in a bare repository overwrites HEAD with the remote's default branch (measured, git 2.48.1).
     must(m, ["git", "-C", path, "symbolic-ref", "HEAD", "refs/heads/" + PROJECT["branches"][0]], "`wk sync` again")
 
-
-def setup(m, home):
-    """Setup's stage: the mirror exists, is configured and has been fetched once. True when that changed anything."""
-    changed = configure(m, home)
-    if not fetched(m, home):
-        fetch(m, home)
-        changed = True
-    return changed

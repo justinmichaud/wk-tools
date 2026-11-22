@@ -42,7 +42,7 @@ def held(inv, ws):
 def on_client(args, inv):
     if args.ws:
         return held(inv, route.locate(inv, args.ws))
-    groups = [(inv.fleet.hostname, rows.client(inv))] + [machine(inv, conf) for conf in inv.fleet.machines() if conf.kind != "client"]
+    groups = [(inv.fleet.hostname, rows.client(inv))] + [machine(inv, conf) for conf in inv.fleet.servers()]
     if args.all:
         found, silent = route.workspaces(inv)
         groups += [(name, [DoctorRow("workspaces", UNKNOWN, "`wk ls --json` did not answer", "wk machine setup %s" % name)]) for name in silent]

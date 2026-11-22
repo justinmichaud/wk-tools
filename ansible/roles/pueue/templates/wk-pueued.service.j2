@@ -1,0 +1,10 @@
+[Unit]
+Description=wk pueued: this server's task daemon
+
+[Service]
+ExecStart={{ wk_pueued | join(' ') }}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

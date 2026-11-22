@@ -1,0 +1,75 @@
+---
+# wk itself: the client's commit at <wk_home>/tools, `wk` on the login shell's PATH, and the layout.
+# python3 and git are asserted, not installed: no package manager is used.
+
+- name: Ask python3 for its version
+  ansible.builtin.command:
+    argv: [python3, -c, "import sys; print('%d.%d' % sys.version_info[:2])"]
+  register: wk_python
+  changed_when: false
+  check_mode: false
+
+- name: Assert python3 is 3.9 or newer
+  ansible.builtin.assert:
+    that: wk_python.stdout is version('3.9', '>=')
+    fail_msg: >-
+      python3 on {{ inventory_hostname }} is {{ wk_python.stdout }}, and wk needs 3.9:
+      install it with the system's package manager
+    quiet: true
+
+- name: Assert git is installed
+  ansible.builtin.command:
+    argv: [git, --version]
+  changed_when: false
+  check_mode: false
+
+- name: Make the layout
+  ansible.builtin.file:
+    path: "{{ wk_home }}/{{ item.name }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - {name: bin, mode: "0755"}
+    - {name: cache, mode: "0755"}
+    - {name: git, mode: "0755"}
+    - {name: ws, mode: "0755"}
+    - {name: secrets, mode: "0700"}
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check out the client's commit
+  ansible.builtin.git:
+    repo: "{{ wk_repo }}"
+    dest: "{{ wk_home }}/tools"
+    version: "{{ wk_commit }}"
+    force: true
+
+- name: Link wk into bin
+  ansible.builtin.file:
+    src: "{{ wk_home }}/tools/wk"
+    dest: "{{ wk_home }}/bin/wk"
+    state: link
+
+- name: Look for a bash profile
+  ansible.builtin.stat:
+    path: "{{ ansible_facts['env']['HOME'] }}/.bash_profile"
+  register: wk_bash_profile
+
+# A profile line, not a link in ~/.local/bin: no default login PATH holds ~/.local/bin on macOS or for root.
+# zsh reads ~/.zprofile; bash reads ~/.bash_profile when there is one, else ~/.profile, as sh does.
+- name: Put bin on the login shell's PATH
+  ansible.builtin.lineinfile:
+    path: >-
+      {{ ansible_facts['env']['HOME'] }}/{{ '.zprofile' if ansible_facts['user_shell'] is search('/zsh$')
+      else '.bash_profile' if wk_bash_profile.stat.exists else '.profile' }}
+    line: 'export PATH={{ (wk_home ~ "/bin") | quote }}:"$PATH"'
+    create: true
+    mode: "0644"
+
+# A user unit runs without a login session only while the user lingers.
+- name: Let the user's units run without a login
+  ansible.builtin.command:
+    argv: [loginctl, enable-linger, "{{ ansible_facts['user_id'] }}"]
+    creates: "/var/lib/systemd/linger/{{ ansible_facts['user_id'] }}"
+  when: "'linux' in group_names"
+  tags: [pueue, openbao, injector]

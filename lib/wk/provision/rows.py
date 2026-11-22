@@ -1,20 +1,49 @@
 """The doctor rows that belong to no other lane: wk itself on a server, and what the client needs."""
 
-from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
-from wk.provision import tools
+import shlex
 
+from wk.core import hooks
+from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
+from wk.core.machine import TIMED_OUT
+from wk.creds import bao
+from wk.provision import ansible
+
+PYTHON = (3, 9)
+LAYOUT = {"bin": "d755", "cache": "d755", "git": "d755", "ws": "d755", "secrets": "d700"}
 DISK_FLOOR_GB = 20
 CLOCK_SKEW = 30
 TAILSCALE_TIMEOUT = 4       # `tailscale status` hangs while its daemon is wedged
 
 
+def tool(m, name, argv, remedy, timeout=30, env=None):
+    """A row for a program that must answer: no answer in time is unknown, any other failure is missing."""
+    r = m.run(argv, timeout=timeout, env=env)
+    said = (r.out or r.err).strip().split("\n")[0]
+    if r.rc == TIMED_OUT:
+        return DoctorRow(name, UNKNOWN, "`%s` did not answer in %ds" % (shlex.join(argv), timeout), remedy)
+    return DoctorRow(name, OK if r.ok else MISSING, said, remedy)
+
+
+def prerequisites(m):
+    """What a server must already have; the playbook asserts both and installs neither."""
+    remedy = "install it on %s with the system's package manager" % m.name
+    python = tool(m, "python3", ["python3", "-c", "import sys; print('%d.%d' % sys.version_info[:2])"], remedy)
+    if python.status == OK and tuple(int(n) for n in python.detail.split(".")) < PYTHON:
+        python = DoctorRow("python3", MISSING, "%s is older than %d.%d" % ((python.detail,) + PYTHON), remedy)
+    return [python, tool(m, "git", ["git", "--version"], remedy)]
+
+
 def commit(inv, m, home, remedy):
-    mine, theirs = tools.head(inv), tools.commit(m, home + "/tools")
+    """The commit checked out at tools/ is this checkout's, with no change to its tree."""
+    mine, sha = ansible.head(inv), m.run(["git", "-C", home + "/tools", "rev-parse", "HEAD"])
+    theirs = "no checkout"
+    if sha.ok:
+        theirs = sha.out.strip() + (" with changes" if m.run(["git", "-C", home + "/tools", "status", "--porcelain"]).out.strip() else "")
     if not mine:
         return DoctorRow("wk commit", UNKNOWN, "%s has no commit to compare with" % inv.root, remedy)
     if theirs == mine:
         return DoctorRow("wk commit", OK, mine)
-    return DoctorRow("wk commit", MISSING, "%s has %s, and this checkout is at %s" % (m.name, theirs or "no checkout", mine), remedy)
+    return DoctorRow("wk commit", MISSING, "%s has %s, and this checkout is at %s" % (m.name, theirs, mine), remedy)
 
 
 def path(m, home, remedy):
@@ -23,7 +52,7 @@ def path(m, home, remedy):
 
 
 def layout(m, home, remedy):
-    lacking = ["%s (%s)" % found for found in tools.lacking(m, home)]
+    lacking = hooks.lacking(m, {"%s/%s" % (home, name): mode for name, mode in LAYOUT.items()})
     return DoctorRow("layout", MISSING if lacking else OK, ", ".join(lacking) and "absent or wrongly moded: " + ", ".join(lacking), remedy)
 
 
@@ -50,17 +79,15 @@ def clock(inv, m):
 def server(inv, conf):
     m, remedy = inv.machine(conf.name), "wk machine setup %s" % conf.name
     home = inv.wk_home_on(m)
-    return tools.prerequisites(m) + [commit(inv, m, home, remedy), path(m, home, remedy), layout(m, home, remedy),
-                                     disk(m, home), clock(inv, m)]
+    return prerequisites(m) + [commit(inv, m, home, remedy), path(m, home, remedy), layout(m, home, remedy),
+                               disk(m, home), clock(inv, m)]
 
 
 def client(inv):
-    m = inv.here
-    addr = inv.env.get("BAO_ADDR")
-    token = "BAO_TOKEN" if inv.env.get("BAO_TOKEN") else "~/.vault-token" if m.exists(m.home + "/.vault-token") else ""
-    return [tools.tool(m, "ssh", ["ssh", "-V"], "install OpenSSH"),
-            tools.tool(m, "git", ["git", "--version"], "install git"),
-            tools.tool(m, "tailscale", ["tailscale", "status", "--peers=false"], "install Tailscale, then `tailscale up`", TAILSCALE_TIMEOUT),
-            DoctorRow("BAO_ADDR", OK if addr else MISSING, addr or "not set",
-                      "export BAO_ADDR=<the credential server's OpenBao address> in your shell's profile"),
-            DoctorRow("store token", OK if token else MISSING, token or "no BAO_TOKEN and no ~/.vault-token", "bao login")]
+    m, addr = inv.here, bao.address(inv)
+    return [tool(m, "ssh", ["ssh", "-V"], "install OpenSSH"),
+            tool(m, "git", ["git", "--version"], "install git"),
+            tool(m, "tailscale", ["tailscale", "status", "--peers=false"], "install Tailscale, then `tailscale up`", TAILSCALE_TIMEOUT),
+            tool(m, "ansible", ["ansible-playbook", "--version"], ansible.INSTALL),
+            tool(m, "bao", ["bao", "version"], "brew install openbao, or your distribution's openbao package"),
+            tool(m, "store login", ["bao", "token", "lookup", "-format=json"], "BAO_ADDR=%s bao login" % addr, env={"BAO_ADDR": addr})]

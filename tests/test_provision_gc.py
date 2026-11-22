@@ -6,7 +6,7 @@ from tests.world import World
 from wk.cmd import gc
 from wk.core.machine import Result
 
-SMALL = {"desk": "kind=client", "lin": "kind=linux", "mac": "kind=mac"}
+SMALL = {"desk": "kind=client", "lin": "kind=linux\nrole=credential", "mac": "kind=mac"}
 LISTING = "lin      ccache                       9 GB    (--deep takes it)\nlin      tmp                          2 MB\n"
 
 

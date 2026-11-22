@@ -1,0 +1,8 @@
+---
+wk_agents: "{{ wk_home }}/cache/agents"
+wk_claude_dir: "{{ wk_agents }}/claude/{{ wk_claude_version }}"
+wk_claude_stage: "{{ wk_agents }}/claude/.stage"
+wk_claude_under: ".local/share/claude/versions/{{ wk_claude_version }}"
+wk_pi_dir: "{{ wk_agents }}/pi"
+wk_node_usable: >-
+  {{ wk_node_found.rc == 0 and (wk_node_found.stdout | trim | regex_replace('^v', '')) is version(wk_node, '>=') }}

@@ -1,8 +1,4 @@
-from wk.core.hooks import DoctorRow, GcRow, Stage
-
-
-def stages(inv, conf):
-    return [Stage(30, "alpha-late", lambda: False), Stage(10, "alpha-early", lambda: True)]
+from wk.core.hooks import DoctorRow, GcRow
 
 
 def doctor(inv, conf, ws):

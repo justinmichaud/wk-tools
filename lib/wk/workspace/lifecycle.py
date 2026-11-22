@@ -83,7 +83,6 @@ def wipe(inv, m, ws):
 def make(inv, name):
     """Converge this server on a ready workspace `name`. A half-made one is wiped and remade."""
     m, home = inv.here, inv.wk_home
-    inv.fleet.server(inv.fleet.hostname)
     ws = at(inv, m, name, CREATING)
     store, src, again = mirror.where(home), ws.path + "/src", "`wk new %s` again remakes it" % name
     if made(m, ws):

@@ -1,10 +1,12 @@
+import json
 import shlex
 import unittest
 
 from tests import agent_toy
 from tests.world import CONFS, World
-from wk.agent import install
+from wk.agent import session
 from wk.agent.wrapper import wrap
+from wk.core.errors import Unreachable
 from wk.core.machine import Result
 
 HOME = "/home/u/wk"
@@ -18,9 +20,10 @@ ENV = {"HOME": "/home/u", "USER": "u", "PATH": HOME + "/shims:" + HOME + "/bin:/
        "WK_AGENT": "1", "WK_WORKSPACE": "x"}
 CLAUDE_ENV = dict(ENV, HTTPS_PROXY="http://vault:3128", https_proxy="http://vault:3128", NODE_EXTRA_CA_CERTS=HOME + "/injector-ca.pem",
                   CLAUDE_SECURESTORAGE_CONFIG_DIR=HOME + "/claude-login", DISABLE_AUTOUPDATER="1")
-CLAUDE = [install.claude_bin(HOME), "--dangerously-skip-permissions", "--remote-control", "x"]
-PI = [install.pi_bin(HOME)]
-ANSWERED = install.answered(None, SRC)
+CLAUDE = [session.claude_bin(HOME), "--dangerously-skip-permissions", "--remote-control", "x"]
+PI = [session.pi_bin(HOME)]
+ANSWERED = session.answered(None, SRC)
+PORT = 24583       # 20000 + crc32("ai claude x") % 10000
 
 
 def make(on="lin", listing=Result(0, ""), dump=Result(0, "HOME=/home/u\0PWD=%s\0" % SRC), state="ready", confs=CONFS):
@@ -29,7 +32,7 @@ def make(on="lin", listing=Result(0, ""), dump=Result(0, "HOME=/home/u\0PWD=%s\0
     w = World(commands=[agent_toy], confs=confs)
     w.workspace("x", on=on, state=state)
     m = w.machines[on]
-    m.files.update({install.claude_bin(HOME): "claude", install.pi_bin(HOME): "pi"})
+    m.files.update({session.claude_bin(HOME): "claude", session.pi_bin(HOME): "pi"})
     m.on(INSIDE + ("env", "-0"), SEEN)
     m.on(INSIDE + ("sh", "-c"), "")
     m.on(INSIDE + WRAPPED[on], lambda call: listing if "ls" in call.argv else dump)
@@ -67,14 +70,54 @@ class TestStart(unittest.TestCase):
             self.assertIn("sandbox-exec -p '(version 1)(allow default)(deny file-read* (subpath \"/home/u/wk/secrets\"))' env -i ", r.calls[-1])
             self.assertIn("credentials are hidden by a Seatbelt profile\n", r.err)
 
-    def test_on_a_borrowed_box_the_wrapper_is_the_minimal_environment_and_it_says_so(self):
+    def test_on_a_borrowed_box_claude_reaches_the_injector_through_the_port_the_clients_ssh_forwards(self):
+        w = make("box")
+        r = w.wk("ai", "claude", "x")
+        handed = [c for c in w.machines["box"].calls if c.argv[:2] == ("wk", "ai")][0]
+        self.assertEqual((handed.forward, handed.env), ((PORT, "vault:3128"), {"WK_FORWARD": str(PORT)}))
+        env = dict(CLAUDE_ENV, HTTPS_PROXY="http://127.0.0.1:%d" % PORT, https_proxy="http://127.0.0.1:%d" % PORT)
         auto = [CLAUDE[0], "--permission-mode", "auto", "--remote-control", "x"]
-        for agent, argv, env in (("claude", auto, CLAUDE_ENV), ("pi", PI, ENV)):
-            r = make("box").wk("ai", agent, "x", on="box")
-            self.assertEqual([c for c in r.calls if "write" not in c], probes("box", env) + [line("box", argv, env, tty=True)])
-            self.assertIn("[box] fake-exec -t x %s env -i " % SRC, r.calls[-1])
-            self.assertEqual(r.err, "==> starting %s in x: no credential is delivered to a borrowed box, so the wrapper is the "
-                                    "minimal environment alone\n" % agent)
+        self.assertEqual((r.code, r.calls[-1]), (0, line("box", auto, env, tty=True)))
+        self.assertIn("[box] fake-exec -t x %s env -i " % SRC, r.calls[-1])
+        self.assertEqual(r.err, "==> starting claude in x: no credential is delivered to a borrowed box, so the wrapper is the "
+                                "minimal environment alone\n")
+
+    def test_an_ssh_that_ends_before_the_command_ran_is_the_box_not_answering_or_the_forward_refused(self):
+        w = make("box")
+
+        def ended(call):
+            raise Unreachable("box", "")
+        w.machines["box"].on(("wk", "ai"), ended)
+        r = w.wk("ai", "claude", "x")
+        self.assertEqual(r.code, 4)
+        self.assertEqual(r.err, "error: ssh to box ended before `wk ai claude x` ran there: box did not answer, or its port 127.0.0.1:%d is taken "
+                                "and the forward was refused (ssh said which, above)\n    a taken port is this same command still running from "
+                                "another terminal: end it, then type this again\n" % PORT)
+
+    def test_claude_typed_on_the_borrowed_box_itself_has_no_forward_and_is_refused_naming_the_client(self):
+        r = make("box").wk("ai", "claude", "x", on="box")
+        self.assertEqual((r.code, r.effects), (4, []))
+        self.assertEqual(r.err, "error: box is a borrowed box, off the tailnet: a session there reaches the injector through the ssh session "
+                                "that starts it\n    start it from the client: wk ai claude x\n")
+
+    def test_pi_on_a_borrowed_box_needs_no_injector_and_starts_where_it_is_typed(self):
+        r = make("box").wk("ai", "pi", "x", on="box")
+        self.assertEqual(r.calls, probes("box", ENV) + [line("box", PI, ENV, tty=True)])
+
+    def test_a_server_of_the_owners_is_on_the_tailnet_and_is_handed_no_forward(self):
+        w = make()
+        w.wk("ai", "claude", "x")
+        handed = [c for c in w.machines["lin"].calls if c.argv[:2] == ("wk", "ai")][0]
+        self.assertEqual((handed.forward, handed.env), (None, {}))
+
+    def test_on_the_credential_server_the_injectors_and_the_stores_directories_are_hidden_too(self):
+        confs = dict(CONFS, lin="kind=linux\nrole=credential", vault="kind=mac")
+        r = make(confs=confs).wk("ai", "pi", "x", on="lin")
+        hidden = [HOME + "/secrets", HOME + "/injector", HOME + "/openbao"]
+        self.assertEqual(r.calls[-1], "[lin] " + shlex.join(["fake-exec", "-t", "x", SRC] + wrap("linux", PI, hidden, ENV)))
+        self.assertEqual([c.split(" -- ")[1] for c in r.calls[2:5]], ["ls -A " + path for path in hidden])
+        for path in hidden:
+            self.assertIn("--tmpfs %s " % path, r.calls[-1])
 
     def test_the_words_after_the_dashes_go_to_the_agent_and_its_exit_code_comes_back(self):
         w = make()
@@ -121,7 +164,7 @@ class TestRefusals(unittest.TestCase):
         self.refused(make(state="broken"), "workspace x on lin is not made (broken): wait for its `wk new`, or `wk new x` remakes a broken one")
 
     def test_an_agent_that_is_not_installed(self):
-        for agent, path in (("claude", install.claude_bin(HOME)), ("pi", install.pi_bin(HOME))):
+        for agent, path in (("claude", session.claude_bin(HOME)), ("pi", session.pi_bin(HOME))):
             w = make()
             del w.machines["lin"].files[path]
             self.refused(w, "%s is not installed on lin: there is no %s\n    wk machine setup lin" % (agent, path), "ai", agent, "x")
@@ -183,3 +226,14 @@ class TestDoctorRow(unittest.TestCase):
         self.assertEqual(self.row(make(listing=Result(0, "k\n"))).split(" | ")[1:3], ["missing", "/home/u/wk/secrets is readable under the wrapper: it lists k"])
         self.assertEqual(self.row(make(dump=Result(1, "", "died"))),
                          "credential wrapper | unknown | the stand-in could not print its environment (exit 1): died | check that the workspace runs: wk enter x\n")
+
+
+class TestStartUpAnswers(unittest.TestCase):
+    def test_the_start_up_answers_are_added_to_what_claude_already_keeps(self):
+        new = json.loads(session.answered('{"numStartups": 3, "projects": {"/other": {"x": 1}}}', "/w/src"))
+        self.assertEqual(new, {"numStartups": 3, "hasCompletedOnboarding": True, "remoteDialogSeen": True,
+                               "projects": {"/other": {"x": 1}, "/w/src": {"hasTrustDialogAccepted": True}}})
+
+    def test_no_file_is_an_empty_one_and_an_answered_one_is_left(self):
+        text = session.answered(None, "/w/src")
+        self.assertEqual((sorted(json.loads(text)), session.answered(text, "/w/src")), (["hasCompletedOnboarding", "projects", "remoteDialogSeen"], None))

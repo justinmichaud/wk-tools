@@ -1,23 +1,6 @@
 from wk.core.act import die
 from wk.core.decl import Opt
-from wk.core.hooks import DoctorRow, GcRow, Stage
-
-
-def mark(inv, conf, name):
-    """A stage that writes /done/<name> once, and fails while /fail/<name> is there."""
-    def run():
-        m = inv.machine(conf.name)
-        if m.exists("/fail/" + name):
-            die("%s broke" % name)
-        if m.exists("/done/" + name):
-            return False
-        m.write("/done/" + name, "1")
-        return True
-    return run
-
-
-def stages(inv, conf):
-    return [Stage(30, "third", mark(inv, conf, "third")), Stage(10, "first", mark(inv, conf, "first"))]
+from wk.core.hooks import DoctorRow, GcRow
 
 
 def doctor(inv, conf, ws):

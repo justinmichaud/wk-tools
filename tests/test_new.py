@@ -6,7 +6,7 @@ from tests.ws import CLONE, FETCHED, HOME, MAKE, MIRROR, WIPE, server
 from wk.core import seams
 from wk.core.machine import Result
 
-ASKED = ["[box] wk ls --json", "[lin] wk ls --json", "[mac] wk ls --json"]
+ASKED = ["[box] wk ls --json", "[lin] wk ls --json", "[mac] wk ls --json", "[vault] wk ls --json"]
 
 
 def make(**how):
@@ -62,10 +62,6 @@ class TestNewOnTheServer(unittest.TestCase):
         r = self.w.wk("new", "x", "--on", "mac")
         self.assertEqual((r.code, r.err, r.calls), (1, "error: this is lin, not mac: type it on the client, which hands it to mac\n", []))
 
-    def test_a_machine_that_holds_no_workspace_refuses_to_make_one(self):
-        r = World(here="vault").wk("new", "x")
-        self.assertEqual((r.code, r.calls), (1, []))
-        self.assertIn("error: vault holds no workspace: it is the credential server", r.err)
 
     def test_killed_after_any_effect_and_typed_again_it_converges(self):
         converges(self, lambda: make(here="lin"), "new", "x")
@@ -93,17 +89,17 @@ class TestNewOnTheClient(unittest.TestCase):
     def test_without_on_the_server_is_the_client_confs_default_server(self):
         w = make(confs=dict(CONFS, desk="kind=client\ndefault_server=lin"))
         r = w.wk("new", "x")
-        self.assertEqual((r.code, r.calls[3], r.effects), (0, "[lin] wk new x", MAKE))
+        self.assertEqual((r.code, r.calls[4], r.effects), (0, "[lin] wk new x", MAKE))
 
     def test_no_server_named_anywhere_is_refused(self):
         r = self.w.wk("new", "x")
         self.assertEqual((r.code, r.err, r.calls),
                          (1, "error: no server to make x on: pass --on <server>, or set default_server= in machines/desk.conf\n", []))
 
-    def test_a_machine_that_holds_no_workspace_is_refused(self):
-        r = self.w.wk("new", "x", "--on", "vault")
+    def test_the_client_which_holds_no_workspace_is_refused(self):
+        r = self.w.wk("new", "x", "--on", "desk")
         self.assertEqual((r.code, r.calls), (1, []))
-        self.assertIn("error: vault holds no workspace: it is the credential server", r.err)
+        self.assertIn("error: desk is the client, which holds no workspace\n    servers: box, lin, mac, vault", r.err)
 
     def test_a_name_in_use_on_any_server_is_refused(self):
         self.w.workspace("x", on="mac")

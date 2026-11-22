@@ -1,6 +1,5 @@
-"""What `wk machine setup`, `wk doctor` and `wk gc` collect: any package wk.<lane> may hold a module `hooks` defining
+"""What `wk doctor` and `wk gc` collect: any package wk.<lane> may hold a module `hooks` defining
 
-    def stages(inv, conf): ...        # -> [Stage]      what `wk machine setup` converges on the machine `conf`
     def doctor(inv, conf, ws): ...    # -> [DoctorRow]  ws is a Workspace, or None for the machine itself
     def gc(inv, conf): ...            # -> [GcRow]
     def gc_flags(): ...               # -> [Opt]        the flags of `wk gc` that take this lane's flagged rows
@@ -17,16 +16,7 @@ import pkgutil
 from typing import Callable
 
 OK, MISSING, UNKNOWN = "ok", "missing", "unknown"
-
-
-@dataclasses.dataclass(frozen=True)
-class Stage:
-    """One idempotent step of setup. `run()` converges it and returns True when it changed something, False when it
-    was already so. Stages run in `order`: 10 wk itself, 20 pueue, 30 the mirror, 40 the build environment,
-    50 the agents, 60 the credentials."""
-    order: int
-    name: str
-    run: Callable
+LISTED = {"d755": "drwxr-xr-x", "d700": "drwx------", "600": "-rw-------", "644": "-rw-r--r--"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -50,10 +40,16 @@ class GcRow:
 
 
 def collect(hook, *args, package="wk"):
-    """Everything `hook` yields across the lanes, in lane-name order; stages by `order`."""
+    """Everything `hook` yields across the lanes, in lane-name order."""
     rows = []
     for lane in sorted(m.name for m in pkgutil.iter_modules(importlib.import_module(package).__path__) if m.ispkg):
         name = "%s.%s.hooks" % (package, lane)
         if importlib.util.find_spec(name):
             rows += getattr(importlib.import_module(name), hook, lambda *a: [])(*args)
-    return sorted(rows, key=lambda row: row.order) if hook == "stages" else rows
+    return rows
+
+
+def lacking(m, want):
+    """The paths of `want`, {path: a key of LISTED}, that `ls -ld` on `m` shows absent or moded otherwise."""
+    lines = m.run(["ls", "-ld"] + list(want)).out.splitlines()
+    return [path for path, mode in want.items() if not any(line.startswith(LISTED[mode]) and line.endswith(" " + path) for line in lines)]

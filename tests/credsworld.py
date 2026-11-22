@@ -1,19 +1,16 @@
-"""What the credential tests share: a World whose servers answer delivery's questions, a scripted HTTP function, and
+"""What the credential tests share: a World whose client names a model endpoint, a scripted HTTP function, and
 credentials that are built here and belong to nobody."""
 
 import base64
-import hashlib
 import json
 import struct
 from unittest import mock
 
-from tests import credstoy
 from tests.world import CONFS, World
 from wk.creds import injector, net
 
 URL = "https://llm.example/v1"
 TOKEN = "ghp_" + "x" * 12
-CA_PEM = "-----BEGIN CERTIFICATE-----\nnot a certificate\n-----END CERTIFICATE-----\n"
 
 
 def string(data):
@@ -36,28 +33,8 @@ def login(expires_ms=NotImplemented, access="access-one", refresh="refresh-one")
                                          "expiresAt": injector.NEVER_MS if expires_ms is NotImplemented else expires_ms}})
 
 
-def serve(machine):
-    """Script what delivery asks a server: the digests and modes it holds, and `install -d`."""
-    def status(call):
-        out = {}
-        for path in call.argv[4:]:
-            data = machine.files.get(path)
-            out[path] = ([machine.modes[path], hashlib.sha256(data.encode()).hexdigest()] if data is not None
-                         else [machine.dirs[path], None] if path in machine.dirs else None)
-        return json.dumps(out)
-
-    def install(call):
-        machine.dirs.update({path: call.argv[3] for path in call.argv[4:]})
-    machine.dirs = {}
-    machine.on(("python3", "-I", "-c"), status)
-    machine.on(("install", "-d", "-m"), install)
-
-
 def world(**secrets):
-    w = World(confs=dict(CONFS, desk="kind=client\nlitellm_url=%s" % URL), commands=[credstoy])
-    for machine in w.machines.values():
-        serve(machine)
-    w.machines["vault"].files["/home/u/wk/injector/ca.pem"] = CA_PEM
+    w = World(confs=dict(CONFS, desk="kind=client\nlitellm_url=%s" % URL))
     w.secrets.values.update({name.replace("_", "-"): value for name, value in secrets.items()})
     return w
 

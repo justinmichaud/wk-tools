@@ -1,1 +1,1 @@
-from wk.provision.hooks import doctor, gc, stages  # noqa: F401
+from wk.provision.hooks import doctor, gc  # noqa: F401

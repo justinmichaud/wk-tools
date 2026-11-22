@@ -82,7 +82,8 @@ class TestClient(unittest.TestCase):
 
     def test_a_build_group_with_another_limit_is_set_back_to_one(self):
         self.t.limit("build", 3)
-        self.assertEqual((self.t.limit("build", 1), self.t.limit("build", 1)), (True, False))
+        self.t.limit("build", 1)
+        self.t.limit("build", 1)
         self.assertEqual(self.effects()[1:], ["[srv] pueue parallel 1 --group build"])
 
     def test_a_dry_run_adds_nothing_and_has_no_id(self):
@@ -95,13 +96,10 @@ class TestClient(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "pueue does not answer on srv: Error: Failed to connect to the daemon\n    `wk machine setup srv` installs and starts it"):
             self.t.status()
 
-    def test_a_daemon_setup_has_yet_to_start_has_no_group_so_a_dry_run_plans_the_group_and_a_wet_run_fails_at_pueue(self):
-        del self.m.files[self.daemon.path]
-        with self.assertRaisesRegex(Refused, "pueue group failed on srv: Error: Failed to connect to the daemon\n    `wk doctor` says"):
-            self.t.limit("build", 1)
+    def test_a_dry_run_plans_the_build_group_a_running_daemon_lacks(self):
         act.begin(act.Flags(dry_run=True))
         with contextlib.redirect_stderr(io.StringIO()) as err:
-            self.assertTrue(self.t.limit("build", 1))
+            self.t.limit("build", 1)
         self.assertEqual(err.getvalue(), "would: [srv] %s group add build --parallel 1\n" % BIN)
 
     def test_a_refused_add_is_refused_with_pueues_words(self):

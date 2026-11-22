@@ -1,0 +1,38 @@
+{
+  "wk_repo": "https://github.com/justinmichaud/wk-tools.git",
+  "wk_pueue_version": "4.0.5",
+  "wk_pueue_assets": {
+    "Linux x86_64": {
+      "target": "x86_64-unknown-linux-musl",
+      "pueue": "5bf543b1861a5e5f449e38a5c6902cbcef473dca4d510023c22ec707b7c9307f",
+      "pueued": "de73266add8b61d622bd011a078929a2a788609b7e8511fb07e9162e6977ad7e"
+    },
+    "Linux aarch64": {
+      "target": "aarch64-unknown-linux-musl",
+      "pueue": "745a34f73719636dbb2b37b44e08c47f011dc46c13e49b84646abf3b88c7d3f5",
+      "pueued": "0b93fbd026d8df88010189e4e2f7d300a4f16354a6e4f9b2a81ec4bd072f6797"
+    },
+    "Darwin arm64": {
+      "target": "aarch64-apple-darwin",
+      "pueue": "7b3bedb2ea9903250a741eb41fba29c6e5a066b34ae34d43eefaeb9713585c45",
+      "pueued": "18c377cdccb7714c5545d90cf18fcc592b17ae15d5900fe8dab2f8ca9288d6f1"
+    }
+  },
+  "wk_openbao_version": "2.7.3",
+  "wk_openbao_port": 8200,
+  "wk_openbao_assets": {
+    "Linux x86_64": {
+      "target": "linux_amd64",
+      "sha256": "131df9a21cf3dd2dff47107110b369c9974cbdaa482bcbc723b81b3403c68ecd"
+    },
+    "Linux aarch64": {
+      "target": "linux_arm64",
+      "sha256": "b505b07af4206fdf0e81b747fcb7e9e63f2c2b05e26ead973cce62d0ed07d0e0"
+    }
+  },
+  "wk_injector_port": 3128,
+  "wk_claude_version": "2.1.308",
+  "wk_pi_package": "@earendil-works/pi-coding-agent",
+  "wk_node": "22.19",
+  "wk_build_tools": ["build-webkit", "build-jsc", "cmake", "ninja", "make", "xcodebuild", "run-webkit-tests", "run-javascriptcore-tests"]
+}

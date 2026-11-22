@@ -19,7 +19,7 @@ def __getattr__(name):
 
 def main(args, inv):
     here = inv.fleet.here
-    targets = [conf for conf in inv.fleet.machines() if conf.kind != "client"] if here.kind == "client" else [here]
+    targets = inv.fleet.servers() if here.kind == "client" else [here]
     chosen, code = [], 0
     for conf in targets:
         try:

@@ -3,10 +3,10 @@ import shutil
 import tempfile
 import unittest
 
-from wk.agent import install
+from tests import ROOT
 from wk.core.machine import Local
 
-SHIM = os.path.join(os.path.dirname(install.__file__), "shim.sh")
+SHIM = os.path.join(ROOT, "ansible", "roles", "agents", "files", "shim.sh")
 STUB = '#!/bin/sh\necho "real ninja in %s: $# args, last: ${2-}"\nexit 7\n'
 
 

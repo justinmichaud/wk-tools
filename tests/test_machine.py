@@ -170,7 +170,7 @@ class TestSsh(OnDisk):
 
     def test_a_command_goes_to_the_tailnet_name_wrapped_in_the_login_shell(self):
         self.m.run(["git", "status", "a b"])
-        self.assertEqual(self.sent("argv").splitlines(), SSH[1:] + ["srv", "\"$SHELL\" -lc 'git status '\"'\"'a b'\"'\"''"])
+        self.assertEqual(self.sent("argv").splitlines(), SSH + ["srv", "\"$SHELL\" -lc 'git status '\"'\"'a b'\"'\"''"])
 
     def test_the_options_bound_a_dead_address_and_a_vanished_session_and_share_one_connection(self):
         for option in ("BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=15", "ServerAliveCountMax=3",
@@ -180,6 +180,13 @@ class TestSsh(OnDisk):
     def test_cwd_and_env_become_part_of_the_remote_command(self):
         self.assertEqual(self.m.argv(["wk", "build"], cwd="/w s", env={"WK_YES": "1", "WK_DRY_RUN": "1"})[-1],
                          "\"$SHELL\" -lc 'cd '\"'\"'/w s'\"'\"' && env WK_DRY_RUN=1 WK_YES=1 wk build'")
+
+    def test_a_forward_is_a_reverse_forward_on_a_connection_of_its_own_that_fails_if_the_port_is_taken(self):
+        argv = self.m.argv(["wk", "ai", "claude", "x"], tty=True, forward=(20123, "vault:3128"))
+        self.assertEqual(argv[:7], ["ssh", "-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes", "-R", "127.0.0.1:20123:vault:3128"])
+        self.assertEqual((argv[7:-3], argv[-3:-1]), (SSH, ["-t", "srv"]))
+        self.m.run(["true"], forward=(20123, "vault:3128"))
+        self.assertIn("-R\n127.0.0.1:20123:vault:3128\n", self.sent("argv"))
 
     def test_an_interactive_run_asks_for_a_terminal(self):
         self.assertEqual(self.m.argv(["wk", "enter", "x"], tty=True)[-3:-1], ["-t", "srv"])

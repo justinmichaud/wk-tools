@@ -1,12 +1,8 @@
-"""The provisioning lane's own stage and rows: wk itself on a server, and the downloads in its cache no lane pins."""
+"""The provisioning lane's own rows: wk itself on a server, and the downloads in its cache no lane pins."""
 
 from wk.core import hooks
 from wk.core.act import die
-from wk.provision import rows, tools
-
-
-def stages(inv, conf):
-    return [hooks.Stage(10, "wk", lambda: tools.converge(inv, conf))]
+from wk.provision import rows
 
 
 def doctor(inv, conf, ws):

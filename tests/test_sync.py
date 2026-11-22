@@ -16,7 +16,7 @@ def fetch(name, on="lin"):
 
 def make(**how):
     w = World(**how)
-    for name in ("lin", "mac", "box"):
+    for name in ("lin", "mac", "box", "vault"):
         server(w, name)
     w.workspace("x")
     w.workspace("y")
@@ -78,7 +78,8 @@ class TestSyncOnTheClient(unittest.TestCase):
         r = self.w.wk("sync")
         self.assertEqual(r.code, 0)
         self.assertEqual(r.effects, [line.replace("[lin]", "[box]") for line in REFRESH] + REFRESH + [fetch("x"), fetch("y")]
-                         + [line.replace("[lin]", "[mac]") for line in REFRESH] + [fetch("m", "mac")])
+                         + [line.replace("[lin]", "[mac]") for line in REFRESH] + [fetch("m", "mac")]
+                         + [line.replace("[lin]", "[vault]") for line in REFRESH])
 
     def test_a_named_workspace_is_synced_on_its_server_alone(self):
         r = self.w.wk("sync", "m")
@@ -87,13 +88,13 @@ class TestSyncOnTheClient(unittest.TestCase):
     def test_a_server_that_does_not_answer_is_warned_about_and_the_rest_still_sync(self):
         self.w.machines["lin"].down = True
         r = self.w.wk("sync")
-        self.assertEqual((r.code, r.effects[-1]), (4, fetch("m", "mac")))
+        self.assertEqual((r.code, fetch("m", "mac") in r.effects), (4, True))
         self.assertIn("warning: cannot reach lin", r.err)
 
     def test_a_server_whose_sync_fails_fails_the_whole(self):
         self.w.machines["box"].on(("git", "-C", MIRROR, "fetch"), Result(128, "", "fatal\n"))
         r = self.w.wk("sync")
-        self.assertEqual((r.code, r.effects[-1]), (1, fetch("m", "mac")))
+        self.assertEqual((r.code, fetch("m", "mac") in r.effects), (1, True))
 
     def test_a_fleet_with_no_server_syncs_nothing(self):
         r = World(confs={"desk": "kind=client"}).wk("sync")

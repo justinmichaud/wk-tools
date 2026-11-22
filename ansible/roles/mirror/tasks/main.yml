@@ -1,0 +1,20 @@
+---
+# The mirror: `wk sync` on the server owns its configuration and its fetch (lib/wk/workspace/mirror.py);
+# this runs it once, when the mirror lacks a branch a checkout asks it for.
+
+- name: Fetch the mirror (not under --check, which fetches nothing)
+  when: not ansible_check_mode
+  block:
+    - name: Ask the mirror for its branches
+      ansible.builtin.command:
+        argv: [git, -C, "{{ wk_home }}/git/{{ wk_project.mirror }}", rev-parse, --verify, --quiet, "refs/heads/{{ item }}"]
+      loop: "{{ wk_project.branches }}"
+      register: wk_mirror
+      changed_when: false
+      failed_when: false
+
+    - name: Make, configure and fetch the mirror
+      ansible.builtin.command:
+        argv: ["{{ wk_home }}/tools/wk", sync]
+      when: wk_mirror.results | rejectattr('rc', 'eq', 0) | list | length > 0
+      changed_when: true

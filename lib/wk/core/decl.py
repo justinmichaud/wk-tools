@@ -20,6 +20,8 @@ where    "client": fleet-wide, refused on a server.  "server": runs on a server;
 takes    positionals in order; a trailing `?` makes one optional. The one named `ws` is the workspace.
 opts     Opt(flag, help) is a boolean, Opt(flag, help, "name") takes a value; args.<flag without dashes>.
 tail     the words after `--` belong to another program: args.tail.
+forward  a function (inv, the server's Conf) -> "host:port" or None: what this side reaches that the command needs
+         on the server it is handed to. The hand-over's ssh carries it as a reverse forward ($WK_FORWARD is its port).
 readonly      it changes nothing; an `act` inside it is a Bug.
 destructive   it removes, overwrites or revokes; it calls `confirm` before its first `act`, or that is a Bug."""
 
@@ -46,6 +48,7 @@ class Command:
     takes: tuple = ()
     opts: tuple = ()
     tail: bool = False
+    forward: object = None
     readonly: bool = False
     destructive: bool = False
     default: bool = False
