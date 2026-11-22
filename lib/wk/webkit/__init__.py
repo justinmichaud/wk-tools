@@ -26,7 +26,7 @@ SOFTWARE_GL = ["LIBGL_ALWAYS_SOFTWARE=1", "GALLIUM_DRIVER=llvmpipe", "WEBKIT_DIS
 
 @dataclasses.dataclass(frozen=True)
 class Preset:
-    """`flags` are the port and configuration every script takes; `products` is where they land under the output directory."""
+    """`flags` are the port and configuration every script takes; `products` is its directory under the workspace's build/."""
     name: str
     kinds: tuple
     system: str
@@ -74,15 +74,21 @@ def resolve(name, kind):
     return here[0]
 
 
+def products(preset, out):
+    """Where a preset builds, under the workspace's build directory. It is the scripts' WEBKIT_OUTPUTDIR, which they
+    take whole as the product directory (webkitdirs.pm, usesPerConfigurationBuildDirectory): so each preset has its own."""
+    return "%s/%s" % (out, preset.products)
+
+
 def build_argv(preset, src, out, jobs, extra_cmake=""):
     """`extra_cmake` is a machine's own flags, comma-separated as its conf holds them."""
     script = "Tools/Scripts/" + preset.script
     if preset.system == XCODE:
         # build-jsc appends an unknown argument to a `make` line, where ARGS= is the hole for xcodebuild's.
         limit = ["ARGS=-jobs %d" % jobs] if preset.script == "build-jsc" else ["-jobs", str(jobs)]
-        return ["env", "WEBKIT_OUTPUTDIR=" + out, script] + list(preset.flags) + limit
+        return ["env", "WEBKIT_OUTPUTDIR=" + products(preset, out), script] + list(preset.flags) + limit
     cmake = " ".join(filter(None, [COMMON, preset.cmake] + extra_cmake.split(",")))
-    env = ["CC=clang", "CXX=clang++", "WEBKIT_OUTPUTDIR=" + out, "CCACHE_DIR=%s/ccache" % out, "CCACHE_BASEDIR=" + src,
+    env = ["CC=clang", "CXX=clang++", "WEBKIT_OUTPUTDIR=" + products(preset, out), "CCACHE_DIR=%s/ccache" % out, "CCACHE_BASEDIR=" + src,
            "CCACHE_SLOPPINESS=" + SLOPPINESS, "CCACHE_NOHASHDIR=true", "NUMBER_OF_PROCESSORS=%d" % jobs,
            "CMAKE_BUILD_PARALLEL_LEVEL=%d" % jobs,
            "WEBKIT_NINJA_LINK_MAX=1"]   # a job is budgeted as a compile; two gtk-debug links measured 5.5 + 4.2 GB at -j3
@@ -92,12 +98,12 @@ def build_argv(preset, src, out, jobs, extra_cmake=""):
 
 
 def run_argv(preset, out, args):
-    products = "%s/%s" % (out, preset.products)
+    built = products(preset, out)
     if not preset.jsc_only:
-        return ["env", "WEBKIT_OUTPUTDIR=" + out, "Tools/Scripts/run-minibrowser"] + list(preset.flags) + list(args)
+        return ["env", "WEBKIT_OUTPUTDIR=" + products(preset, out), "Tools/Scripts/run-minibrowser"] + list(preset.flags) + list(args)
     if preset.system == XCODE:
-        return ["env", "DYLD_FRAMEWORK_PATH=" + products, products + "/jsc", "--validateOptions=1"] + list(args)
-    return ["env", "LD_LIBRARY_PATH=%s/lib" % products, products + "/bin/jsc", "--validateOptions=1"] + list(args)
+        return ["env", "DYLD_FRAMEWORK_PATH=" + built, built + "/jsc", "--validateOptions=1"] + list(args)
+    return ["env", "LD_LIBRARY_PATH=%s/lib" % built, built + "/bin/jsc", "--validateOptions=1"] + list(args)
 
 
 def paths(args):
@@ -105,7 +111,7 @@ def paths(args):
 
 
 def test_argv(preset, out, jobs, args):
-    env = ["env", "WEBKIT_OUTPUTDIR=" + out]
+    env = ["env", "WEBKIT_OUTPUTDIR=" + products(preset, out)]
     options = [a for a in args if a.startswith("-")]
     if preset.jsc_only:
         # run-javascriptcore-tests takes no path: a bare word is ignored, so the tests named become its filter.

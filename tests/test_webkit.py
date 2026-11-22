@@ -10,7 +10,7 @@ SRC, OUT = "/w/x/src", "/w/x/build"
 RELEASE = ('-DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS_RELWITHDEBINFO="-O3 -g -DNDEBUG" '
            '-DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -g -DNDEBUG" -DDEBUG_FISSION=ON')
 COMMON = "-DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF -DCMAKE_Swift_NUM_THREADS=1"
-CCACHE = ["CC=clang", "CXX=clang++", "WEBKIT_OUTPUTDIR=/w/x/build", "CCACHE_DIR=/w/x/build/ccache", "CCACHE_BASEDIR=/w/x/src",
+CCACHE = ["CC=clang", "CXX=clang++", "WEBKIT_OUTPUTDIR=/w/x/build/JSCOnly/Release", "CCACHE_DIR=/w/x/build/ccache", "CCACHE_BASEDIR=/w/x/src",
           "CCACHE_SLOPPINESS=pch_defines,time_macros,include_file_mtime,include_file_ctime", "CCACHE_NOHASHDIR=true"]
 
 
@@ -61,8 +61,8 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(self.build("gtk-release", "linux")[-2], "--cmakeargs=%s %s" % (COMMON, RELEASE))
 
     def test_xcode_is_told_its_jobs_through_each_scripts_own_door(self):
-        self.assertEqual(self.build("mac-release", "mac", 6), ["env", "WEBKIT_OUTPUTDIR=/w/x/build", "Tools/Scripts/build-webkit", "--release", "-jobs", "6"])
-        self.assertEqual(self.build("jsc-debug", "mac", 6), ["env", "WEBKIT_OUTPUTDIR=/w/x/build", "Tools/Scripts/build-jsc", "--debug", "ARGS=-jobs 6"])
+        self.assertEqual(self.build("mac-release", "mac", 6), ["env", "WEBKIT_OUTPUTDIR=/w/x/build/Release", "Tools/Scripts/build-webkit", "--release", "-jobs", "6"])
+        self.assertEqual(self.build("jsc-debug", "mac", 6), ["env", "WEBKIT_OUTPUTDIR=/w/x/build/Debug", "Tools/Scripts/build-jsc", "--debug", "ARGS=-jobs 6"])
 
 
 class TestRun(unittest.TestCase):
@@ -74,12 +74,12 @@ class TestRun(unittest.TestCase):
 
     def test_a_full_port_runs_its_browser_launcher(self):
         self.assertEqual(webkit.run_argv(webkit.resolve("gtk-release", "linux"), OUT, ["https://example.org"]),
-                         ["env", "WEBKIT_OUTPUTDIR=/w/x/build", "Tools/Scripts/run-minibrowser", "--gtk", "--release", "https://example.org"])
+                         ["env", "WEBKIT_OUTPUTDIR=/w/x/build/GTK/Release", "Tools/Scripts/run-minibrowser", "--gtk", "--release", "https://example.org"])
 
 
 class TestTest(unittest.TestCase):
     def test_jsc_tests_take_no_path_so_the_tests_named_become_one_filter(self):
-        head = ["env", "WEBKIT_OUTPUTDIR=/w/x/build", "Tools/Scripts/run-javascriptcore-tests", "--jsc-only", "--release", "--no-build",
+        head = ["env", "WEBKIT_OUTPUTDIR=/w/x/build/JSCOnly/Release", "Tools/Scripts/run-javascriptcore-tests", "--jsc-only", "--release", "--no-build",
                 "--no-fail-fast", "--memory-limited", "--child-processes=4"]
         preset = webkit.resolve("jsc-release", "linux")
         self.assertEqual(webkit.test_argv(preset, OUT, 4, []), head)
@@ -88,11 +88,11 @@ class TestTest(unittest.TestCase):
 
     def test_layout_tests_render_in_software_on_a_cmake_port_and_take_their_words_as_they_are(self):
         self.assertEqual(webkit.test_argv(webkit.resolve("wpe-release", "linux"), OUT, 2, ["fast/dom", "--verbose"]),
-                         ["env", "WEBKIT_OUTPUTDIR=/w/x/build", "LIBGL_ALWAYS_SOFTWARE=1", "GALLIUM_DRIVER=llvmpipe", "WEBKIT_DISABLE_DMABUF_RENDERER=1",
+                         ["env", "WEBKIT_OUTPUTDIR=/w/x/build/WPE/Release", "LIBGL_ALWAYS_SOFTWARE=1", "GALLIUM_DRIVER=llvmpipe", "WEBKIT_DISABLE_DMABUF_RENDERER=1",
                           "Tools/Scripts/run-webkit-tests", "--wpe", "--release", "--no-build", "--no-retry-failures", "--child-processes=2",
                           "fast/dom", "--verbose"])
         self.assertEqual(webkit.test_argv(webkit.resolve("mac-debug", "mac"), OUT, 2, [])[:4],
-                         ["env", "WEBKIT_OUTPUTDIR=/w/x/build", "Tools/Scripts/run-webkit-tests", "--debug"])
+                         ["env", "WEBKIT_OUTPUTDIR=/w/x/build/Debug", "Tools/Scripts/run-webkit-tests", "--debug"])
 
     def test_the_words_that_name_tests_are_those_that_are_not_options(self):
         self.assertEqual(webkit.paths(["fast/dom", "--verbose", "a.html?q=1"]), ["fast/dom", "a.html?q=1"])

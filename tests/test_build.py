@@ -58,7 +58,7 @@ class TestBuild(unittest.TestCase):
     def test_on_a_mac_it_builds_with_xcode_sized_from_total_memory(self):
         w = held("mac")
         r = w.wk("build", "x", "mac-release", "--detach")
-        self.assertEqual((r.code, added(w, "mac")[0][6:]), (0, ["30720", "0", "env", "WK_BUILD=1", "WEBKIT_OUTPUTDIR=" + OUT, "Tools/Scripts/build-webkit", "--release", "-jobs", "10"]))
+        self.assertEqual((r.code, added(w, "mac")[0][6:]), (0, ["30720", "0", "env", "WK_BUILD=1", "WEBKIT_OUTPUTDIR=" + OUT + "/Release", "Tools/Scripts/build-webkit", "--release", "-jobs", "10"]))
 
     def test_the_servers_environment_caps_the_jobs(self):
         w = held(here="lin")

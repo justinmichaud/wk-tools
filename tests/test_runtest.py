@@ -26,7 +26,7 @@ class TestRun(unittest.TestCase):
 
     def test_preset_chooses_another_build_and_a_full_port_runs_its_browser(self):
         r = built().wk("run", "x", "--preset", "gtk-debug")
-        self.assertEqual((r.code, r.effects), (0, [EXEC + "env WK_BUILD=1 WEBKIT_OUTPUTDIR=%s Tools/Scripts/run-minibrowser --gtk --debug" % OUT]))
+        self.assertEqual((r.code, r.effects), (0, [EXEC + "env WK_BUILD=1 WEBKIT_OUTPUTDIR=%s/GTK/Debug Tools/Scripts/run-minibrowser --gtk --debug" % OUT]))
 
     def test_with_nothing_built_and_no_preset_it_is_refused(self):
         w = world()
@@ -47,7 +47,7 @@ class TestTest(unittest.TestCase):
         r = w.wk("test", "x", "--", "stress/a.js")
         self.assertEqual((r.code, r.out, r.err), (0, "Ran 100 tests\n", "==> x:test:jsc-release: 16 jobs at 1536 MB each, a 24576 MB budget\n"
                                                                         "==> x:test:jsc-release finished\n"))
-        self.assertEqual(added(w, "lin")[1], ["fake-exec", "x", SRC, "python3", "-I", OUT + "/guard.py", "24576", "1", "env", "WK_BUILD=1", "WEBKIT_OUTPUTDIR=" + OUT,
+        self.assertEqual(added(w, "lin")[1], ["fake-exec", "x", SRC, "python3", "-I", OUT + "/guard.py", "24576", "1", "env", "WK_BUILD=1", "WEBKIT_OUTPUTDIR=" + OUT + "/JSCOnly/Release",
                                               "Tools/Scripts/run-javascriptcore-tests", "--jsc-only", "--release", "--no-build", "--no-fail-fast",
                                               "--memory-limited", "--child-processes=16", "--filter", r"^(stress/a\.js)(\..*)?$"])
         self.assertEqual([(t["group"], t["label"]) for t in w.pueue["lin"].tasks.values()], [("build", "x:build:jsc-release"), ("default", "x:test:jsc-release")])

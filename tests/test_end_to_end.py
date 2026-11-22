@@ -109,7 +109,7 @@ RUN = ("[%s] podman run --detach --replace --pull=never --name wk-x --init --use
        "--env WK_WORKSPACE=x --workdir {s} {i} sleep infinity").format(h=HOME, m=MIRROR, s=SRC, i=IMAGE)
 SKIP = ["--dangerously-skip-permissions"]
 MODE = {"lin": SKIP, "mac": SKIP, "box": ["--permission-mode", "auto"]}
-BUILD = {"lin": ["24576", "1", "env", "WK_BUILD=1", "CC=clang"], "mac": ["30720", "0", "env", "WK_BUILD=1", "WEBKIT_OUTPUTDIR=" + OUT],
+BUILD = {"lin": ["24576", "1", "env", "WK_BUILD=1", "CC=clang"], "mac": ["30720", "0", "env", "WK_BUILD=1", "WEBKIT_OUTPUTDIR=" + OUT + "/Release"],
          "box": ["12288", "0", "nice", "-n", "19", "ionice", "-c", "3", "env", "WK_BUILD=1", "CC=clang"]}
 
 

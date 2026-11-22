@@ -52,7 +52,8 @@ class TestDoctor(unittest.TestCase):
                           DoctorRow("openbao", OK, "HTTP 200, initialized True, sealed False", fix)])
 
     def test_an_injector_without_a_login_or_something_else_at_its_port_is_missing(self):
-        for body, detail in ((b"wk injector\nno login\n", "no login: `wk key set claude-login`, then the fix below"),
+        for body, detail in ((b"wk injector: a forward proxy\nthis machine holds no claude.ai login: `wk key set claude-login`\n",
+                              "this machine holds no claude.ai login: `wk key set claude-login`"),
                              (b"<html>nginx</html>", "something else answers there"), (b"", "something else answers there")):
             self.assertEqual(self.rows("vault", {}, {INJECTOR: (200, body), STORE: UNSEALED})[0],
                              DoctorRow("injector", MISSING, detail, "wk machine setup vault"))

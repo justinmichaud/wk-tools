@@ -41,7 +41,7 @@ def holds(status, body):
     if not said or not said[0].startswith(injector.BANNER.decode()):
         return False, "something else answers there"
     if said[1:] != ["login held"]:
-        return False, "".join(said[1:]) + ": `wk key set claude-login`, then the fix below"
+        return False, "".join(said[1:])
     return True, "it holds the claude.ai login"
 
 
