@@ -152,8 +152,8 @@ class FakeDriver(seams.Driver):
     def state(self, ws):
         return seams.READY if (self.machine.name, ws.name) in self.made else seams.ABSENT
 
-    def exec_argv(self, ws, argv, cwd=None):
-        return ["fake-exec", ws.name, cwd or ws.path + "/src"] + list(argv)
+    def exec_argv(self, ws, argv, cwd=None, tty=False):
+        return ["fake-exec"] + ["-t"] * tty + [ws.name, cwd or ws.path + "/src"] + list(argv)
 
     def enter_argv(self, ws):
         return ["fake-enter", ws.name]

@@ -37,8 +37,8 @@ class Driver:
         """ready | absent | broken, for the driver's part alone."""
         raise NotImplementedError
 
-    def exec_argv(self, ws, argv, cwd=None):
-        """The argv that runs `argv` inside the workspace without a terminal, from `cwd` (default: the checkout)."""
+    def exec_argv(self, ws, argv, cwd=None, tty=False):
+        """The argv that runs `argv` inside the workspace from `cwd` (default: the checkout); on this terminal when `tty`."""
         raise NotImplementedError
 
     def enter_argv(self, ws):
