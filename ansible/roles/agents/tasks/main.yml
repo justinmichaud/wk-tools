@@ -93,11 +93,13 @@
     state: directory
     mode: "0755"
 
+# Both files are the login's own, which a person may have written: what is replaced is kept beside it.
 - name: Write the agent's instructions
   ansible.builtin.copy:
     src: CLAUDE.md
     dest: "{{ ansible_facts['env']['HOME'] }}/.claude/CLAUDE.md"
     mode: "0644"
+    backup: true
 
 # The deny rules cover a build tool named by its path, which no shim on PATH meets.
 - name: Write Claude's settings
@@ -105,3 +107,4 @@
     src: settings.json.j2
     dest: "{{ ansible_facts['env']['HOME'] }}/.claude/settings.json"
     mode: "0644"
+    backup: true
