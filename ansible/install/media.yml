@@ -1,50 +1,89 @@
 ---
-# The image where the BMC reaches it: copied to the media host, served by a transient unit for as long as the install
-# lasts, behind one firewall rule when the conf names the chain that would drop the BMC. The media host's login is root.
+# The image as the server's USB disk. OpenBMC's /vm/0/0 websocket runs an NBD client behind the BMC's USB gadget and
+# expects the far end to be the NBD server (fixed newstyle, the export named "", read-only), which is qemu-nbd on the
+# client; websocat carries the bytes. The BMC's login reaches websocat in a file.
 
-- name: Name the media host
-  ansible.builtin.add_host:
-    name: "{{ wk_media_host }}"
-    ansible_user: "{{ wk_media_user }}"
-  changed_when: false
-
-- name: Stage and serve the image
-  delegate_to: "{{ wk_media_host }}"
+- name: Serve the image and carry it to the BMC
+  delegate_to: localhost
   block:
-    # A media host that does not answer fails here, as a task; unreachable would end the play with no cleanup.
-    - name: Reach the media host
-      ansible.builtin.wait_for_connection:
-        timeout: 60
+    - name: Stop what an earlier run left
+      ansible.builtin.import_tasks: detach.yml
 
-    - name: Make the image's directory
-      ansible.builtin.file:
-        path: "{{ wk_install_staged }}"
-        state: directory
-        mode: "0700"
-
-    - name: Copy the image to the media host
+    - name: Write the BMC's login for the bridge
       ansible.builtin.copy:
-        src: "{{ wk_install_build }}/{{ wk_install_unit }}.iso"
-        dest: "{{ wk_install_staged }}/{{ wk_install_unit }}.iso"
+        content: "{{ wk_install_secret.bmc_user }}:{{ wk_install_secret.bmc_password }}"
+        dest: "{{ wk_install_build }}/bmc-login"
         mode: "0600"
+      no_log: true
       diff: false
 
-    - name: Remove what an earlier run left serving
-      ansible.builtin.import_tasks: close.yml
-
-    - name: Admit the BMC to the image's port
-      ansible.builtin.command:
-        argv: >-
-          {{ ['nft', 'insert', 'rule'] + wk_media_chain.split('/')
-             + ['ip', 'saddr', wk_bmc, 'tcp', 'dport', wk_install_media_port | string, 'accept', 'comment', '"' ~ wk_install_unit ~ '"'] }}
-      when: wk_media_chain is defined
-
+    # --fork returns once the socket listens. The server leaves with its one client. The throttle spaces the replies:
+    # this BMC loses NBD replies that arrive together, as bmcweb did before its change 4ee8f0b7, and its NBD client
+    # then waits 30 s and gives the disk up. At 1 MiB/s one attach in two died that way, at 640 KiB/s none of seven.
     - name: Serve the image
       ansible.builtin.command:
-        argv: "{{ ['systemd-run', '--unit', wk_install_unit, '--collect'] + wk_install_media_serve }}"
+        argv:
+          - qemu-nbd
+          - --fork
+          - --read-only
+          - "--socket={{ wk_install_socket }}"
+          - --object
+          - "throttle-group,id=pace,limits.bps-read={{ wk_install_media_bps }}"
+          - --image-opts
+          - "driver=throttle,throttle-group=pace,file.driver=raw,file.file.driver=file,file.file.filename={{ wk_install_iso }}"
 
-    - name: Wait for the image's port
-      ansible.builtin.wait_for:
-        host: "{{ wk_media_address }}"
-        port: "{{ wk_install_media_port }}"
-        timeout: 30
+    - name: Carry the image to the BMC
+      ansible.builtin.command:
+        argv: [websocat, --binary, --insecure, --basic-auth-file, "{{ wk_install_build }}/bmc-login",
+               "wss://{{ wk_bmc }}/vm/0/0", "unix:{{ wk_install_socket }}"]
+      async: "{{ (wk_install_minutes + wk_install_boot_minutes) * 60 }}"
+      poll: 0
+      register: wk_bridge
+
+    - name: Measure the image
+      ansible.builtin.stat:
+        path: "{{ wk_install_iso }}"
+        get_checksum: false
+      register: wk_image
+
+- name: Ask whether the server answers
+  block:
+    - name: Reach the server
+      ansible.builtin.wait_for_connection:
+        timeout: 20
+
+    - name: Note that it answers
+      ansible.builtin.set_fact:
+        wk_install_up: true
+
+  rescue:
+    - name: Note that it does not answer
+      ansible.builtin.set_fact:
+        wk_install_up: false
+
+- name: Wait for the server to see the image as a USB disk
+  ansible.builtin.command:
+    argv: [lsblk, --json, --bytes, --nodeps, --output, "NAME,TRAN,SIZE,VENDOR,MODEL,LABEL"]
+  register: wk_disks
+  changed_when: false
+  until: wk_install_seen | length == 1
+  retries: 12
+  delay: 5
+  when: wk_install_up
+  vars:
+    wk_install_seen: >-
+      {{ (wk_disks.stdout | default('{"blockdevices": []}') | from_json).blockdevices
+         | selectattr('tran', 'equalto', 'usb') | selectattr('size', 'equalto', wk_image.stat.size) | list }}
+
+- name: Ask after the bridge
+  ansible.builtin.async_status:
+    jid: "{{ wk_bridge.ansible_job_id }}"
+  delegate_to: localhost
+  register: wk_bridged
+  failed_when: wk_bridged.finished == 1
+
+- name: Say what the server sees
+  ansible.builtin.debug:
+    msg: >-
+      {{ (wk_disks.stdout | from_json).blockdevices | selectattr('tran', 'equalto', 'usb') | selectattr('size', 'equalto', wk_image.stat.size) | first
+         if wk_install_up else inventory_hostname ~ ' does not answer, so what it sees is unknown; the bridge to its BMC is up' }}

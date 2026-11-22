@@ -1,9 +1,10 @@
 ---
 # Installing a server's operating system from nothing, unattended, through its BMC. `wk machine install <server>` runs
 #   ansible-playbook -i ansible/inventory.py --limit <server> [--skip-tags wipe] [--check --diff] ansible/install.yml
-# Ubuntu's own autoinstall does the installing, the BMC's Redfish API the media, the boot and the power. The server's
-# disk is erased. `--skip-tags wipe` stops after the image is inserted and read back: nothing boots, nothing is erased.
-# `--check` asks the store and the BMC and stages nothing.
+# Ubuntu's own autoinstall does the installing. The image reaches the server as OpenBMC's virtual USB disk: qemu-nbd
+# serves it on the client and websocat carries that to the BMC's virtual-media websocket. Redfish sets the one boot.
+# The server's disk is erased. `--skip-tags wipe` stops once the server has seen the image: nothing boots, nothing is
+# erased. `--check` asks the store and the BMC and makes nothing.
 
 - name: Install a server through its BMC
   hosts: all
@@ -18,12 +19,15 @@
     wk_install_image: "{{ wk_ubuntu[wk_os][wk_arch] }}"
     wk_install_codename: "{{ wk_ubuntu[wk_os].codename }}"
     wk_install_stock: "{{ lookup('ansible.builtin.env', 'HOME') }}/.cache/wk/{{ wk_install_image.url | basename }}"
-    wk_install_unit: "wk-install-{{ inventory_hostname }}"
-    wk_install_build: "{{ wk_install_stock | dirname }}/{{ wk_install_unit }}"
-    wk_install_staged: "/var/tmp/{{ wk_install_unit }}"
-    wk_install_url: "{{ wk_install_media_scheme }}://{{ wk_media_address }}:{{ wk_install_media_port }}/{{ wk_install_unit }}.iso"
-    wk_install_power: "{{ wk_power.redfish_facts.system.entries[0][1].PowerState }}"
-    wk_install_media: "{{ wk_media.redfish_facts.virtual_media.entries[0][1] }}"
+    wk_install_build: "{{ wk_install_stock | dirname }}/wk-install-{{ inventory_hostname }}"
+    wk_install_iso: "{{ wk_install_build }}/install.iso"
+    wk_install_socket: "{{ wk_install_build }}/nbd.sock"
+    wk_install_consoles: "{{ ('console=' ~ wk_console ~ ' ') if wk_console is defined else '' }}console=tty0"
+    wk_install_console: "ssh -p {{ wk_install_console_port }} {{ wk_install_secret.bmc_user }}@{{ wk_bmc }}"
+    wk_install_tools:
+      - {tool: xorriso, asks: -version, brew: xorriso, does: puts the autoinstall file into Ubuntu's image}
+      - {tool: qemu-nbd, asks: --version, brew: qemu, does: serves the image to the BMC}
+      - {tool: websocat, asks: --version, brew: websocat, does: carries the image to the BMC's websocket}
     wk_install_needs: >-
       {{ ['bmc/' ~ inventory_hostname ~ '/user', 'bmc/' ~ inventory_hostname ~ '/password', 'tailnet-auth-key', 'tailnet-api-key']
          + (['wifi-ssid', 'wifi-psk'] if wk_wifi is defined else []) }}
@@ -36,7 +40,7 @@
     community.general.redfish_command: *bmc
 
   tasks:
-    - name: Ask before anything is staged
+    - name: Ask before anything is made
       ansible.builtin.import_tasks: install/preflight.yml
       delegate_to: localhost
 
@@ -50,25 +54,29 @@
           ansible.builtin.import_tasks: install/image.yml
           delegate_to: localhost
 
-        - name: Serve the image where the BMC reaches it
+        - name: Attach the image to the server
           ansible.builtin.import_tasks: install/media.yml
 
-        - name: Insert the image and boot the installer from it
+        - name: Boot the installer from it and wait for the installed system
           ansible.builtin.import_tasks: install/boot.yml
+          tags: [wipe]
 
       always:
-        - name: Take the image out of the BMC
+        - name: Take the image away
+          delegate_to: localhost
           block:
-            - name: Eject the image
-              ansible.builtin.import_tasks: install/eject.yml
+            - name: Detach the image
+              ansible.builtin.import_tasks: install/detach.yml
 
             - name: Clear the boot override
               community.general.redfish_command:
                 category: Systems
                 command: DisableBootOverride
-              delegate_to: localhost
               tags: [wipe]
 
           always:
-            - name: Stop serving and remove every copy of the image
-              ansible.builtin.import_tasks: install/unserve.yml
+            # It holds the WiFi passphrase, the tailnet auth key and the BMC's login.
+            - name: Remove the image and everything made beside it
+              ansible.builtin.file:
+                path: "{{ wk_install_build }}"
+                state: absent

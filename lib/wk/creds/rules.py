@@ -259,10 +259,12 @@ RULES = (
     Rule("claude-login", "the claude.ai login document (.credentials.json) of a `claude` logged in for this purpose alone; "
          "only the injector holds it", claude_login_check, claude_login_probe),
     Rule("tailnet-auth-key", "the auth key a new server joins the tailnet with", tailnet_key_check, tailnet_key_probe),
-    Rule("tailnet-api-key", "a tailnet API access token; `wk machine install` retires a reinstalled server's old node with it",
+    Rule("tailnet-api-key", "a tailnet API access token; `wk machine install` finds a reinstalled server's new node and retires its old one with it",
          tailnet_api_key_check, tailnet_api_key_probe),
     Rule("wifi-ssid", "the name of the WiFi network a server with wifi= in its conf is installed onto", one_line, unasked(INSTALL_ASKS)),
     Rule("wifi-psk", "that WiFi network's passphrase", wifi_psk_check, unasked(INSTALL_ASKS)),
+    Rule("sudo-password", "the password sudo asks for on a server about to be reinstalled; an installed server asks for none",
+         one_line, unasked(INSTALL_ASKS)),
 )
 BMC_WHAT = "one half of the login of a server's BMC, which `wk machine install` installs it through"
 DEPLOY_WHAT = "the ssh key that pushes to one repository: a private key with no passphrase, its public half a deploy key there"

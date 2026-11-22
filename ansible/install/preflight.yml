@@ -1,6 +1,6 @@
 ---
 # What must hold before an image is made: one server, its conf, the client's tools and key, the store, and a BMC that
-# answers this login. Nothing here changes anything, so all of it runs in check mode too.
+# answers this login and can boot from USB once. Nothing here changes anything, so all of it runs in check mode too.
 
 - name: Assert the play has one server
   ansible.builtin.assert:
@@ -13,30 +13,32 @@
     that:
       - wk_kind in ['linux', 'credential']
       - wk_bmc is defined
-      - wk_media_host is defined
-      - wk_media_user is defined
-      - wk_media_address is defined
       - wk_os | default('') in wk_ubuntu
       - wk_arch | default('') in wk_ubuntu[wk_os | default('')] | default({})
     fail_msg: >-
-      machines/{{ inventory_hostname }}.conf must be a Linux server's and set bmc=, arch=, os=, media_host=, media_user=
-      and media_address=; the pinned releases are {{ wk_ubuntu.keys() | join(', ') }}, each for arm64 and amd64
-      (DESIGN.md, Installing a server)
+      machines/{{ inventory_hostname }}.conf must be a Linux server's and set bmc=, arch= and os=; the pinned releases
+      are {{ wk_ubuntu.keys() | join(', ') }}, each for arm64 and amd64 (DESIGN.md, Installing a server)
     quiet: true
 
-- name: Ask xorriso for its version
+- name: Ask each tool for its version
   ansible.builtin.command:
-    argv: [xorriso, -version]
-  register: wk_xorriso
+    argv: ["{{ item.tool }}", "{{ item.asks }}"]
+  loop: "{{ wk_install_tools }}"
+  loop_control:
+    label: "{{ item.tool }}"
+  register: wk_tools
   changed_when: false
   failed_when: false
   check_mode: false
 
-- name: Assert the client has xorriso
+- name: Assert the client has each tool
   ansible.builtin.assert:
-    that: wk_xorriso.rc == 0
-    fail_msg: "this machine has no xorriso, which puts the autoinstall file into Ubuntu's image: brew install xorriso"
+    that: item.rc == 0
+    fail_msg: "this machine has no {{ item.item.tool }}, which {{ item.item.does }}: brew install {{ item.item.brew }}"
     quiet: true
+  loop: "{{ wk_tools.results }}"
+  loop_control:
+    label: "{{ item.item.tool }}"
 
 - name: Find the client's ssh public key
   ansible.builtin.set_fact:
@@ -71,22 +73,19 @@
       api_key: "{{ lookup('ansible.builtin.pipe', wk_bao_get ~ 'tailnet-api-key') }}"
       ssid: "{{ lookup('ansible.builtin.pipe', wk_bao_get ~ 'wifi-ssid') if wk_wifi is defined else '' }}"
       psk: "{{ lookup('ansible.builtin.pipe', wk_bao_get ~ 'wifi-psk') if wk_wifi is defined else '' }}"
+      sudo_password: "{{ lookup('ansible.builtin.pipe', wk_bao_get ~ 'sudo-password') if 'sudo-password' in wk_store_names else '' }}"
   no_log: true
 
 - name: Ask the BMC for the system
   community.general.redfish_info:
     category: Systems
-    command: GetSystemInventory
-  register: wk_power
+    command: GetBootOverride
+  register: wk_boot
 
-- name: Ask the BMC for its virtual media
-  community.general.redfish_info:
-    category: "{{ wk_install_media_category }}"
-    command: GetVirtualMedia
-  register: wk_media
-
-- name: Say what the BMC answered
-  ansible.builtin.debug:
-    msg:
-      power: "{{ wk_install_power }}"
-      virtual_media: "{{ wk_install_media }}"
+- name: Assert the BMC can boot the server from USB once
+  ansible.builtin.assert:
+    that: wk_install_boot_device in wk_boot.redfish_facts.boot_override.entries[0][1]['BootSourceOverrideTarget@Redfish.AllowableValues']
+    fail_msg: >-
+      the BMC at {{ wk_bmc }} offers no one-time boot from {{ wk_install_boot_device }}, which is where OpenBMC's virtual
+      media appears: it offers {{ wk_boot.redfish_facts.boot_override.entries[0][1]['BootSourceOverrideTarget@Redfish.AllowableValues'] | default([]) | join(', ') }}
+    quiet: true

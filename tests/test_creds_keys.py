@@ -94,9 +94,9 @@ class TestKeyCheck(unittest.TestCase):
                          (0, [], [["github-user", "present", "ok"], ["github-token", "present", "ok"], ["bugzilla-user", "absent", "-"],
                                   ["bugzilla-password", "absent", "-"], ["litellm-key", "absent", "-"], ["claude-login", "absent", "-"],
                                   ["tailnet-auth-key", "present", "unknown"], ["tailnet-api-key", "absent", "-"], ["wifi-ssid", "absent", "-"],
-                                  ["wifi-psk", "absent", "-"], ["bmc/lin/user", "present", "unknown"], ["deploy-key/o/r", "present", "unknown"]]))
+                                  ["wifi-psk", "absent", "-"], ["sudo-password", "absent", "-"], ["bmc/lin/user", "present", "unknown"], ["deploy-key/o/r", "present", "unknown"]]))
         self.assertEqual(rows[2][3], "your https://bugs.webkit.org login, an email address: `wk key set bugzilla-user`")
-        self.assertEqual(rows[11][3], "GET /repos/o/r/keys did not answer (down)")
+        self.assertEqual(rows[12][3], "GET /repos/o/r/keys did not answer (down)")
         self.assertNotIn(TOKEN, r.out + r.err)
 
     def test_a_bad_credential_exits_1(self):
