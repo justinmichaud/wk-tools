@@ -31,8 +31,9 @@
     dest: "{{ wk_pueue_dir }}/pueue.yml"
     mode: "0644"
 
+# A borrowed box too: the one in the fleet runs a user manager for its logins, and lets a user linger.
 - name: Keep pueued running as a systemd user unit
-  when: "'linux' in group_names"
+  when: "'mac' not in group_names"
   environment: "{{ wk_user_bus }}"
   block:
     - name: Write pueued's unit
@@ -71,23 +72,6 @@
       ansible.builtin.command:
         argv: [launchctl, bootstrap, "{{ wk_launchd_domain }}", "{{ wk_pueue_agent }}"]
       when: wk_pueued_loaded.rc != 0
-      changed_when: true
-
-# Someone else's container has no systemd and no launchd to keep a daemon.
-- name: Start pueued where nothing supervises it
-  when: "'borrowed' in group_names and not ansible_check_mode"
-  block:
-    - name: Ask whether pueued answers
-      ansible.builtin.command:
-        argv: "{{ wk_pueue + ['status'] }}"
-      register: wk_pueued_answers
-      changed_when: false
-      failed_when: false
-
-    - name: Start pueued
-      ansible.builtin.command:
-        argv: "{{ wk_pueued + ['--daemonize'] }}"
-      when: wk_pueued_answers.rc != 0
       changed_when: true
 
 - name: Give the build group one build at a time

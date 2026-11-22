@@ -14,11 +14,11 @@ two is a bug.
 - One machine is interactive: the **client**. Every other machine is a
   **server** that `wk` manages from a cold boot. There is no workstation role
   and no peer.
-- One Linux server is also the **credential server**. It is a server like the
-  others: it holds workspaces too.
-- A server is yours (Linux or macOS) or **borrowed**: a shared build box where
-  you are root inside someone else's container, podman does not work, and
-  other people are root too.
+- One machine is the **credential server**: it runs OpenBao and the injector
+  and nothing else. It holds no workspace and no checkout of `wk`.
+- A server is yours (Linux or macOS) or **borrowed**: someone else's shared
+  build box, where you are an ordinary user with no root, podman is not
+  yours to use, cgroups are read-only, and other people are root.
 - A machine is reached by its tailnet name over ssh, and nothing else. Borrowed
   boxes behind a gateway are the only ssh-config entries.
 - There is no podman VM on macOS and no Tart guest. A Mac is a server like any
@@ -40,8 +40,9 @@ two is a bug.
 - An agent builds, runs, tests and debugs through `wk`; the raw build tools
   refuse it, so job sizing always applies.
 - On your own servers an agent asks permission for nothing: Claude runs with
-  `--dangerously-skip-permissions`. On a borrowed box the login is root, to
-  which Claude refuses that flag, so it runs with `--permission-mode auto`.
+  `--dangerously-skip-permissions`. A borrowed box is not yours, and a login
+  there may be root, to which Claude refuses that flag: there it runs with
+  `--permission-mode auto`.
 
 **A way through**
 
@@ -71,8 +72,8 @@ two is a bug.
 
 - Provisioning is Ansible; `wk machine setup` only generates the inventory
   and runs it. There is no provisioning code in `wk`.
-- Nothing is installed with a package manager and nothing needs root: sudo on
-  your servers asks for a password. What a server must already have is
+- Nothing is installed with a package manager and nothing needs root, on any
+  machine: sudo asks for a password everywhere. What a server must already have is
   asserted, and named when it is absent.
 
 **Off the shelf**
@@ -93,7 +94,7 @@ two is a bug.
 | --- | --- |
 | client | The one interactive machine. Holds no workspace. |
 | server | A machine `wk` manages: `linux`, `mac` or `borrowed`. |
-| credential server | The one Linux server that also runs OpenBao and the injector. |
+| credential server | The one machine that runs OpenBao and the injector. Runs nothing else. |
 | workspace | A named, disposable checkout for one task, on one server. |
 | driver | How a workspace's commands run: `container` or `plain`. |
 | mirror | A server's one bare WebKit repository. Every workspace clones from it. |
@@ -113,7 +114,7 @@ wk <cmd> <ws> ...   --ssh-->   wk <cmd> <ws> ...     (the same program)
                                  |- agent:     wrapper hiding credential paths
                                  '- mirror:    ~/wk/git/WebKit.git
 
-credential server:  a linux server that also runs OpenBao (the one store) and the injector (the one claude.ai login)
+credential server:  OpenBao (the one store)   injector (the one claude.ai login)
 ```
 
 The same `wk` runs on every machine. A command that names a workspace is
@@ -201,8 +202,8 @@ a `wk` typed on that machine itself.
 | `secrets/` | delivered credentials, mode 0700: deploy keys, `ssh_config`, `env.sh`. Hidden from agents |
 | `claude-login/` | the placeholder claude.ai login an agent session reads |
 | `injector-ca.pem` | the injector's CA, which an agent session trusts |
-| `injector/` | on the credential server alone: the injector, its CA key and the real login. Hidden from agents |
-| `openbao/` | on the credential server alone: OpenBao's config, its data and its unseal key. Hidden from agents |
+| `injector/` | on the credential server alone: the injector, its CA key and the real login |
+| `openbao/` | on the credential server alone: OpenBao's config, its data and its unseal key |
 
 Outside it, in the login's home: `~/.claude/` (the agents' instructions and
 settings), `~/.claude.json` (Claude's start-up answers), `~/.pi/` (pi's
@@ -241,7 +242,7 @@ converges. A half-made workspace is wiped, never repaired.
   the ssh configuration, and `wk` on the profile's `PATH`. The home is mounted
   whole because Claude replaces `~/.claude.json` by rename, which a mount of
   the one file does not survive. An agent in a container sees what an agent
-  on a Mac sees: everything but the hidden directories, at the same paths.
+  on a Mac sees: everything but `secrets/`, hidden at the same path.
 - `wk` typed inside a container has no podman. It knows it is inside
   (`/run/.containerenv`) and which workspace's (`$WK_WORKSPACE`): that
   workspace is running, the others are unknown, a command for it runs
@@ -256,9 +257,8 @@ converges. A half-made workspace is wiped, never repaired.
 
 - pueue runs from wk's pinned binaries, by absolute path, under wk's own
   config in `pueue/`: one daemon per server, wherever a login's XDG variables
-  point. A systemd user unit keeps it running on a Linux server and a launchd
-  agent on a Mac; on a borrowed box nothing supervises it, and setup starts
-  it when it does not answer.
+  point. A systemd user unit, of a user who lingers, keeps it running on a
+  Linux server and on a borrowed box, and a launchd agent on a Mac.
 - `wk build <ws> [<preset>] [--detach]` adds a pueue task in the server's
   `build` group, whose parallel limit is 1: one build per machine. With no
   preset it repeats the one the workspace built last.
@@ -302,7 +302,7 @@ converges. A half-made workspace is wiped, never repaired.
 - OpenBao listens on the credential server's tailnet address alone, without
   TLS of its own: the tailnet is the encryption. Its seal is a static key
   beside its data, which it reads at start, so a reboot needs no person; the
-  directory's mode and the agent wrapper are what guard the key.
+  directory's mode is what guards the key, on a machine no agent runs on.
 - The store is initialised once, from the client. What that prints is kept on
   the client alone and never touches the server.
 - The injector is a forward proxy on the credential server, reachable only on
@@ -319,12 +319,10 @@ converges. A half-made workspace is wiped, never repaired.
 
 - `wk ai claude|pi <ws>` starts the agent in the workspace under the
   credential wrapper, with Remote Control on and named after the workspace.
-- The wrapper: on Linux, `bwrap` mounting an empty directory over each hidden
-  directory; on macOS, a Seatbelt profile denying reads of them; on a borrowed
+- The wrapper: on Linux, `bwrap` mounting an empty directory over
+  `secrets/`; on macOS, a Seatbelt profile denying reads of it; on a borrowed
   box, which holds no credential, nothing. All three give the agent a minimal
   environment: no credential variable and no ssh-agent socket.
-- The hidden directories are `secrets/`, and on the credential server also
-  `injector/` and `openbao/`. One function names them.
 - An agent's `PATH` starts with `shims/`, then `bin/`. The shims are the
   build tools' names: they refuse an agent and name `wk build`.
 - `wk doctor <ws>` measures the wrapper with a stand-in process that tries to
@@ -351,7 +349,7 @@ converges. A half-made workspace is wiped, never repaired.
   same.
 - The inventory is `machines/*.conf` and nothing else: `ansible/inventory.py`
   prints `wk machine inventory`. A host per server, a group per kind
-  (`linux`, `mac`, `borrowed`) and `credential`, each conf literal as the
+  (`linux`, `mac`, `borrowed`, `credential`), each conf literal as the
   host variable `wk_<key>`, and for every host the client's literals, this
   checkout's commit and the store's address.
 - The roles, each tagged with its own name: `wk` (the client's commit at
@@ -378,7 +376,8 @@ converges. A half-made workspace is wiped, never repaired.
   never names a machine. The file's name must equal the machine's short
   hostname, which is also its tailnet name (for a borrowed box, its ssh-config
   name): that is how `wk` knows which machine it is on, and no key overrides
-  it. `role=credential` goes on one `kind=linux` conf.
+  it. The comparison is of lowercase names. `user=` names the login ssh and
+  Ansible use there when it is not the client's.
 - Doctor rows, gc rows and cache pins are collected from a `hooks` module in
   each package under `lib/wk/`; no file lists them.
 
