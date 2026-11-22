@@ -33,14 +33,14 @@ Debian x86_64, 128 cores, an unprivileged user behind an ssh gateway). There is 
 | The store's client (the `bao` CLI): the refusal without a login | yes | yes | yes |
 | `wk key check`, `wk key ls` against a store with a login | yes | yes | yes |
 | `wk key set` | yes | yes | no: the owner typed it, not this verification |
-| Each credential's rule and live probe | yes | yes, HTTP scripted | yes: `github-user`, `github-token`, the three deploy keys, `tailnet-api-key`, `claude-login` (bad: expired); no for `bugzilla-*`, `litellm-key` |
+| Each credential's rule and live probe | yes | yes, HTTP scripted | yes: `github-user`, `github-token`, the three deploy keys, `tailnet-api-key`, `claude-login`; no for `bugzilla-*`, `litellm-key` |
 | The injector: started, its CA made, answering with no login | yes | yes | yes: alce |
 | The injector: TLS for Claude under its CA, the placeholder recognised, a refresh asked for on first use | yes | yes, on loopback sockets | yes: alce, from moose and buildbox4 |
-| The injector: the login replaced, a refreshed login kept | yes | yes, on loopback sockets | no: the store's login is expired |
+| The injector: the login replaced, a refreshed login kept | yes | yes, on loopback sockets | yes: alce, a refresh on first use and the login replaced on requests from moose and buildbox4 |
 | The credential wrapper's probe (`bwrap` in the container; the minimal environment) | yes | yes | yes: moose over real secrets, buildbox4 |
 | The Seatbelt wrapper | yes | yes: the argv | no |
 | `wk ai claude`: the session starts, with and without a terminal, and reaches the injector | yes | yes | yes: moose, buildbox4 |
-| `wk ai claude`: an answer, Remote Control | yes | yes | no: the store's login is expired |
+| `wk ai claude`: an answer, Remote Control | yes | yes | yes: moose, buildbox4 |
 | `wk ai pi` | yes | yes | its refusal alone: no server has pi |
 | `wk machine setup`: the inventory and the `ansible-playbook` line | yes | yes | yes |
 | The playbook: `wk`, `pueue`, `mirror`, `sdk`, `agents` (Claude Code) | yes | its syntax, by Ansible | yes: moose; all but `sdk` on buildbox4 |
@@ -65,23 +65,23 @@ Typed on tolken. Ansible is the Homebrew `ansible` package (core 2.22.0); `bao` 
 - On moose: `wk new t1 --on moose` 38 s; `wk ls`; `wk enter t1 -- git status` and `-- git log -1 --oneline` inside the container; `wk doctor t1` reports the credential wrapper ok (the stand-in ran under `bwrap` inside the rootless container); `wk build t1 jsc-release --detach` sized 78 jobs at 1536 MB and `wk status t1 --wait` returned 0 after a 7 min 22 s build; `wk run t1 -- -e 'print(1+1)'` printed 2; `wk test t1 --detach -- stress/array-push.js` ran that test's variants and passed within a minute; `wk rm t1 --yes`; `wk gc` found nothing to reclaim.
 - On buildbox4: `wk new b1 --on buildbox4` 56 s; `wk enter b1 -- git log -1 --oneline`; `wk doctor b1` ok; `wk build b1 jsc-release --detach` sized 64 jobs with a 98304 MB budget, and the build's processes ran at nice 19 under the watchdog (no child cgroup can be made there); built in 6 min 42 s; `wk run b1 -- -e 'print(6*7)'` printed 42; `wk rm b1 --yes`; `wk gc`. The box is left provisioned, with no workspace.
 
-- `wk key ls` lists the store's ten names; `wk key check` exits 1 with `github-user`, `github-token`, the three deploy keys and `tailnet-api-key` ok, and `claude-login` bad: its refresh token expired 43 days ago.
+- `wk key ls` lists the store's ten names; `wk key check` exits 1 with `github-user`, `github-token`, the three deploy keys and `tailnet-api-key` ok ok; a `claude-login` whose refresh token has expired is called bad.
 - The person's door on moose, in `t2`: `wk enter t2 -- <command>` without a terminal, the same under a pseudo-terminal, and `wk enter t2` as an interactive login shell each run in the checkout with `GITHUB_COM_TOKEN` and `GH_TOKEN` set. On buildbox4, which holds no `env.sh`, `wk enter b2 -- <command>` runs in the checkout with neither.
 - A person's push on moose: `wk enter t2 -- git push --dry-run fork HEAD:refs/heads/wk-live-check` answers `* [new branch]`; `GIT_TRACE` shows `ssh git@github-justinmichaud-webkit` and `ssh -G` that alias's own deploy key with `IdentitiesOnly`. From a scratch repository in the container whose remote is the `wk-tools` https URL, a real push of an empty commit to `wk-live-check-2026-11-22` succeeds through `pushInsteadOf`, `git ls-remote` shows it, and it is deleted again.
 - `git-webkit`'s own library (`webkitscmpy.remote.GitHub`) finds its credentials in `t2` and reads `pulls` of WebKit/WebKit; `GET /user` with them answers 200. The SDK image has no `gh`.
 - The wrapper over real secrets on moose: `wk doctor t2` says `credential wrapper ok`; a stand-in under the session's own `bwrap` line lists `secrets/` empty, carries none of the credential variables, no `GIT_CONFIG_*` and no `SSH_AUTH_SOCK`, and the same `git push --dry-run` fails there with `could not read Username`.
-- `wk ai claude t2 -- -p "Reply with exactly: OK"`, with no terminal, on moose: Claude Code 2.1.308 reads the placeholder from `claude-login/`, honours `HTTPS_PROXY`, trusts the injector's CA through `NODE_EXTRA_CA_CERTS`, and every request of its reaches the injector, which asks the token endpoint to refresh on first use. The endpoint answers `invalid_grant, Refresh token expired`, and Claude prints the injector's 401 with that and the remedy. The injector's journal holds no token.
-- `wk ai claude t2` under a pseudo-terminal starts in bypass-permissions mode with no dialog, prints `Remote Control disconnected — Claude.ai login was rejected`, leaves at `/exit`, and no agent process remains on moose.
-- `wk ai claude b2 -- -p ...` on buildbox4: the same 401 of the injector's arrives through `-R 127.0.0.1:<port>` on the hand-over's ssh, across the gateway's `ProxyJump`. The same command typed while a session holds the port ends with ssh's `remote port forwarding failed` and wk's refusal, exit 4. The interactive session starts in auto mode with no dialog, with `http://127.0.0.1:<port>` as its proxy; after `/exit` no process and no listener remain. The stale line in the box's rc files prints on stderr and breaks nothing wk reads.
+- `wk ai claude t3 -- -p "Reply with exactly: OK"`, with no terminal, on moose: Claude Code 2.1.308 reads the placeholder from `claude-login/`, honours `HTTPS_PROXY`, trusts the injector's CA, the injector refreshes the store's login on first use and replaces it on the request, and Claude prints `OK`. No login is on moose.
+- `wk ai claude t3` under a pseudo-terminal starts in bypass-permissions mode with no dialog, prints `/rc connecting…` and then a `https://claude.ai/code/session…` link: Remote Control is connected. It leaves at `/exit`, and no agent process remains on moose.
+- `wk ai claude b3 -- -p ...` on buildbox4 prints `OK` through `-R 127.0.0.1:<port>` on the hand-over's ssh, across the gateway's `ProxyJump`; the interactive session starts in auto mode and prints its Remote Control link the same way; no process or listener remains. The same command typed while a session holds the port is refused, exit 4.
 - `wk ai pi` is refused on both servers naming node >= 22.19 and `wk machine setup`; `wk ai claude <ws>` with no terminal and no words is refused naming `-- -p <prompt>`.
-- `wk doctor`: every row ok but node and pi on both servers, pi's `models.json` on moose, and alce's injector, whose row is the expired login.
+- `wk doctor`: every row ok but node and pi on both servers, pi's `models.json` on moose.
 - After these fixes `wk machine setup` of moose, buildbox4 and alce each report `changed=0` on a second run.
 
 What the live runs corrected: the unit directory is made before a unit is written; `--daemonize` does not survive the provisioning session on buildbox4, where a user unit does; the SDK image had no `latest` tag; WebKit's scripts take `WEBKIT_OUTPUTDIR` whole as the product directory, so each preset now builds in its own; a leaf certificate without an authority key identifier is refused by Python 3.15 with OpenSSL 4; `wk enter <ws> -- <command>` without a terminal sourced no `env.sh`, and the plain driver never did; `wk ai` demanded a terminal even for `-p`; Claude Code stops at a dialog for bypass-permissions mode until `skipDangerousModePermissionPrompt` is in its settings; the injector's refusal hid the token endpoint's reason, and it called a login it could not refresh held.
 
 ## Needs a person
 
-- The store's `claude-login` is dead: its access token expired 47 days ago and its refresh token 43 days ago, so the injector can refresh nothing and no agent answers. Log in to Claude afresh, `wk key set claude-login`, `wk machine setup alce`, then `wk ai claude <ws> -- -p "Reply with exactly: OK"` on moose and from the client to buildbox4, and the Remote Control check.
+- The claude.ai login is the one the previous tree's injector on the client held; its refresh token ends in 26 days, and the previous tree's copy stops working at the injector's next refresh. A login made for this purpose alone replaces it: `wk key set claude-login`, `wk machine setup alce --stage injector`.
 - pi is installed on no server. moose's node is 18.19.1 and pi needs 22.19. buildbox4 has node 22 in `~/.local/bin`, which is not on its login shell's `PATH`.
 - buildbox4's `~/.bash_profile` and `~/.bashrc` each source `~/wk/tools/shell/bashrc`, a line the previous wk-tools wrote: that file does not exist, so every login there prints an error. The line is the owner's to remove.
 - `bugzilla-password` is not in the store, and the client's conf has no `litellm_url=`: Bugzilla through `git-webkit` and pi's `models.json` wait for them.
@@ -90,8 +90,7 @@ What the live runs corrected: the unit directory is made before a unit is writte
 
 - TODO: `wk key set` typed in this verification: `kv put ... value=-` from stdin.
 - TODO: pi's `models.json`, `gh` (the SDK image has none), a pull request, a Bugzilla login with `bugzilla-password`.
-- TODO: the injector with a live login: the login replaced on a request, a refresh kept on the credential server, the delivered-digest marker leaving it alone at the next setup.
-- TODO: an agent's answer on moose and on buildbox4, Remote Control connected and named for the workspace, the hosts Remote Control uses beside the injector's three, and auto mode's classifier on a borrowed box.
+- TODO: the injector's delivered-digest marker leaving a refreshed login alone at the next setup; the hosts Remote Control uses beside the injector's three; auto mode's classifier on a borrowed box doing real work.
 - TODO: `wk ai pi`; whether WebKit's own bubblewrap sandbox runs inside the wrapper.
 - TODO: a reboot of each server: OpenBao unsealed with no person and its listener once Tailscale is up, the injector, pueued under its unit on moose and on buildbox4.
 - TODO: `wk machine setup --dry-run`: what Ansible's check mode reports on a bare and on a provisioned server.
