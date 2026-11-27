@@ -26,7 +26,8 @@ SOFTWARE_GL = ["LIBGL_ALWAYS_SOFTWARE=1", "GALLIUM_DRIVER=llvmpipe", "WEBKIT_DIS
 
 @dataclasses.dataclass(frozen=True)
 class Preset:
-    """`flags` are the port and configuration every script takes; `products` is its directory under the workspace's build/."""
+    """`flags` are the port and configuration every script takes; `products` is its build's WEBKIT_OUTPUTDIR under the
+    workspace's build/."""
     name: str
     kinds: tuple
     system: str
@@ -74,10 +75,18 @@ def resolve(name, kind):
     return here[0]
 
 
-def products(preset, out):
-    """Where a preset builds, under the workspace's build directory. It is the scripts' WEBKIT_OUTPUTDIR, which they
-    take whole as the product directory (webkitdirs.pm, usesPerConfigurationBuildDirectory): so each preset has its own."""
+def output(preset, out):
+    """The build's WEBKIT_OUTPUTDIR, under the workspace's build directory: each CMake preset has its own."""
     return "%s/%s" % (out, preset.products)
+
+
+def products(preset, out):
+    """Where a preset's products are, which the other scripts are given as WEBKIT_OUTPUTDIR and take whole as the product
+    directory (webkitdirs.pm, usesPerConfigurationBuildDirectory). Xcode builds into SYMROOT=WEBKIT_OUTPUTDIR, under a
+    directory named for the configuration."""
+    if preset.system == XCODE:
+        return "%s/%s" % (output(preset, out), "Debug" if "--debug" in preset.flags else "Release")
+    return output(preset, out)
 
 
 def build_argv(preset, src, out, jobs, extra_cmake=""):
@@ -86,9 +95,9 @@ def build_argv(preset, src, out, jobs, extra_cmake=""):
     if preset.system == XCODE:
         # build-jsc appends an unknown argument to a `make` line, where ARGS= is the hole for xcodebuild's.
         limit = ["ARGS=-jobs %d" % jobs] if preset.script == "build-jsc" else ["-jobs", str(jobs)]
-        return ["env", "WEBKIT_OUTPUTDIR=" + products(preset, out), script] + list(preset.flags) + limit
+        return ["env", "WEBKIT_OUTPUTDIR=" + output(preset, out), script] + list(preset.flags) + limit
     cmake = " ".join(filter(None, [COMMON, preset.cmake] + extra_cmake.split(",")))
-    env = ["CC=clang", "CXX=clang++", "WEBKIT_OUTPUTDIR=" + products(preset, out), "CCACHE_DIR=%s/ccache" % out, "CCACHE_BASEDIR=" + src,
+    env = ["CC=clang", "CXX=clang++", "WEBKIT_OUTPUTDIR=" + output(preset, out), "CCACHE_DIR=%s/ccache" % out, "CCACHE_BASEDIR=" + src,
            "CCACHE_SLOPPINESS=" + SLOPPINESS, "CCACHE_NOHASHDIR=true", "NUMBER_OF_PROCESSORS=%d" % jobs,
            "CMAKE_BUILD_PARALLEL_LEVEL=%d" % jobs,
            "WEBKIT_NINJA_LINK_MAX=1"]   # a job is budgeted as a compile; two gtk-debug links measured 5.5 + 4.2 GB at -j3

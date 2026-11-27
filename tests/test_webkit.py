@@ -69,7 +69,7 @@ class TestRun(unittest.TestCase):
         self.assertEqual(webkit.run_argv(webkit.resolve("jsc-debug", "linux"), OUT, ["-e", "1"]),
                          ["env", "LD_LIBRARY_PATH=/w/x/build/JSCOnly/Debug/lib", "/w/x/build/JSCOnly/Debug/bin/jsc", "--validateOptions=1", "-e", "1"])
         self.assertEqual(webkit.run_argv(webkit.resolve("jsc-release", "mac"), OUT, []),
-                         ["env", "DYLD_FRAMEWORK_PATH=/w/x/build/Release", "/w/x/build/Release/jsc", "--validateOptions=1"])
+                         ["env", "DYLD_FRAMEWORK_PATH=/w/x/build/Release/Release", "/w/x/build/Release/Release/jsc", "--validateOptions=1"])
 
     def test_a_full_port_runs_its_browser_launcher(self):
         self.assertEqual(webkit.run_argv(webkit.resolve("gtk-release", "linux"), OUT, ["https://example.org"]),
@@ -91,7 +91,13 @@ class TestTest(unittest.TestCase):
                           "Tools/Scripts/run-webkit-tests", "--wpe", "--release", "--no-build", "--no-retry-failures", "--child-processes=2",
                           "fast/dom", "--verbose"])
         self.assertEqual(webkit.test_argv(webkit.resolve("mac-debug", "mac"), OUT, 2, [])[:4],
-                         ["env", "WEBKIT_OUTPUTDIR=/w/x/build/Debug", "Tools/Scripts/run-webkit-tests", "--debug"])
+                         ["env", "WEBKIT_OUTPUTDIR=/w/x/build/Debug/Debug", "Tools/Scripts/run-webkit-tests", "--debug"])
+
+    def test_xcode_builds_a_configurations_products_under_the_builds_outputdir_and_the_scripts_are_given_that(self):
+        preset = webkit.resolve("jsc-release", "mac")
+        self.assertEqual(webkit.build_argv(preset, "/w/x/src", OUT, 6)[1], "WEBKIT_OUTPUTDIR=/w/x/build/Release")
+        self.assertEqual(webkit.test_argv(preset, OUT, 2, [])[:3],
+                         ["env", "WEBKIT_OUTPUTDIR=/w/x/build/Release/Release", "Tools/Scripts/run-javascriptcore-tests"])
 
     def test_the_words_that_name_tests_are_those_that_are_not_options(self):
         self.assertEqual(webkit.paths(["fast/dom", "--verbose", "a.html?q=1"]), ["fast/dom", "a.html?q=1"])
