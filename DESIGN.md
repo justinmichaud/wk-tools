@@ -323,9 +323,10 @@ All of it runs on the controller, typed by the person.
   is also its tailnet name.
 
 The controller itself is set up by hand once, from Ubuntu: `sudo apt install
-ansible git xorriso qemu-utils`, `websocat` pinned in `group_vars/all.json`,
-a clone of this repository at `~/wk/tools`, `~/wk/bin` on `PATH`. Then `wk
-machine setup alce` runs the `injector` role there. Its `secrets/` is the one
+ansible git xorriso qemu-utils`, `sudo tailscale set --accept-routes` (the
+BMCs are behind tailnet subnet routes), `websocat` pinned in
+`group_vars/all.json`, a clone of this repository at `~/wk/tools`, `~/wk/bin`
+on `PATH`. Then `wk machine setup alce` runs the `controller` role there. Its `secrets/` is the one
 copy of every credential; it is backed up by the person.
 
 ## Installing a Linux server
