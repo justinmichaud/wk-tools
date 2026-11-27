@@ -4,6 +4,7 @@ private halves printed as JSON. GitHub is scripted; the keys are made by a scrip
 import json
 import unittest
 
+from tests import ROOT
 from tests.credsworld import TOKEN, Http
 from tests.world import World
 from wk.core.fakes import Killed
@@ -52,7 +53,7 @@ class TestRotate(unittest.TestCase):
     def rotate(self, http, *words, w=None):
         self.w, self.made = w or make()
         with http.patch():
-            return self.w.wk("key", "rotate", "lin", *words)
+            return self.w.wk("key", "rotate", "lin", *(words or ("--yes",)))
 
     def test_each_fork_gets_a_new_writable_key_titled_for_the_server_and_the_private_halves_are_printed(self):
         http = github()
@@ -88,7 +89,7 @@ class TestRotate(unittest.TestCase):
 
     def test_a_dry_run_makes_keys_but_registers_and_deletes_nothing(self):
         http = github(OLD)
-        r = self.rotate(http, "--dry-run")
+        r = self.rotate(http, "--dry-run", "--yes")
         self.assertEqual((r.code, [method for method, _, _, _ in http.asked]), (0, ["GET"] * len(FORKS)))
         self.assertEqual(r.plan[:2], ["[github] POST /repos/%s/keys %s" % (FORKS[0], TITLE),
                                       "[github] DELETE /repos/%s/keys/1 (wk lin 1970-01-01T00:00:00Z)" % FORKS[0]])
@@ -113,6 +114,24 @@ class TestRotate(unittest.TestCase):
         self.assertEqual(r.code, 1)
         self.assertIn("error: ssh-keygen failed on vault (exit 1): no entropy", r.err)
         self.assertEqual(w[0].machines["vault"].calls[-1].argv, ("rm", "-rf", "/tmp/wk.s"))
+
+    def test_it_revokes_keys_so_it_asks_and_without_a_terminal_or_yes_makes_and_asks_github_nothing(self):
+        http = github(OLD)
+        r = self.rotate(http, "--dry-run")
+        self.assertIn("would ask: replace lin's push keys, revoking its older deploy keys on %s? [y/N]" % ", ".join(FORKS), r.err)
+        r = self.rotate(http, "--quiet")
+        self.assertEqual((r.code, r.out, self.made), (4, "", []))
+        self.assertIn("not asked: there is no terminal\n    re-run in a terminal, or pass --yes", r.err)
+        self.assertEqual([method for method, _, _, _ in http.asked], ["GET"] * len(FORKS))
+
+    def test_the_forced_command_and_the_playbook_answer_its_question(self):
+        text = {}
+        for p in ("defaults/main.yml", "tasks/rotate.yml"):
+            with open(ROOT + "/ansible/roles/credentials/" + p) as f:
+                text[p] = f.read()
+        self.assertIn('wk_rotate_command: "{{ wk_controller_home }}/bin/wk key rotate {{ inventory_hostname }} --yes"', text["defaults/main.yml"])
+        self.assertIn('line: \'restrict,command="{{ wk_rotate_command }}" ', text["tasks/rotate.yml"])
+        self.assertIn('argv: ["{{ wk_root }}/wk", key, rotate, "{{ inventory_hostname }}", --yes]', text["tasks/rotate.yml"])
 
     def test_only_a_server_is_rotated_and_only_on_the_controller(self):
         self.assertIn("error: vault holds no workspace: it is the controller", make()[0].wk("key", "rotate", "vault").err)
