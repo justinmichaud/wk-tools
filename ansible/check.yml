@@ -29,10 +29,10 @@
           ansible.builtin.command:
             argv: "{{ wk_check_wk + ['new', wk_check_ws, '--force'] }}"
 
+        # One command, so the first build that fails ends the check: a loop would go on to the next preset.
         - name: Build each preset
           ansible.builtin.command:
-            argv: "{{ wk_check_wk + ['build', wk_check_ws, item] }}"
-          loop: "{{ wk_check_presets }}"
+            argv: "{{ [ansible_facts['user_shell'], '-lc', 'for p in \"$@\"; do wk build \"$0\" \"$p\" || exit; done', wk_check_ws] + wk_check_presets }}"
           # A cold build is tens of minutes and prints nothing on its ssh session: it is polled.
           async: 14400
           poll: 30

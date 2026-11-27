@@ -72,8 +72,12 @@ class TestMachineCheck(unittest.TestCase):
 class TestThePlaybook(unittest.TestCase):
     def test_each_step_is_wk_typed_in_the_logins_login_shell(self):
         steps = re.findall(r'argv: "\{\{ wk_check_wk \+ \[\'(\w+)\'', playbook())
-        self.assertEqual(steps, ["new", "build", "run", "test", "rm"])
+        self.assertEqual(steps, ["new", "run", "test", "rm"])
         self.assertIn("""wk_check_wk: ["{{ ansible_facts['user_shell'] }}", -lc, 'exec wk "$@"', wk]""", playbook())
+
+    def test_the_presets_are_built_in_turn_and_the_first_that_fails_ends_the_check(self):
+        self.assertIn("""argv: "{{ [ansible_facts['user_shell'], '-lc', 'for p in \\"$@\\"; do wk build \\"$0\\" \\"$p\\" || exit; done', wk_check_ws] """
+                      """+ wk_check_presets }}\"""", playbook())
 
     def test_jsc_release_is_checked_everywhere_and_mac_release_on_a_mac(self):
         self.assertIn("""wk_check_presets: "{{ ['jsc-release', 'mac-release'] if 'mac' in group_names else ['jsc-release'] }}\"""", playbook())
