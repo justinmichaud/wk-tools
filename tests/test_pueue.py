@@ -72,6 +72,12 @@ class TestClient(unittest.TestCase):
         self.assertEqual(self.t.status(), [seams.Task(0, "x:test:jsc-release", "default", "running", "make 'a b'", None, 1000.0),
                                            seams.Task(1, "y", "default", "queued", "ls", None, 1000.0)])
 
+    def test_a_task_runs_under_the_systems_path_alone_whatever_the_one_it_was_typed_under(self):
+        self.t.add(["build-jsc"], "x")
+        self.t.status()
+        self.assertEqual([(c.argv[3], c.env) for c in self.m.calls if c.argv[3:4] in (("add",), ("status",))],
+                         [("add", {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}), ("status", None)])
+
     def test_the_first_build_makes_the_build_group_with_a_limit_of_one(self):
         self.t.add(["make"], "x", group="build")
         self.t.add(["make"], "y", group="build")
