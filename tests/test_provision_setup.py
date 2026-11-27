@@ -173,6 +173,17 @@ class TestThePlaybook(unittest.TestCase):
                             short.append("%s: %s" % (name, line.strip()))
         self.assertEqual(short, [])
 
+    def test_no_registered_result_or_fact_hides_a_variable_of_the_inventory(self):
+        """A registered result outranks an inventory variable of its name for the rest of the play."""
+        inventory = json.loads(make().wk("machine", "inventory").out)
+        given = set(inventory["all"]["vars"]) | {k for hostvars in inventory["_meta"]["hostvars"].values() for k in hostvars}
+        hidden = []
+        for directory, _, names in os.walk(os.path.join(ROOT, "ansible")):
+            for name in [n for n in names if n.endswith(".yml")]:
+                with open(os.path.join(directory, name)) as f:
+                    hidden += ["%s: %s" % (name, n) for n in re.findall(r"^ *register: (\w+)$", f.read(), re.M) if n in given]
+        self.assertEqual(hidden, [])
+
 
 class TestTheInventoryScript(unittest.TestCase):
     """ansible/inventory.py as Ansible runs it: a real process, a machines directory of the test's, the real git."""
