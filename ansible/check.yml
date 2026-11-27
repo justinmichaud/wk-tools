@@ -1,0 +1,55 @@
+---
+# The end-to-end check of a server, run on the controller. `wk machine check <server>` runs
+#   ansible-playbook -i ansible/inventory.py --limit <server> [--check --diff] ansible/check.yml
+# Each step is wk, typed on the server in a login shell as its person types it.
+
+- name: Check that a server builds, runs and tests WebKit
+  hosts: linux:mac
+  gather_facts: false
+  vars:
+    wk_check_presets: "{{ ['jsc-release', 'mac-release'] if 'mac' in group_names else ['jsc-release'] }}"
+    # The words after `wk`, run by the login shell: exec "$0" "$@" keeps each word whole.
+    wk_check_wk: ["{{ ansible_facts['user_shell'] }}", -lc, 'exec wk "$@"', wk]
+
+  tasks:
+    - name: Gather the login's shell
+      ansible.builtin.setup:
+        gather_subset: [min]
+
+    - name: Name the workspace once
+      ansible.builtin.set_fact:
+        wk_check_ws: "check-{{ now(utc=true, fmt='%Y%m%d%H%M%S') }}"
+
+    - name: Make, build, run and test the workspace
+      when: not ansible_check_mode
+      block:
+        # A server that does not answer cannot be shown to hold no workspace of this name; the time and this server's
+        # check alone make one.
+        - name: Make the workspace
+          ansible.builtin.command:
+            argv: "{{ wk_check_wk + ['new', wk_check_ws, '--force'] }}"
+
+        - name: Build each preset
+          ansible.builtin.command:
+            argv: "{{ wk_check_wk + ['build', wk_check_ws, item] }}"
+          loop: "{{ wk_check_presets }}"
+          # A cold build is tens of minutes and prints nothing on its ssh session: it is polled.
+          async: 14400
+          poll: 30
+
+        - name: Run a line in jsc
+          ansible.builtin.command:
+            argv: "{{ wk_check_wk + ['run', wk_check_ws, '--preset', 'jsc-release', '--', '-e', 'print(1+1)'] }}"
+          register: wk_check_run
+          failed_when: wk_check_run.rc != 0 or wk_check_run.stdout_lines != ['2']
+
+        - name: Run a JSC stress test
+          ansible.builtin.command:
+            argv: "{{ wk_check_wk + ['test', wk_check_ws, '--preset', 'jsc-release', '--', 'stress/array-push.js'] }}"
+          async: 3600
+          poll: 30
+
+      always:
+        - name: Remove the workspace
+          ansible.builtin.command:
+            argv: "{{ wk_check_wk + ['rm', wk_check_ws, '--yes'] }}"
