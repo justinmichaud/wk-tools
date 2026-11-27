@@ -34,8 +34,10 @@ two is a bug.
   own login, with every tool and file the person has.
 - What keeps that safe is what a server holds: nothing a leak of which costs
   more than a fork's branches. The interesting credentials (the claude.ai
-  login, the token that manages keys, the tailnet's keys, the BMCs' logins)
-  never leave the controller.
+  login, the tailnet's keys, the BMCs' logins) never leave the controller.
+- `github-token` is on every server because `git-webkit` needs it, and a
+  classic token with `public_repo` can itself add a deploy key to a fork:
+  rotation bounds the ssh keys, not that token.
 - A server's push keys are rotated every time an agent session starts there,
   so a key a session saw stops working at the next one.
 - A human session is an ordinary login. `git push`, `git-webkit` and `gh` work
@@ -221,8 +223,8 @@ converges. A half-made workspace is wiped, never repaired.
   <name>` writes one from stdin, checked by its rule. `wk key ls` lists the
   names. `wk key check` runs each one's live probe, which writes nothing.
 - The names: `github-user`, `github-token` (classic, `public_repo`: what
-  `git-webkit` and `gh` use on a server), `github-admin-token` (manages the
-  forks' deploy keys; the controller's alone), `bugzilla-user`,
+  `git-webkit` and `gh` use, and what manages the forks' deploy keys),
+  `bugzilla-user`,
   `bugzilla-password`, `litellm-key`, `claude-login`, `tailnet-auth-key`,
   `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `bmc/<machine>/user` and
   `bmc/<machine>/password`.
