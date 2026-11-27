@@ -142,8 +142,9 @@ class Local(Shell):
         return local_run(argv, **how)
 
 
-# ConnectTimeout bounds a dead address; the keep-alives bound a session whose far end vanishes mid-command.
-ALIVE = ["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
+# ConnectTimeout bounds a dead address; the keep-alives bound a session whose far end vanishes mid-command. A node met
+# for the first time answers with its Tailscale SSH host key, which no known_hosts holds yet.
+ALIVE = ["-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=accept-new"]
 SSH = ["-o", "BatchMode=yes"] + ALIVE + ["-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/wk-%C", "-o", "ControlPersist=60"]
 
 

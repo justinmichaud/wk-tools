@@ -155,6 +155,12 @@ class TestDoctor(unittest.TestCase):
         w.machines["vault"].on(("tailscale", "whois", "--json", "lin"), "")
         self.assertEqual(self.rows(w), [DoctorRow("api", MISSING, "the controller, vault, answered HTTP 403: the tailnet names no node at lin", remedy)])
 
+    def test_a_controller_the_tailnet_gives_no_address_is_unknown(self):
+        w = World(here="lin")
+        w.machines["lin"].on(("tailscale", "ip", "-4"), Result(1, "", "no such peer\n"))
+        row = self.rows(w)[0]
+        self.assertEqual((row.name, row.status, row.detail), ("api", UNKNOWN, "the controller, vault, did not answer (`tailscale ip -4 vault` said no such peer)"))
+
     def test_a_workspace_has_no_row_of_its_own(self):
         w = World(here="lin")
         self.assertEqual(hooks.doctor(w.inv("lin"), w.confs["lin"], w.workspace("x")), [])

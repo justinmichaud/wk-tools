@@ -61,7 +61,7 @@ class TestInventory(unittest.TestCase):
             "wk_root": ROOT, "wk_commit": SHA, "wk_project": PROJECT, "wk_controller": "vault", "wk_controller_home": home,
             "wk_store": home + "/secrets", "wk_websocat": home + "/cache/websocat-1.14.0/websocat",
             "wk_claude_placeholder": json.loads(injector.placeholder()),
-            "ansible_ssh_common_args": "-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"})
+            "ansible_ssh_common_args": "-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new"})
 
     def test_the_controllers_wk_home_is_where_wk_runs_from(self):
         inventory = json.loads(make().wk("machine", "inventory", env={"WK_HOME": "/srv/wk"}).out)["all"]["vars"]

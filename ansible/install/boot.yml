@@ -79,8 +79,6 @@
       ansible.builtin.wait_for_connection:
         timeout: "{{ wk_install_boot_minutes * 60 }}"
         sleep: 15
-      vars:
-        ansible_ssh_extra_args: -o StrictHostKeyChecking=accept-new
 
   rescue:
     - name: Say that the install did not finish

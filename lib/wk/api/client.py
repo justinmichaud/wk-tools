@@ -17,6 +17,7 @@ from wk.creds import rules
 
 FORK = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 ROTATE_TIMEOUT = 120
+ADDRESS_TIMEOUT = 10
 
 
 def port(conf):
@@ -24,9 +25,13 @@ def port(conf):
 
 
 def ask(inv, method, path, timeout=None):
-    """(status, the answer), or (None, {"message": why}) when the controller gave none. A change goes through `act`."""
+    """(status, the answer), or (None, {"message": why}) when the controller gave none. A change goes through `act`.
+    The controller is reached at the address the tailnet gives its name: on the controller the name is loopback's."""
     controller = inv.fleet.controller
-    url = "http://%s:%d%s" % (controller.name, port(controller), path)
+    r = inv.here.run(["tailscale", "ip", "-4", controller.name], timeout=ADDRESS_TIMEOUT)
+    if not r.ok or not r.out.split():
+        return None, {"message": "`tailscale ip -4 %s` said %s" % (controller.name, (r.err or r.out).strip() or "nothing")}
+    url = "http://%s:%d%s" % (r.out.split()[0], port(controller), path)
     send = lambda: rules.ask(method, url, **({"timeout": timeout} if timeout else {}))     # noqa: E731
     return send() if method == "GET" else act.act(controller.name, "%s %s" % (method, path), send, (200, {}))
 

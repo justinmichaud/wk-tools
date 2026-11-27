@@ -60,7 +60,7 @@ class TestLsOffAServer(unittest.TestCase):
     def test_every_name_the_controller_holds_is_listed_with_its_server_and_no_server_is_asked(self):
         r = self.w.wk("ls")
         self.assertEqual((r.code, r.err, r.out), (0, "", "a                        mac\nb                        lin\n"))
-        self.assertEqual(r.calls, ["[vault] GET /ws"])
+        self.assertEqual(r.calls, ["[desk] tailscale ip -4 vault", "[vault] GET /ws"])
 
     def test_a_controller_that_does_not_answer_needs_a_person(self):
         self.w.machines["vault"].down = True

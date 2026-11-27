@@ -19,7 +19,7 @@ class TestZed(unittest.TestCase):
         w.workspace("y", on="lin")
         r = w.wk("zed", "x")
         self.assertEqual((r.code, r.effects), (0, ["[desk] zed ssh://jm@mac/home/u/wk/ws/x/src"]))
-        self.assertEqual(r.calls[0], "[vault] GET /ws")
+        self.assertEqual(r.calls[:2], ["[desk] tailscale ip -4 vault", "[vault] GET /ws"])
 
     def test_a_server_with_no_user_is_reached_as_this_login(self):
         w = make()

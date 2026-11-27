@@ -184,7 +184,7 @@ class TestSsh(OnDisk):
         self.assertEqual(self.sent("argv").splitlines(), SSH + ["srv", "\"$SHELL\" -lc 'git status '\"'\"'a b'\"'\"''"])
 
     def test_the_options_bound_a_dead_address_and_a_vanished_session_and_share_one_connection(self):
-        for option in ("BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=15", "ServerAliveCountMax=3",
+        for option in ("BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=15", "ServerAliveCountMax=3", "StrictHostKeyChecking=accept-new",
                        "ControlMaster=auto", "ControlPath=~/.ssh/wk-%C", "ControlPersist=60"):
             self.assertIn(option, SSH)
 

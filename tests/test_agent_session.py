@@ -54,14 +54,15 @@ class TestStart(unittest.TestCase):
     def test_claude_is_started_in_the_login_shell_on_the_terminal_through_the_injector_with_remote_control_named_for_the_workspace(self):
         w = make()
         r = w.wk("ai", "claude", "x", tty=True)
-        self.assertEqual(r.calls, ["[lin] write /home/u/.claude.json"] + renewed("lin") + [line("lin", CLAUDE, INJECTED, tty=True)])
-        self.assertEqual((r.code, r.effects), (0, r.calls))
+        self.assertEqual(r.calls, ["[lin] write /home/u/.claude.json", "[lin] tailscale ip -4 vault"] + renewed("lin")
+                         + [line("lin", CLAUDE, INJECTED, tty=True)])
+        self.assertEqual((r.code, r.effects), (0, [c for c in r.calls if "tailscale" not in c]))
         self.assertEqual((w.machines["lin"].read("/home/u/.claude.json"), w.machines["lin"].modes["/home/u/.claude.json"]), (ANSWERED, "600"))
         self.assertEqual(r.err, "==> rotated the push keys of %s\n==> starting claude in x\n" % ", ".join(sorted(KEYS)))
 
     def test_pi_gets_no_proxy_no_ca_and_no_claude_state(self):
         r = make().wk("ai", "pi", "x", tty=True)
-        self.assertEqual(r.calls, renewed("lin") + [line("lin", PI, {}, tty=True)])
+        self.assertEqual(r.effects, renewed("lin") + [line("lin", PI, {}, tty=True)])
         self.assertNotIn("PROXY", "".join(r.calls).upper())
 
     def test_a_mac_starts_it_the_same_way(self):
