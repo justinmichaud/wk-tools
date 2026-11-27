@@ -15,17 +15,20 @@ two is a bug.
 - **Servers** (`moose`, Linux; `tolken`, macOS) hold workspaces, build, run,
   test and benchmark WebKit, and drive the bench boards. A server is never
   shared: one person, their agents, nobody else.
-- The **controller** (`alce`) holds every credential, the injector, and the
-  one checkout of `wk` that provisions. Everything that installs, provisions,
-  rotates or checks a server is typed there by a person; nothing runs on a
-  schedule.
-- The **workstation** runs Zed and ssh. `wk` on it answers `wk ls` and opens a
-  workspace in Zed (`wk zed <ws>`); nothing else.
-- Everyone may ssh into everyone else, except into the controller: only the
-  person logs in there, and a server reaches it with one key whose
-  `authorized_keys` line can run nothing but that server's key rotation. The
-  tailnet's policy says the same.
-- A machine is reached by its tailnet name over ssh, and nothing else.
+- The **controller** (`alce`) is the one authority. It holds every
+  credential, the injector, the fleet's list of workspaces, and the one
+  checkout of `wk` that provisions. Everything that installs, provisions or
+  checks a server is typed there by a person; nothing runs on a schedule.
+- The **workstation** runs Zed. `wk` on it answers `wk ls` and opens a
+  workspace in Zed (`wk zed <ws>`), both by asking the controller.
+- Every connection is Tailscale: ssh is Tailscale SSH, authorised by the
+  tailnet's policy, and no machine holds an `authorized_keys` entry or an ssh
+  key for another. The person and the controller may ssh into every machine,
+  and servers into each other; nothing but the person logs in to the
+  controller.
+- A server reaches the controller only through the controller's API and the
+  injector, two ports the tailnet's policy opens to servers. The API knows
+  which server is asking from the tailnet itself (`tailscale whois`).
 - Bench boards are WiFi only (pass 2).
 
 **Trust**
@@ -64,12 +67,14 @@ two is a bug.
   and `community.general`, which that package bundles.
 - Installing a Linux server: Ubuntu's autoinstall through the BMC, with
   `xorriso`, `qemu-nbd` and `websocat` on the controller.
-- Installing a Mac server: an open-source MDM (NanoMDM) on the controller,
-  with Apple's Automated Device Enrollment (TODO: pass 1b, below).
+- Installing a Mac server: a person reinstalls macOS and joins the tailnet;
+  everything after that is the controller's.
 - Tasks: `pueue`, one daemon per server.
 - Secrets: files on the controller, mode 0600, read by Ansible's `file`
   lookup. There is no secrets daemon.
-- Network and identity: Tailscale.
+- Network, identity and ssh: Tailscale, with Tailscale SSH on every machine
+  (on a Mac, the open-source `tailscaled`, the one macOS variant that serves
+  ssh).
 - Linux build environment: the WebKit container SDK image under rootless
   podman. Mac: Xcode, and WebKit's own scripts.
 
@@ -101,9 +106,21 @@ wk ls, wk zed           |- workspace: ~/wk/ws/<name>/src        injector   the o
 ```
 
 A command that works on a workspace is typed on the server that holds it, in
-Zed's terminal or over ssh. There is no hand-over: the only commands that ask
-more than one machine are `wk ls` and `wk zed`, which ask every server for
-`wk ls --json`, and the controller's, which are Ansible runs.
+Zed's terminal or over ssh. There is no hand-over and no command asks every
+server: what the fleet as a whole knows, the controller holds.
+
+The controller's API (`wk serve`, one systemd user unit, standard library
+HTTP on the tailnet address):
+
+| Request | Answer |
+| --- | --- |
+| `PUT /ws/<name>` | reserves the name for the asking server; 409 naming its holder when another holds it |
+| `DELETE /ws/<name>` | releases it, when the asking server holds it |
+| `GET /ws` | every name and its server |
+| `POST /rotate` | rotates the asking server's push keys and returns them |
+
+The caller is the tailnet node `tailscale whois` names for the request's
+address; a node with no conf is refused.
 
 ## Rules every command obeys
 
@@ -146,12 +163,14 @@ label's first `:`-field is its name.
 
 ## State
 
-- **Recomputed on every read:** the list of workspaces (each server is asked),
-  a workspace's state, reachability, health, what is running.
+- **Recomputed on every read:** a workspace's state, reachability, health,
+  what is running.
 - **Stored because it cannot be recomputed:** credentials (the controller's
-  files), task history and logs (pueue), a workspace's files.
+  files), the fleet's workspace names (the controller's `ws/`), task history
+  and logs (pueue), a workspace's files.
 - **Artifacts:** the mirror, compiler caches, the SDK image, pinned downloads.
-- `wk` keeps no database and no record files of its own.
+- The controller's `ws/` is the one record `wk` keeps: one file per name,
+  holding its server, made with `O_EXCL` so two reservations cannot both win.
 
 Layout under a machine's wk home, `~/wk` (or `$WK_HOME`):
 
@@ -161,13 +180,14 @@ Layout under a machine's wk home, `~/wk` (or `$WK_HOME`):
 | `bin/wk` | all | a link to `tools/wk`, on the login shell's `PATH` |
 | `secrets/` | controller | every credential, one file per name (`bmc/<machine>/user` is a path), mode 0600 in 0700 directories |
 | `injector/` | controller | the injector, its CA key and the real login |
+| `ws/<name>` | controller | the fleet's workspace names: the file holds the server's name |
 | `git/WebKit.git` | server | the mirror; `gc.auto 0`, since workspaces borrow its objects |
 | `ws/<name>/src` | server | the checkout: `git clone --shared` from the mirror |
 | `ws/<name>/build` | server | build output, a directory per preset, and the workspace's ccache |
 | `ws/<name>/.ready` | server | written last by `wk new`; absent means half-made |
 | `cache/` | all | pinned downloads; `wk gc` reclaims an entry nothing pins |
 | `pueue/` | server | pueue's config, socket, state and task logs |
-| `secrets/` | server | what a server holds: its rotated deploy keys, `ssh_config`, `env.sh`, the rotation key |
+| `secrets/` | server | what a server holds: its rotated deploy keys, `ssh_config`, `env.sh` |
 | `claude-login/` | server | the placeholder claude.ai login |
 | `injector-ca.pem` | server | the injector's CA, which an agent session trusts |
 
@@ -176,9 +196,11 @@ converges. A half-made workspace is wiped, never repaired.
 
 ## Workspaces
 
-- `wk new <ws>` on a server refuses a name alive on any server, and any name
-  while a server does not answer (a barrier). Then: clone, wire remotes,
-  create the container if the driver has one, write `.ready`.
+- `wk new <ws>` on a server reserves the name with the controller (refused,
+  naming the holder, when another server holds it; the controller not
+  answering is a barrier). Then: clone, wire remotes, create the container if
+  the driver has one, write `.ready`. A name this server already holds is
+  made again from wherever it got to.
 - Remotes: `origin` (WebKit, fetch from the mirror, push refused), `fork`
   (yours, through the rotated deploy key's ssh alias). Git settings carry the
   measured fixes: no tags, commit-graph writing off, `insteadOf` to the mirror
@@ -194,10 +216,15 @@ converges. A half-made workspace is wiped, never repaired.
 - `wk enter <ws> [-- <command>]` is a login shell in the checkout (inside the
   container on Linux) that has sourced `secrets/env.sh`. Zed's terminal on a
   Mac is already that shell.
-- `wk zed <ws>` on the workstation finds the server holding `<ws>` and opens
-  `ssh://<server>/<checkout>` in Zed.
+- `wk ls` asks the controller for every name and its server; on a server,
+  `wk ls` lists that server's own workspaces with their state.
+- `wk zed <ws>` on the workstation asks the controller which server holds
+  `<ws>` and opens `ssh://<server>/<checkout>` in Zed.
 - `wk rm <ws>` refuses under a queued or running task, asks, then removes
-  container and directory. The `.ready` marker goes first.
+  container and directory, and releases the name last. The `.ready` marker
+  goes first.
+- `wk machine install <server>` releases every name the server held: its
+  disk is gone.
 
 ## Tasks
 
@@ -235,17 +262,16 @@ converges. A half-made workspace is wiped, never repaired.
   `bmc/<machine>/password`, and `sudo-password` while a system being replaced
   asks for one.
 - What a server holds, under `secrets/`: one deploy key per fork with its ssh
-  alias, `env.sh` (`github-token`, the Bugzilla login), and its rotation key.
+  alias, and `env.sh` (`github-token`, the Bugzilla login).
   pi's `litellm-key` sits in `~/.pi/agent/models.json`. Nothing else.
 - **Rotation.** `wk key rotate <server>` on the controller makes a new
   ed25519 key for each fork in `wk_forks`, adds its public half to the fork
   as a writable deploy key titled `wk <server> <time>`, deletes that fork's
-  older `wk <server> ...` keys, and prints the private halves as JSON. Two
-  callers: the `credentials` role, which writes them to the server; and the
-  server itself, whose rotation key's `authorized_keys` line on the controller
-  is `restrict,command="wk key rotate <server> --yes"` (rotation revokes,
-  so it is destructive and asks). `wk ai` asks for a rotation
-  that way before the agent starts, and writes what comes back.
+  older `wk <server> ...` keys, and prints the private halves as JSON
+  (rotation revokes, so it is destructive and asks). Two callers: the
+  `credentials` role, which writes them to the server; and the API's
+  `POST /rotate`, which `wk ai` calls before the agent starts and whose
+  answer it writes.
 - The injector is a forward proxy on the controller, reachable only on the
   tailnet. For Claude's hosts it terminates TLS with its own CA and replaces
   the placeholder with the real login, which it alone refreshes. Every other
@@ -343,21 +369,27 @@ controller. The BMC is OpenBMC.
 - Conf keys: `bmc`, `arch` (`arm64`, `amd64`), `os` (`24.04`), `wifi`
   (optional interface), `console` (optional, `ttyAMA0,115200`), `user`.
 - The installed system: Ubuntu on LVM over the largest disk; one user with
-  the controller's ssh public key and sudo without a password; OpenSSH; git,
+  sudo without a password and no ssh key; git,
   podman, uidmap, python3, curl, openssl, tar; Tailscale, joined under the
-  server's name; lingering on.
+  server's name with `--ssh`; lingering on.
 
-## Installing a Mac server (TODO: pass 1b)
+## Installing a Mac server
 
-- NanoMDM on the controller, with an APNs certificate signed through
-  mdmcert.download, and the Mac assigned to it in Apple Business Manager
-  (Automated Device Enrollment). Both are the person's to obtain once.
-- `wk machine install tolken` sends the MDM command `EraseDevice`. Setup
-  Assistant then enrols the Mac in the MDM itself, which creates the user,
-  installs Tailscale and a bootstrap package that turns on Remote Login with
-  the controller's key. Xcode comes from the same package flow.
-- Until then a person erases the Mac and enables Remote Login, and
-  `wk machine setup tolken` does the rest.
+A person reinstalls macOS; the controller does everything after the tailnet.
+
+1. The person: Erase All Content and Settings (or a recovery reinstall),
+   Setup Assistant creating the conf's `user` as an administrator, then one
+   line in Terminal, which `wk machine install <mac>` prints on the
+   controller: it installs Homebrew's `tailscale` formula, runs
+   `sudo tailscaled install-system-daemon`, and joins with a one-off auth key
+   the controller made for it (`tailscale up --ssh --auth-key ...`), naming
+   the machine after its conf.
+2. The controller, once the node answers Tailscale SSH: `wk machine setup
+   <mac>` installs Xcode from the `.xip` kept in the controller's `cache/`
+   (downloaded once by the person: Apple's download needs an Apple Account),
+   accepts its licence, and runs every role as on any server.
+
+The rest of the Mac's provisioning is the same `site.yml` as Linux's.
 
 ## Tree
 
@@ -378,6 +410,7 @@ lib/wk/workspace/       drivers, mirror, git wiring, lifecycle
 lib/wk/tasks/           pueue client, sizing, status
 lib/wk/webkit/          project.json, presets, Tools/Scripts command lines (the only WebKit names)
 lib/wk/creds/           the secrets files, credential rules, rotation, the injector
+lib/wk/api/             the controller's API: the workspace names and rotation
 lib/wk/agent/           session
 lib/wk/provision/       the inventory and the ansible-playbook lines, doctor rows
 tests/                  unittest, one test per behaviour, against fakes
@@ -412,7 +445,9 @@ Python, standard library only, 3.9 syntax. YAML only in `ansible/`.
    run and tested through `wk`.
 4. `wk machine check`, run green on moose and tolken.
 
-**Pass 1b:** the Mac's install through NanoMDM.
+5. Centralise: the controller's API (`wk serve`): workspace names and
+   rotation; Tailscale SSH everywhere, no ssh keys; `wk new` free of offline
+   servers; `wk ls` and `wk zed` from the controller; the Mac's install line.
 
 **Pass 2: the bench lab.** Boards, images, boot selection, the benchmark
 pipeline and its statistics, driven from both servers.
