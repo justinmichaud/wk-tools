@@ -7,8 +7,9 @@ store or Ansible run is in that. "Live" means it ran on a real machine.
 ## Pass 1
 
 The fleet the live column is about: alce (the controller, Ubuntu 26.04 x86_64, 1 core, 1 GB), moose (a Linux server,
-Ubuntu 24.04 aarch64, 80 cores, podman 4.9.3), tolken (a Mac server, not yet provisioned). There is no workstation
-conf. The verifications below were typed on tolken while it was the client of the previous design.
+Ubuntu 24.04 aarch64, 80 cores, podman 4.9.3, offline since 2026-11-23), tolken (a Mac server, macOS 27.0.1, 10 cores,
+32 GB, Xcode). There is no workstation conf. The moose rows were typed on tolken while it was the client of the
+previous design; the tolken rows on tolken, provisioned from alce.
 
 | Piece | Implemented | Unit-tested | Verified live |
 | --- | --- | --- | --- |
@@ -22,37 +23,72 @@ conf. The verifications below were typed on tolken while it was the client of th
 | `wk zed <ws>` on a workstation | yes | yes | no |
 | `wk enter` as the person's door: a shell, a command, with and without a terminal | yes | yes | yes: moose (credentials sourced) |
 | `wk sync` typed by a person | yes | yes | no (`wk sync` ran as the playbook's first fetch) |
-| The `plain` driver | yes | yes | no |
+| The `plain` driver | yes | yes | yes: tolken |
 | The `container` driver (rootless podman, the SDK image) | yes | yes: the podman lines | yes: moose |
-| The pueue client, `wk status`, `--wait`, `--log` | yes | yes, against pueue's own state fixture | yes: moose |
+| The pueue client, `wk status`, `--wait`, `--log` | yes | yes, against pueue's own state fixture | yes: moose, tolken |
+| A task under the system's `PATH` alone, whatever the `PATH` `wk` was typed under | yes | yes | yes: tolken |
 | `wk stop`, `wk build --kill`, `wk status --follow` | yes | yes | no |
-| Job sizing | yes | yes | yes: 78 jobs on moose |
-| `wk build`, `wk run`, `wk test` for `jsc-release` | yes | yes | yes: moose |
-| The other presets (`jsc-debug`, `gtk-*`, `wpe-release`, the Mac's) | yes | yes | no |
+| Job sizing | yes | yes | yes: 78 jobs on moose, 10 at 3072 MB on tolken |
+| `wk build`, `wk run`, `wk test` for `jsc-release` | yes | yes | yes: moose, tolken |
+| `wk build` for `mac-release` | yes | yes | yes: tolken |
+| The other presets (`jsc-debug`, `gtk-*`, `wpe-release`, `mac-debug`) | yes | yes | no |
 | The credentials as files under the controller's `secrets/`, 0600 in 0700 directories: `wk key set`, `wk key ls` | yes | yes, against real files | no |
 | `wk key check` | yes | yes | no |
 | Each credential's rule and live probe | yes | yes, HTTP scripted | yes: `github-user`, `github-token`, `tailnet-api-key`, `claude-login`; no for `bugzilla-*`, `litellm-key` |
-| `wk key rotate <server>`: a writable deploy key per fork, the server's older ones deleted, the private halves as JSON | yes | yes, HTTP and ssh-keygen scripted | no |
-| `wk ai` asking the controller for a rotation through the rotation key, and writing the keys; a failed one a barrier | yes | yes | no |
+| `wk key rotate <server>`: a writable deploy key per fork, the server's older ones deleted, the private halves as JSON; it asks, `--yes` answers | yes | yes, HTTP and ssh-keygen scripted | yes: alce, for tolken, by the `credentials` role |
+| `wk ai` asking the controller for a rotation through the rotation key, and writing the keys; a failed one a barrier | yes | yes | its barrier alone: Tailscale SSH on alce answers the rotation key with a shell, not the forced command |
 | The injector: started, its CA made, answering with no login | yes | yes | yes: alce |
 | The injector: TLS for Claude under its CA, the placeholder recognised, a refresh asked for on first use | yes | yes, on loopback sockets | yes: alce, from moose |
 | The injector: the login replaced, a refreshed login kept | yes | yes, on loopback sockets | yes: alce, a refresh on first use and the login replaced on requests from moose |
-| `wk ai claude`: the session starts, with and without a terminal, and reaches the injector | yes | yes | no |
-| `wk ai claude`: an answer, Remote Control | yes | yes | no |
+| `wk ai claude`: the session starts, with and without a terminal, and reaches the injector | yes | yes | without a terminal: tolken |
+| `wk ai claude`: an answer, Remote Control | yes | yes | an answer: tolken |
 | `wk ai pi` | yes | yes | its refusal alone: no server has pi |
-| `wk machine setup` on the controller: the inventory (the controller local) and the `ansible-playbook` line under `LC_ALL=C.UTF-8` | yes | yes | no |
-| The playbook: `wk`, `pueue`, `mirror`, `sdk`, `agents` (Claude Code) | yes | its syntax, by Ansible | yes: moose |
+| `wk machine setup` on the controller: the inventory (the controller local) and the `ansible-playbook` line under `LC_ALL=C.UTF-8` | yes | yes | yes: alce, for alce and tolken |
+| The playbook: `wk`, `pueue`, `mirror`, `sdk`, `agents` (Claude Code) | yes | its syntax, by Ansible | yes: moose; tolken but `sdk` |
 | The playbook: pi | yes | its syntax | no: neither server's login `PATH` has node >= 22.19 |
-| The playbook: `controller` (`bin/wk`, the pinned websocat, the injector) | yes | its syntax | no |
-| The playbook: `credentials` (the rotation, the rotation key and its `authorized_keys` line, `env.sh`, `ssh_config`) | yes | its syntax | no |
-| The playbook on a Mac (launchd) | yes | its syntax | no |
+| The playbook: `controller` (`bin/wk`, the pinned websocat, the injector, restarted when older than its program or unit) | yes | its syntax; no handler, no registered name hiding an inventory variable | yes: alce |
+| The playbook: `credentials` (the rotation, the rotation key and its `authorized_keys` line, `env.sh`, `ssh_config`) | yes | its syntax | yes: tolken |
+| The playbook on a Mac (launchd) | yes | its syntax | yes: tolken |
+| `wk machine check <server>`: the refusals, the `ansible-playbook` line of `ansible/check.yml`, `--dry-run` | yes | yes; the playbook's syntax by Ansible | yes: alce, against tolken |
 | `wk doctor`, `wk doctor <ws>`, `wk gc`, each on the machine typed on | yes | yes | no |
 | `wk machine install` on the controller: the refusals, the question, the `ansible-playbook` line, `--rehearse`, `--dry-run` | yes | yes | no |
 | The rules for `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `sudo-password`, `bmc/<machine>/user` and `password` | yes | yes, HTTP scripted | no |
 | The install playbook: the credentials read, the BMC asked, the image made, attached through the BMC by the pinned websocat, seen from the server, detached | yes | its YAML is parsed and its autoinstall template rendered by a real Ansible | no |
 | The install playbook: what is tagged `wipe` (the boot override, the restart, the installer, the tailnet node, the first ssh) | yes | its YAML is parsed | no |
 
-## Verified live
+## Verified live: the controller and tolken
+
+Typed on alce (Ubuntu's `ansible`, core 2.20) and on tolken, 2026-11-27.
+
+- alce bootstrapped as DESIGN.md says: a clone at `~/wk/tools` on `rewrite`, `~/wk/bin` on `PATH` in `~/.profile`, then
+  `~/wk/tools/wk machine setup alce`: about 10 s a run. A second run reports `ok=20 changed=0`.
+- `wk machine setup tolken` from a Mac with no `~/wk`: 965 s, most of it the mirror's first fetch (12 GB), `ok=57
+  changed=32 failed=0`. pueued runs as the launchd agent `gui/<uid>/wk.pueued`; Claude Code 2.1.308 is installed under
+  the staging home. A second run, 3 min: `ok=47 changed=7`, the seven the rotation's (the push keys and the rotation key).
+- The rotation, by the `credentials` role: each fork holds one writable deploy key titled `wk tolken <time>`, and the
+  run before's is gone. The controller's `authorized_keys` line is `restrict,command="/home/jmichaud/wk/bin/wk key rotate tolken --yes"`.
+- On tolken, typed as `~/wk/bin/wk` (an interactive shell there finds the previous tree's `wk` first): `wk new t1`
+  (with moose silent, `--force`) 32 s; `wk build t1 jsc-release --detach`, 10 jobs at 3072 MB, and `wk status t1 --wait`
+  0 after 6 min; `wk run t1 -- -e 'print(1+1)'` prints 2; `wk test t1 -- stress/array-push.js` passes its 17 variants in
+  73 s; `wk enter t1 -- git status`; `wk enter t1 -- git push --dry-run fork HEAD:refs/heads/wk-live-check-tolken`
+  answers `* [new branch]` through `github-justinmichaud-webkit`, whose `ssh -G` names the delivered deploy key with
+  `IdentitiesOnly`; `wk build t1 mac-release` 46 min after `jsc-release`, leaving `MiniBrowser.app` and
+  `WebKit.framework`; `wk rm t1 --yes` 31 s.
+- `wk ai claude t1 --force -- -p "Reply with exactly: OK"` prints `OK` through the injector on alce. Without `--force`
+  it is refused: the rotation key reaches Tailscale SSH on alce, which ignores `authorized_keys`, opens a shell, and
+  answers nothing (Needs a person).
+- `wk machine check tolken`, typed on alce, exits 0 after 54 min: `check-20261127120143` made, `jsc-release` then
+  `mac-release` built cold, `jsc` printing 2, `stress/array-push.js` passing, the workspace removed; `ok=7 changed=5`.
+  An earlier run whose first build failed removed its workspace all the same.
+
+What these runs corrected: a registered result named `wk_store` hid the store's directory from the controller role; the
+injector kept running its program of the previous design after a failed run, its restart handler forgotten; a task
+took the environment `wk` was typed in, so the previous tree's `make` shim refused an agent's build and Ansible's
+`/usr/bin/python3` gave WebKit's Makefile an `SDKROOT` it turned into a refused `--sdk`; on a Mac the scripts read
+the products of `WEBKIT_OUTPUTDIR` itself, where Xcode puts them under a directory of the configuration's name; and
+`wk key rotate`, which revokes keys, did not ask.
+
+## Verified live: moose and the previous design
 
 Typed on tolken. Ansible is the Homebrew `ansible` package (core 2.22.0); `bao` is Homebrew's OpenBao 2.7.3.
 
@@ -87,19 +123,29 @@ What the live runs corrected: the unit directory is made before a unit is writte
 ## Needs a person
 
 - The claude.ai login is the one the previous tree's injector on the client held; its refresh token ends in 26 days, and the previous tree's copy stops working at the injector's next refresh. A login made for this purpose alone replaces it: `wk key set claude-login`, `wk machine setup alce --stage controller`.
-- pi is installed on no server. moose's node is 18.19.1 and pi needs 22.19.
+- pi is installed on no server. moose's node is 18.19.1, tolken's login shell has none (nvm's is on an interactive
+  shell's `PATH` alone), and pi needs 22.19.
+- alce runs Tailscale SSH, which answers port 22 on the tailnet itself and ignores `authorized_keys`: a server's
+  rotation key opens a shell there instead of running its forced command, so no `wk ai` rotates. DESIGN.md's
+  "nothing but that server's key rotation" holds once tailnet ssh to alce reaches its OpenSSH, and the tailnet's
+  policy admits no server to alce otherwise.
+- tolken's interactive shells put the previous tree (`~/Development/wk-tools/bin`, `container/bin`) ahead of
+  `~/wk/bin`, from `.zshrc`; its reinstall removes it.
+- The forks still hold the previous design's deploy keys (`wk build key (...)`, `devbox-arm64`, `wk shared deploy key`),
+  and alce still runs `wk-openbao.service` and holds `deploy-key/*` in `secrets/`.
 - `bugzilla-password` is not on the controller, and its conf has no `litellm_url=`: Bugzilla through `git-webkit` and pi's `models.json` wait for them.
 
 ## Not yet verified live
 
-- TODO: `wk key set` typed on alce, each name moved from the store to `secrets/`, and `wk key rotate` against the forks.
+- TODO: `wk key set` typed on alce.
+- TODO: a task's empty environment under podman on a Linux server (`XDG_RUNTIME_DIR` kept).
 - TODO: pi's `models.json`, `gh` (the SDK image has none), a pull request, a Bugzilla login with `bugzilla-password`.
 - TODO: the injector's delivered-digest marker leaving a refreshed login alone at the next setup; the hosts Remote Control uses beside the injector's three.
 - TODO: a reboot of each machine: the injector on alce, pueued under its unit on moose.
 - TODO: `wk machine setup --dry-run`: what Ansible's check mode reports on a bare and on a provisioned server.
-- TODO: a Mac server: the playbook there, pueued as a launchd agent (`launchctl bootstrap gui/<uid>` with no one at the console), the Xcode presets and where they leave `jsc`.
+- TODO: pueued's launchd agent with no one at tolken's console, and after a reboot.
 - TODO: `wk sync` typed by a person, `wk stop --tasks`, `wk build --kill`, `wk status --follow`, a build that fails, a build killed over its budget.
-- TODO: the presets other than `jsc-release`, and layout tests.
+- TODO: the presets other than `jsc-release` and `mac-release`, and layout tests.
 - TODO: `wk` typed inside the container, and the pueue client reaching the daemon's socket from there.
 - TODO: `wk gc` with something to reclaim, and `wk new` over a half-made workspace, on a real server.
 - TODO: install: everything tagged `wipe`. Each line below is unverified.

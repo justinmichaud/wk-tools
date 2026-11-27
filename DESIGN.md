@@ -204,6 +204,11 @@ converges. A half-made workspace is wiped, never repaired.
 - pueue runs from wk's pinned binaries under wk's own config in `pueue/`:
   one daemon per server, kept running by a systemd user unit of a lingering
   user on Linux and a launchd agent on a Mac.
+- A task starts from an empty environment: the system's `PATH`
+  (`/usr/bin:/bin:/usr/sbin:/sbin`) and the login's `HOME`, `USER`,
+  `LOGNAME`, `SHELL`, `TMPDIR`, `LANG` and `XDG_RUNTIME_DIR`. pueue would give
+  it the environment `wk` was typed in, where a login's `PATH`, or the
+  `SDKROOT` Apple's `/usr/bin/python3` exports, breaks WebKit's scripts.
 - `wk build <ws> [<preset>] [--detach]` adds a pueue task in the `build`
   group, whose parallel limit is 1. With no preset it repeats the last.
 - `wk status [<ws>]`, `--log`, `--follow`, `--wait` read pueue. Silence is
