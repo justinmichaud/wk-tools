@@ -1,10 +1,10 @@
 """Run a workspace's tests as a task: the JavaScriptCore tests of a jsc preset, the layout tests of a full port.
 
 `wk test <ws> -- <tests and options>` tests the preset the workspace built last (`--preset` chooses another), sized
-and guarded like a build, and follows the log. A word after `--` names a test; an option goes to the runner as it
+like a build, and follows the log. A word after `--` names a test; an option goes to the runner as it
 is, with its value attached (`--filter=regexp`). A layout test that does not exist is refused before anything runs.
 
-Exit code: 0 passed, 1 failed, 3 out of memory. With --detach it is 0 once queued, and `wk status <ws> --wait` is
+Exit code: 0 passed, 1 failed. With --detach it is 0 once queued, and `wk status <ws> --wait` is
 the outcome."""
 
 from wk import webkit

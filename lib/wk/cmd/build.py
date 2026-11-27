@@ -1,10 +1,10 @@
 """Build WebKit in a workspace, as a task in its server's build queue.
 
 `wk build <ws> <preset>` sizes the job count from the cores and free memory of the place it builds in, queues the build
-under the memory guard and follows its log. A server builds one thing at a time: a second build waits its turn. With
+and follows its log. A server builds one thing at a time: a second build waits its turn. With
 no <preset> it repeats the one the workspace built last. An unknown preset is refused with the list of them.
 
-Exit code: 0 built, 1 failed or killed, 2 this workspace is already building, 3 out of memory. With --detach it is 0
+Exit code: 0 built, 1 failed or killed, 2 this workspace is already building. With --detach it is 0
 once the build is queued, and `wk status <ws> --wait` is the outcome."""
 
 from wk import webkit

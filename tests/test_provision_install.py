@@ -19,7 +19,7 @@ from wk.core.vars import VARS
 
 BMC = "bmc=10.0.0.2\narch=arm64\nos=24.04"
 CONFS = {"desk": "kind=client", "lin": "kind=linux\nuser=jm\nwifi=wlp1s0\nconsole=ttyAMA0,115200\n" + BMC, "bare": "kind=linux",
-         "mac": "kind=mac\n" + BMC, "box": "kind=borrowed\n" + BMC, "vault": "kind=credential\n" + BMC}
+         "mac": "kind=mac\n" + BMC, "vault": "kind=credential\n" + BMC}
 PLAYBOOK = ["ansible-playbook", "-i", ROOT + "/ansible/inventory.py", "--limit", "lin"]
 INSTALL = [ROOT + "/ansible/install.yml"]
 ASKED = "ERASE lin's disk and install Ubuntu on it, through its BMC at 10.0.0.2? [y/N]"
@@ -104,8 +104,8 @@ class TestMachineInstall(unittest.TestCase):
         self.assertEqual(r.err, "error: bare has no BMC to be installed through: set bmc=<its BMC's address> in machines/bare.conf "
                                 "(`wk machine install -h` lists the other keys)\n")
 
-    def test_the_client_a_borrowed_box_and_a_mac_are_refused_whatever_is_forced(self):
-        for name, what in (("desk", "the client"), ("box", "a borrowed box"), ("mac", "a Mac")):
+    def test_the_client_and_a_mac_are_refused_whatever_is_forced(self):
+        for name, what in (("desk", "the client"), ("mac", "a Mac")):
             r = self.w.wk("machine", "install", name, "--yes", "--force")
             self.assertEqual((r.code, r.err, r.calls), (1, "error: %s is %s, and install puts Ubuntu on a Linux server of yours\n" % (name, what), []))
 

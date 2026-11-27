@@ -10,7 +10,7 @@ class TestWorld(unittest.TestCase):
     def test_a_command_reaches_the_fake_driver_tasks_and_secrets_through_inv(self):
         w = World(commands=[toy])
         w.workspace("x", on="lin")
-        r = w.wk("seamy", "x")
+        r = w.wk("seamy", "x", on="lin")
         self.assertEqual((r.code, r.out), (0, "0\n"))
         self.assertEqual(r.effects, ["[lin] driver create x", "[store] secret put token", "[lin] task add x: make"])
         self.assertEqual((w.made, w.secrets.get("token"), w.tasks("lin").status()),
@@ -18,7 +18,7 @@ class TestWorld(unittest.TestCase):
 
     def test_every_seam_is_counted_by_the_kill_points_and_the_dry_run(self):
         def make():
-            w = World(commands=[toy])
+            w = World(here="lin", commands=[toy])
             w.workspace("x", on="lin")
             return w
         dry_run_is_the_plan(self, make, "seamy", "x")

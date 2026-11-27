@@ -1,25 +1,17 @@
-"""`wk ai`: one agent session in a workspace, under the credential wrapper, measured before it starts. The agents
-themselves are the playbook's agents role's to install, under <wk_home>/cache/agents."""
+"""`wk ai`: one agent session in a workspace, started as `wk enter` starts a command: the login's own shell, in the
+checkout, inside the container on Linux. The agents themselves are the playbook's agents role's to install, under
+<wk_home>/cache/agents."""
 
 import json
 
 from wk import creds
-from wk.agent import wrapper
-from wk.core.act import barrier, die, info
+from wk.core.act import die, info
 from wk.core.errors import NEEDS_PERSON
 from wk.core.vars import VARS
 from wk.workspace import lifecycle
 
 # On a server of the owner's an agent asks permission for nothing (DESIGN.md, Trust).
-OWN_MODE = ["--dangerously-skip-permissions"]
-# A borrowed box is not the owner's, and Claude Code refuses --dangerously-skip-permissions to root, which a login there may be.
-BORROWED_MODE = ["--permission-mode", "auto"]
-CLAUDE_MODE = {"linux": OWN_MODE, "mac": OWN_MODE, "borrowed": BORROWED_MODE}
-WHY = {wrapper.LEAKS: "does not hold", wrapper.ABSENT: "cannot run", wrapper.UNKNOWN: "could not be measured"}
-REMEDY = {wrapper.HOLDS: "",
-          wrapper.LEAKS: "no agent starts until it holds: this is a fault in wk (lib/wk/agent/wrapper.py) to report with the line above",
-          wrapper.ABSENT: "wk machine setup %(server)s",
-          wrapper.UNKNOWN: "check that the workspace runs: wk enter %(ws)s"}
+MODE = ["--dangerously-skip-permissions"]
 
 
 def claude_bin(home):
@@ -30,58 +22,18 @@ def pi_bin(home):
     return home + "/cache/agents/pi/node_modules/.bin/pi"
 
 
-def claude(inv, conf, ws, home):
+def claude(inv, ws, home):
     """(the start line, what the session's environment adds)."""
-    return ([claude_bin(home)] + CLAUDE_MODE[conf.kind] + ["--remote-control", ws.name],
-            dict(creds.agent_env(inv), DISABLE_AUTOUPDATER="1"))
+    return [claude_bin(home)] + MODE + ["--remote-control", ws.name], dict(creds.agent_env(inv), DISABLE_AUTOUPDATER="1")
 
 
-def pi(inv, conf, ws, home):
+def pi(inv, ws, home):
     return [pi_bin(home)], {}
 
 
 START = {"claude": claude, "pi": pi}
 # What the playbook installs an agent from; it installs none of it.
 NEEDS = {"claude": "", "pi": "install node >= %s and npm on %%s, then: " % VARS["wk_node"]}
-
-
-class Session:
-    """One workspace's agent session on the server `conf`: its wrapper, its environment, and the wrapper's probe."""
-
-    def __init__(self, inv, conf, ws, extra):
-        self.inv, self.conf, self.ws, self.extra = inv, conf, ws, extra
-        self.m = inv.machine(conf.name)
-        self.driver = inv.driver(ws.driver, self.m)
-        self.home = inv.wk_home_on(self.m)
-        self.hidden = [self.home + "/secrets"]
-
-    def inside(self, argv):
-        return self.m.run(self.driver.exec_argv(self.ws, argv), timeout=30)
-
-    def environment(self):
-        """The allowlisted part of the workspace's own environment, this terminal's TERM, the shims and then `wk`
-        first on PATH and what the agent adds; None when the workspace's environment cannot be read."""
-        env = wrapper.minimal(wrapper.variables(self.inside(["env", "-0"]).out))
-        if "HOME" not in env or "PATH" not in env:
-            return None
-        env.update({name: self.inv.env[name] for name in ("TERM",) if name in self.inv.env})
-        env.update(self.extra, WK_AGENT="1", WK_WORKSPACE=self.ws.name, PATH="%s/shims:%s/bin:%s" % (self.home, self.home, env["PATH"]))
-        return env
-
-    def wrap(self, argv, env):
-        return wrapper.wrap(self.conf.kind, argv, self.hidden, env)
-
-    def measure(self):
-        """(holds | leaks | absent | unknown, why, the session's environment): a stand-in under the session's own
-        wrapper lists each hidden directory and prints its environment."""
-        env, tool = self.environment(), wrapper.TOOL[self.conf.kind]
-        if env is None:
-            return wrapper.UNKNOWN, "`env -0` in the workspace printed no HOME and PATH", None
-        if not self.inside(["sh", "-c", "command -v " + tool]).ok:
-            return wrapper.ABSENT, "the workspace has no %s, which the wrapper is made of" % tool, env
-        # LC_ALL=C: the verdict reads ls's own words.
-        listings = [(path, self.inside(self.wrap(["ls", "-A", path], dict(env, LC_ALL="C")))) for path in self.hidden]
-        return wrapper.verdict(listings, self.inside(self.wrap(["env", "-0"], env)), env) + (env,)
 
 
 def start(inv, agent, name, tail):
@@ -92,20 +44,15 @@ def start(inv, agent, name, tail):
         die("an agent's session needs a terminal and there is none: give the agent its prompt, `wk ai %s %s -- -p <prompt>`" % (agent, name),
             NEEDS_PERSON)
     conf, m, ws = inv.fleet.here, inv.here, lifecycle.ready(inv, name)
-    argv, extra = START[agent](inv, conf, ws, inv.wk_home)
+    argv, extra = START[agent](inv, ws, inv.wk_home)
     if not m.exists(argv[0]):
         die("%s is not installed on %s: there is no %s\n    %swk machine setup %s"
             % (agent, conf.name, argv[0], NEEDS[agent] and NEEDS[agent] % conf.name, conf.name))
-    session = Session(inv, conf, ws, extra)
-    verdict, why, env = session.measure()
-    if verdict != wrapper.HOLDS:
-        refuse = barrier if env and verdict != wrapper.ABSENT else die      # --force starts an agent under a wrapper that runs
-        refuse("the credential wrapper %s for %s on %s: %s\n    %s"
-               % (WHY[verdict], name, conf.name, why, REMEDY[verdict] % {"server": conf.name, "ws": name}))
     if agent == "claude":
         trust(m, ws.path + "/src")
-    info("starting %s in %s: %s" % (agent, name, wrapper.SAYS[conf.kind]))
-    return m.act(session.driver.exec_argv(ws, session.wrap(argv + tail, env), tty=tty), stream=True, tty=tty).rc
+    info("starting %s in %s" % (agent, name))
+    env = ["env", "WK_WORKSPACE=" + ws.name] + ["%s=%s" % kv for kv in sorted(extra.items())]
+    return m.act(inv.driver(ws.driver, m).enter_argv(ws, env + argv + tail, tty=tty), stream=True, tty=tty).rc
 
 
 def answered(text, checkout):

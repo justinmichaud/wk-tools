@@ -1,5 +1,5 @@
 ---
-# The agents: Claude Code pinned and fetched once, pi from npm, the build-tool shims, and Claude's configuration.
+# The agents: Claude Code pinned and fetched once, pi from npm, and Claude's configuration.
 
 - name: Look for the pinned Claude Code
   ansible.builtin.stat:
@@ -74,19 +74,6 @@
     creates: "{{ wk_pi_dir }}/node_modules/.bin/pi"
   when: wk_node_usable
 
-- name: Make the shims' directory
-  ansible.builtin.file:
-    path: "{{ wk_home }}/shims"
-    state: directory
-    mode: "0755"
-
-- name: Put a shim on an agent's PATH for each build tool
-  ansible.builtin.copy:
-    src: shim.sh
-    dest: "{{ wk_home }}/shims/{{ item }}"
-    mode: "0755"
-  loop: "{{ wk_build_tools }}"
-
 - name: Make Claude's configuration directory
   ansible.builtin.file:
     path: "{{ ansible_facts['env']['HOME'] }}/.claude"
@@ -101,7 +88,6 @@
     mode: "0644"
     backup: true
 
-# The deny rules cover a build tool named by its path, which no shim on PATH meets.
 - name: Write Claude's settings
   ansible.builtin.template:
     src: settings.json.j2

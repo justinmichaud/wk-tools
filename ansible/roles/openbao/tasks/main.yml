@@ -38,7 +38,7 @@
     creates: "{{ wk_openbao_bin }}/bao"
 
 # A 32-byte AES-256-GCM key (openbao.org/docs/configuration/seal/static). It lies beside the data it unseals: what
-# guards both is the directory's mode and the agent wrapper, which hides the directory.
+# guards both is the directory's mode.
 - name: Make the unseal key
   ansible.builtin.command:
     argv: [openssl, rand, -out, "{{ wk_openbao_dir }}/unseal.key", "32"]

@@ -35,7 +35,7 @@ def inventory(inv):
     host: its literals are every host's defaults."""
     fleet = inv.fleet
     servers, vault = [c for c in fleet.machines() if c.kind != "client"], fleet.credential
-    groups = {kind: {"hosts": [c.name for c in servers if c.kind == kind]} for kind in ("linux", "mac", "borrowed", "credential")}
+    groups = {kind: {"hosts": [c.name for c in servers if c.kind == kind]} for kind in ("linux", "mac", "credential")}
     shared = dict(host(fleet.here), wk_root=inv.root, wk_commit=head(inv), wk_project=PROJECT, wk_credential_server=vault.name,
                   wk_bao_addr=bao.address(inv), wk_claude_placeholder=json.loads(injector.placeholder()),
                   ansible_ssh_common_args=" ".join(ALIVE))

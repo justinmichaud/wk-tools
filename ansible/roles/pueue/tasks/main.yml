@@ -31,7 +31,6 @@
     dest: "{{ wk_pueue_dir }}/pueue.yml"
     mode: "0644"
 
-# A borrowed box too: the one in the fleet runs a user manager for its logins, and lets a user linger.
 - name: Keep pueued running as a systemd user unit
   when: "'mac' not in group_names"
   environment: "{{ wk_user_bus }}"

@@ -15,14 +15,14 @@ Refused while the server holds a workspace, which a rehearsal leaves alone. A se
 all the same, restarted by its BMC. While it runs, the server's serial console is `ssh -p 2200 <BMC login>@<bmc>`.
 `--dry-run` asks the store and the BMC and changes nothing."""
 
-from wk.core import act, route
+from wk.core import act
 from wk.core.act import barrier, confirm, die, info
 from wk.core.decl import Command, Opt
 from wk.provision import ansible
 
 COMMAND = Command(where="client", takes=("server",), destructive=True,
                   opts=(Opt("--rehearse", "attach the image, see it from the server and detach it: nothing boots and no disk is erased"),))
-NOT_INSTALLED = {"client": "the client", "borrowed": "a borrowed box", "mac": "a Mac"}
+NOT_INSTALLED = {"client": "the client", "mac": "a Mac"}
 
 
 def main(args, inv):
@@ -39,7 +39,7 @@ def main(args, inv):
     if conf.kind == "credential":
         barrier("%s is the credential server: its disk holds the store and the claude.ai login, and both go with it" % name)
     if conf.holds_workspaces:
-        held, silent = route.workspaces(inv, [name])
+        held, silent = inv.fleet.workspaces([name])
         if held:
             barrier("%s holds %s, and its disk is erased: remove each with `wk rm <ws>`" % (name, ", ".join(ws.name for ws in held)))
         if silent:

@@ -38,7 +38,7 @@ class TestFactory(unittest.TestCase):
         w = World(confs=dict(CONFS, lin="kind=linux\nsdk_image=localhost/sdk:1"))
         self.assertEqual(driver(inv(w), "container", w.machines["lin"]).image, "localhost/sdk:1")
 
-    def test_a_mac_or_borrowed_server_gets_the_plain_driver(self):
+    def test_a_mac_server_gets_the_plain_driver(self):
         w = World()
         d = driver(inv(w), "plain", w.machines["mac"])
         self.assertEqual((type(d), d.kind), (Plain, "plain"))
@@ -136,10 +136,10 @@ class TestContainer(unittest.TestCase):
         m = server(w)
         m.files[ENV_SH] = ""
         podman(m, None)
-        self.assertEqual(w.wk("new", "x", "--on", "lin").effects, MAKE[:-2] + [RUN, MAKE[-1]])
+        self.assertEqual(w.wk("new", "x", on="lin").effects, MAKE[:-2] + [RUN, MAKE[-1]])
         podman(m, "running")
-        self.assertEqual(w.wk("ls").out.split(), ["x", "lin", "container", "ready"])
-        self.assertEqual(w.wk("rm", "x", "--yes").effects[1], "[lin] podman rm --force --ignore wk-x")
+        self.assertEqual(w.wk("ls", on="lin").out.split(), ["x", "lin", "container", "ready"])
+        self.assertEqual(w.wk("rm", "x", "--yes", on="lin").effects[1], "[lin] podman rm --force --ignore wk-x")
 
     def test_wk_ls_typed_inside_a_container_knows_its_own_workspace_and_calls_the_others_unknown(self):
         w = World(here="lin", seams={"driver": driver})

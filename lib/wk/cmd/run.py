@@ -15,5 +15,5 @@ def main(args, inv):
     ws = lifecycle.ready(inv, args.ws)
     preset = launch.preset(inv, ws, args.preset)
     tty = inv.stdin.isatty()
-    argv = inv.driver(ws.driver, inv.here).exec_argv(ws, launch.allowed(webkit.run_argv(preset, ws.path + "/build", args.tail)), tty=tty)
+    argv = inv.driver(ws.driver, inv.here).exec_argv(ws, webkit.run_argv(preset, ws.path + "/build", args.tail), tty=tty)
     return inv.here.act(argv, stream=True, tty=tty).rc

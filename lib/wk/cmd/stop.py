@@ -1,14 +1,13 @@
 """Stop what runs on a server: `wk stop --tasks` kills every queued and running task there.
 
-It asks once, naming the tasks. From the client, `--on <server>` says which server."""
+It asks once, naming the tasks."""
 
 from wk.core import seams
 from wk.core.act import confirm, info
 from wk.core.decl import Command, Opt
 from wk.core.errors import Usage
 
-COMMAND = Command(where="server", opts=(Opt("--tasks", "kill every queued and running task"), Opt("--on", "the server to stop them on", "server")),
-                  destructive=True)
+COMMAND = Command(where="server", opts=(Opt("--tasks", "kill every queued and running task"),), destructive=True)
 
 
 def main(args, inv):

@@ -1,6 +1,6 @@
 """machines/<name>.conf: one machine, as `key=value` lines of one literal word each.
 
-    kind=linux            client | linux | mac | borrowed | credential      (required)
+    kind=linux            client | linux | mac | credential      (required)
     user=me               the login ssh uses there, when it is not the client's   (optional)
 
 The file is named for the machine's tailnet name, which is also its hostname. Any other lowercase key is a literal
@@ -12,8 +12,8 @@ import re
 
 from wk.core.errors import Refused
 
-KINDS = ("client", "linux", "mac", "borrowed", "credential")
-DRIVERS = {"linux": "container", "mac": "plain", "borrowed": "plain"}
+KINDS = ("client", "linux", "mac", "credential")
+DRIVERS = {"linux": "container", "mac": "plain"}
 NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 LINE = re.compile(r"([a-z][a-z0-9_]*)=(.*)")
 WORD = re.compile(r"[A-Za-z0-9_.,:/@+=-]+")

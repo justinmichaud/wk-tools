@@ -34,7 +34,6 @@
   "wk_claude_version": "2.1.308",
   "wk_pi_package": "@earendil-works/pi-coding-agent",
   "wk_node": "22.19",
-  "wk_build_tools": ["build-webkit", "build-jsc", "cmake", "ninja", "make", "xcodebuild", "run-webkit-tests", "run-javascriptcore-tests"],
   "wk_ubuntu": {
     "24.04": {
       "codename": "noble",

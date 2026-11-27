@@ -25,13 +25,6 @@ class TestConverges(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "more than 3 effects"):
             converges(self, make, "flood", limit=3)
 
-    def test_a_kill_reaches_through_a_hand_over(self):
-        def held():
-            w = make()
-            w.workspace("x")
-            return w
-        converges(self, held, "far", "x")
-
 
 class TestDryRunIsThePlan(unittest.TestCase):
     def test_a_dry_run_lists_exactly_the_wet_runs_effects(self):

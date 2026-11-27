@@ -9,7 +9,6 @@
     inv.secrets()                  a wk.core.seams.Secrets       (wk.creds.secrets(inv))
     inv.wk_home_on(machine)        its wk home: <its login's home>/wk, or $WK_HOME on this machine (inv.wk_home) alone
     inv.env  inv.stdin  inv.root   the environment, the terminal, the checkout wk runs from
-    inv.words                      the command as typed, wk's global flags taken out
     inv.commands                   {("key", "set"): "wk.cmd.key_set"}"""
 
 import importlib
@@ -26,7 +25,7 @@ SEAMS = {"driver": lane("wk.workspace", "driver"), "tasks": lane("wk.tasks", "ta
 class Inv:
     def __init__(self, root, env, fleet, clock, stdin, commands, seams=SEAMS):
         self.root, self.env, self.fleet, self.clock, self.stdin, self.commands = root, env, fleet, clock, stdin, commands
-        self.seams, self.words = seams, []
+        self.seams = seams
 
     @property
     def here(self):

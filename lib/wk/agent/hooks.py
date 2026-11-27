@@ -2,12 +2,10 @@
 
 import re
 
-from wk.agent import session, wrapper
-from wk.agent.session import REMEDY, Session
+from wk.agent import session
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
 from wk.core.vars import VARS
 
-WRAPPER = {wrapper.HOLDS: OK, wrapper.LEAKS: MISSING, wrapper.ABSENT: MISSING, wrapper.UNKNOWN: UNKNOWN}
 NODE = tuple(int(n) for n in VARS["wk_node"].split("."))    # the oldest node pi runs on
 
 
@@ -29,13 +27,9 @@ def node(m):
 
 
 def doctor(inv, conf, ws):
-    if not conf.holds_workspaces:
+    if not conf.holds_workspaces or ws:
         return []
     m, fix = inv.machine(conf.name), "wk machine setup %s" % conf.name
-    if ws:
-        verdict, why, _ = Session(inv, conf, ws, {}).measure()
-        return [DoctorRow("credential wrapper", WRAPPER[verdict], why or wrapper.SAYS[conf.kind],
-                          REMEDY[verdict] % {"server": conf.name, "ws": ws.name})]
     home = inv.wk_home_on(m)
 
     def row(name, paths, detail):
@@ -45,6 +39,5 @@ def doctor(inv, conf, ws):
     return [row("claude", [session.claude_bin(home)], "no Claude Code %s in the cache" % VARS["wk_claude_version"]),
             DoctorRow("node", status, why, "" if status == OK else "install node >= %s and npm on %s, then: %s" % (VARS["wk_node"], conf.name, fix)),
             row("pi", [session.pi_bin(home)], "no pi in the cache"),
-            row("build-tool shims", ["%s/shims/%s" % (home, tool) for tool in VARS["wk_build_tools"]], "a shim is absent from %s/shims" % home),
             row("agent config", [m.home + "/.claude/" + name for name in ("CLAUDE.md", "settings.json")],
                 "CLAUDE.md or settings.json is absent from ~/.claude")]

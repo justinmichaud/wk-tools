@@ -178,15 +178,8 @@ class TestSsh(OnDisk):
             self.assertIn(option, SSH)
 
     def test_cwd_and_env_become_part_of_the_remote_command(self):
-        self.assertEqual(self.m.argv(["wk", "build"], cwd="/w s", env={"WK_YES": "1", "WK_DRY_RUN": "1"})[-1],
-                         "\"$SHELL\" -lc 'cd '\"'\"'/w s'\"'\"' && env WK_DRY_RUN=1 WK_YES=1 wk build'")
-
-    def test_a_forward_is_a_reverse_forward_on_a_connection_of_its_own_that_fails_if_the_port_is_taken(self):
-        argv = self.m.argv(["wk", "ai", "claude", "x"], tty=True, forward=(20123, "vault:3128"))
-        self.assertEqual(argv[:7], ["ssh", "-o", "ControlPath=none", "-o", "ExitOnForwardFailure=yes", "-R", "127.0.0.1:20123:vault:3128"])
-        self.assertEqual((argv[7:-3], argv[-3:-1]), (SSH, ["-t", "srv"]))
-        self.m.run(["true"], forward=(20123, "vault:3128"))
-        self.assertIn("-R\n127.0.0.1:20123:vault:3128\n", self.sent("argv"))
+        self.assertEqual(self.m.argv(["wk", "build"], cwd="/w s", env={"A": "1", "B": "1"})[-1],
+                         "\"$SHELL\" -lc 'cd '\"'\"'/w s'\"'\"' && env A=1 B=1 wk build'")
 
     def test_a_conf_that_names_a_user_logs_in_as_that_user(self):
         self.assertEqual(Ssh("srv", "jm").argv(["true"])[-2], "jm@srv")

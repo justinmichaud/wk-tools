@@ -12,7 +12,7 @@ with open(os.path.join(os.path.dirname(__file__), "project.json")) as _f:
     PROJECT = json.load(_f)
 
 CMAKE, XCODE = "cmake", "xcode"
-LINUX, MAC = ("linux", "borrowed"), ("mac",)
+LINUX, MAC = ("linux",), ("mac",)
 
 # Without CMAKE_Swift_NUM_THREADS=1 one ninja job runs a swift-frontend per core (measured: nine at 1.7 GB in gtk-debug).
 COMMON = "-DDEVELOPER_MODE=ON -DUSE_VULKAN=OFF -DENABLE_THUNDER=OFF -DCMAKE_Swift_NUM_THREADS=1"

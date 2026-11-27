@@ -83,9 +83,6 @@ class TestGlobalFlags(Typed):
     def test_n_before_the_command_is_dry_run(self):
         self.assertEqual(len(self.w.wk("-n", "poke").plan), 3)
 
-    def test_the_environment_carries_dry_run(self):
-        self.assertEqual(len(self.w.wk("poke", env={"WK_DRY_RUN": "1"}).plan), 3)
-
     def test_a_wet_run_records_its_effects_in_order(self):
         r = self.w.wk("poke")
         self.assertEqual(r.effects, ["[desk] write /poke/a", "[desk] touch /poke", "[desk] write /poke/b"])
@@ -172,6 +169,16 @@ class TestWhere(Typed):
 
     def test_a_client_command_runs_on_the_client(self):
         self.assertEqual(self.w.wk("desk").out, "at the desk\n")
+
+    def test_a_server_command_runs_on_a_server_and_asks_no_one(self):
+        r = self.w.wk("far", "x", "--", "-j", "4", on="mac")
+        self.assertEqual((r.code, r.out, r.calls), (0, "ran on mac: x ['-j', '4']\n", ["[mac] write /far/x"]))
+
+    def test_a_server_command_is_refused_on_the_client_and_on_the_credential_server_naming_the_servers(self):
+        for name in ("desk", "vault"):
+            r = self.w.wk("far", "x", on=name)
+            self.assertEqual((r.code, r.err, r.calls), (1, "error: wk far runs on the server that holds the workspace, and this is %s, which holds none: "
+                                                           "type it there\n    `wk ls` says which server holds it; the servers are box, lin, mac\n" % name, []))
 
     def test_a_command_that_runs_anywhere_needs_no_conf_for_this_machine(self):
         self.assertEqual(self.w.wk("grp", on="stranger").out, "one\n")

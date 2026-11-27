@@ -19,26 +19,17 @@ wk status $WK_WORKSPACE --wait             # block until it is not busy, instead
 wk status $WK_WORKSPACE --log              # the build log
 ```
 
-`wk` derives the job count from the memory the server has free. A raw `ninja -j$(nproc)` has taken shared build
-machines down, so the build tools on your `PATH` (`build-webkit`, `build-jsc`, `cmake`, `ninja`, `make`,
-`xcodebuild`, `run-webkit-tests`, `run-javascriptcore-tests`) refuse to run for you and name the `wk` command to use.
-Do not route around them by path.
+`wk` derives the job count from the memory the server has free: a raw `ninja -j$(nproc)` has taken servers down.
+Build, run and test through it.
 
 A build is tens of minutes and outlives the command that started it: start it with `--detach`, then wait with
 `wk status $WK_WORKSPACE --wait` and read `--log` when it ends. One build runs on a server at a time; yours may
 queue behind another.
 
-Every build is watched for memory. If yours is killed over its budget, `wk status` says so: that is the machine
-protecting itself, not a fault in the code.
-
 ## Git
 
-Commit freely in this checkout when the task calls for it.
-
-**You cannot push, and must not try.** No key or token that publishes is readable by you: the credentials on this
-server are hidden from your process, and you inherit no token and no ssh agent. That is deliberate. Do not look for
-a credential and do not work around a refused push, pull request or bug comment. Say what you would push (the branch,
-the commits, the remote) and let the person do it from a shell of their own (`wk enter`).
+Commit freely in this checkout when the task calls for it. `git push`, `git-webkit` and `gh` work as they do in the
+person's own shell.
 
 `origin` is WebKit/WebKit, fetched from the server's mirror; `fork` is the person's fork. Never rewrite a branch
 somebody else can see.

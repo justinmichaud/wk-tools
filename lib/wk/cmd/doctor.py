@@ -1,15 +1,15 @@
 """Report what each machine needs as ok, MISSING or unknown, with the command that fixes it.
 
-On the client: the client, then every server. On a server: that server. `wk doctor <ws>` reports one workspace, on
-its server; `--all` adds every workspace. unknown is a reading that could not be taken; a machine that does not
+On the client: the client, then every server. On a server: that server; `wk doctor <ws>` reports one workspace
+there and `--all` adds every workspace. unknown is a reading that could not be taken; a machine that does not
 answer is one unknown row. Exit code: 0 all ok, 1 something is missing, 4 something is unknown and nothing missing."""
 
 import dataclasses
 import json
 
-from wk.core import hooks, route
+from wk.core import hooks
 from wk.core.decl import Command, Opt
-from wk.core.errors import FAILED, NEEDS_PERSON, Unreachable
+from wk.core.errors import FAILED, NEEDS_PERSON, Refused, Unreachable
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
 from wk.provision import rows
 from wk.workspace import lifecycle
@@ -27,27 +27,11 @@ def machine(inv, conf):
         return (conf.name, [DoctorRow("reachable", UNKNOWN, str(e).split("\n")[0], "tailscale status")])
 
 
-def held(inv, ws):
-    """A workspace's groups, from the server that holds it."""
-    try:
-        said = inv.machine(ws.server).run(["wk", "doctor", ws.name, "--json"])
-        return [(group["group"], [DoctorRow(**row) for row in group["rows"]]) for group in json.loads(said.out)]
-    except Unreachable as e:
-        return [(ws.name, [DoctorRow("reachable", UNKNOWN, str(e).split("\n")[0], "tailscale status")])]
-    except ValueError:
-        return [(ws.name, [DoctorRow("doctor", UNKNOWN, "`wk doctor %s --json` on %s answered %s" % (ws.name, ws.server, said.err.strip() or "nothing"),
-                                     "wk machine setup %s" % ws.server)])]
-
-
 def on_client(args, inv):
-    if args.ws:
-        return held(inv, route.locate(inv, args.ws))
-    groups = [(inv.fleet.hostname, rows.client(inv))] + [machine(inv, conf) for conf in inv.fleet.machines() if conf.kind != "client"]
-    if args.all:
-        found, silent = route.workspaces(inv)
-        groups += [(name, [DoctorRow("workspaces", UNKNOWN, "`wk ls --json` did not answer", "wk machine setup %s" % name)]) for name in silent]
-        groups += [group for ws in found for group in held(inv, ws)]
-    return groups
+    if args.ws or args.all:
+        raise Refused("wk doctor %s runs on the server that holds the workspaces, and this is the client %s: type it there\n    `wk ls` says which"
+                      % ("<ws>" if args.ws else "--all", inv.fleet.hostname))
+    return [(inv.fleet.hostname, rows.client(inv))] + [machine(inv, conf) for conf in inv.fleet.machines() if conf.kind != "client"]
 
 
 def on_server(args, inv):

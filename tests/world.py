@@ -1,8 +1,8 @@
 """A World: fake machines, a fake clock and a fleet, into which a test types a command.
 
-    w = World()                              # desk (client), lin (linux), mac, box (borrowed), vault (credential)
+    w = World()                              # desk (client), lin (linux), mac, box (mac), vault (credential)
     w.workspace("x", on="lin")               # lin now holds x: its files, and its driver's part made
-    r = w.wk("build", "x", "jsc-release")    # typed on the client; a hand-over really runs the command on the fake server
+    r = w.wk("build", "x", "jsc-release", on="lin")    # typed on the server `lin`
     r.code, r.out, r.err                     # exit code and the two streams
     r.calls                                  # every command and effect, in order: "[lin] git fetch"
     r.effects                                # the state changes among them
@@ -24,7 +24,7 @@ from wk.core.fleet import Fleet
 from wk.core.inv import Inv
 from wk.core.machine import Result
 
-CONFS = {"desk": "kind=client", "lin": "kind=linux", "mac": "kind=mac", "box": "kind=borrowed",
+CONFS = {"desk": "kind=client", "lin": "kind=linux", "mac": "kind=mac", "box": "kind=mac",
          "vault": "kind=credential"}
 
 

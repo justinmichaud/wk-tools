@@ -6,7 +6,7 @@ import pkgutil
 import socket
 import sys
 
-from wk.core import act, decl, route
+from wk.core import act, decl
 from wk.core.clock import Clock
 from wk.core.conf import load
 from wk.core.errors import Refused, Usage
@@ -51,17 +51,9 @@ def help_text(key, module):
     return "\n".join([decl.usage(key, cmd), "", module.__doc__.strip(), ""] + options + [GLOBAL_HELP])
 
 
-def target(args, inv):
-    if getattr(args, "on", None):
-        return inv.fleet.server(args.on).name
-    if getattr(args, "ws", None):
-        return route.locate(inv, args.ws).server
-    raise Usage("names no workspace, so no server to run on")
-
-
 def main(argv, inv):
     """Run one command line; returns its exit code."""
-    flags = act.Flags(stdin=inv.stdin, **{flag: bool(inv.env.get(var)) for flag, var in route.ENV.items()})
+    flags = act.Flags(stdin=inv.stdin)
     act.begin(flags)
     usage = "usage: wk <command> [<args>]    (`wk help` lists the commands)"
     try:
@@ -79,13 +71,14 @@ def main(argv, inv):
             return 0
         args = decl.parse(cmd, rest, argv[cut + 1:] if cut < len(argv) else None)
         flags.readonly, flags.destructive = cmd.readonly, cmd.destructive
-        inv.words = list(key) + rest + argv[cut:]
-        here = inv.fleet.here.kind if cmd.where != "any" else ""
-        if cmd.where == "client" and here != "client":
+        here = inv.fleet.here if cmd.where != "any" else None
+        if cmd.where == "client" and here.holds_workspaces:
             raise Refused("wk %s runs on the client, and this is the server %s: type it there"
                           % (" ".join(key), inv.fleet.hostname))
-        if cmd.where == "server" and here == "client":
-            return route.hand_over(inv, target(args, inv), cmd.forward)
+        if cmd.where == "server" and not here.holds_workspaces:
+            raise Refused("wk %s runs on the server that holds the workspace, and this is %s, which holds none: type it there\n"
+                          "    `wk ls` says which server holds it; the servers are %s"
+                          % (" ".join(key), inv.fleet.hostname, ", ".join(c.name for c in inv.fleet.servers())))
         return module.main(args, inv) or 0
     except Usage as e:
         sys.stderr.write("error: %s\n%s\n" % (e, usage))

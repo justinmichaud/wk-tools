@@ -3,7 +3,7 @@
 import unittest
 
 from tests.credsworld import Http
-from tests.world import CONFS, World
+from tests.world import World
 from tests.ws import inv
 from wk import creds
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
@@ -14,9 +14,9 @@ INJECTOR = ("GET", "http://vault:3128/")
 STORE = ("GET", "http://vault:8200/v1/sys/seal-status")
 UNSEALED = (200, {"initialized": True, "sealed": False})
 HELD = (200, b"wk injector\nlogin held\n")
-SESSION = {HOME + "/claude-login/.credentials.json": "-rw-------", HOME + "/injector-ca.pem": "-rw-r--r--"}
-DELIVERED = dict(SESSION, **{HOME + "/secrets": "drwx------", HOME + "/secrets/deploy": "drwx------", HOME + "/secrets/env.sh": "-rw-------",
-                             HOME + "/secrets/ssh_config": "-rw-------", "/home/u/.pi/agent/models.json": "-rw-------"})
+DELIVERED = {HOME + "/claude-login/.credentials.json": "-rw-------", HOME + "/injector-ca.pem": "-rw-r--r--",
+             HOME + "/secrets": "drwx------", HOME + "/secrets/deploy": "drwx------", HOME + "/secrets/env.sh": "-rw-------",
+             HOME + "/secrets/ssh_config": "-rw-------", "/home/u/.pi/agent/models.json": "-rw-------"}
 
 
 class TestDoctor(unittest.TestCase):
@@ -38,12 +38,6 @@ class TestDoctor(unittest.TestCase):
         del modes[HOME + "/secrets/env.sh"]
         self.assertEqual(self.rows("lin", modes), [DoctorRow("credentials", MISSING, "absent or wrongly moded: %s/secrets, %s/secrets/env.sh"
                                                              % (HOME, HOME), "wk key sync lin")])
-
-    def test_a_borrowed_box_is_asked_only_for_the_two_files_a_claude_session_reads(self):
-        self.assertEqual(self.rows("box", SESSION), [DoctorRow("claude login", OK, "", "wk machine setup box")])
-        self.assertEqual(self.rows("box", {}), [DoctorRow("claude login", MISSING, "absent or wrongly moded: %s/claude-login/.credentials.json, "
-                                                          "%s/injector-ca.pem" % (HOME, HOME), "wk machine setup box")])
-        self.assertEqual(self.w.machines["box"].calls[-1].argv, ("ls", "-ld") + tuple(SESSION))
 
     def test_the_credential_server_answers_for_the_injector_and_the_store_and_is_delivered_nothing(self):
         fix = "wk machine setup vault"
@@ -78,17 +72,8 @@ class TestDoctor(unittest.TestCase):
 
 
 class TestWhatASessionTakes(unittest.TestCase):
-    def test_only_a_borrowed_box_is_brought_the_injector_at_the_credential_servers_port(self):
-        w = World(confs=dict(CONFS, vault=CONFS["vault"] + "\ninjector_port=9000"))
-        self.assertEqual([creds.forward(inv(w), w.confs[name]) for name in ("lin", "mac", "box")], [None, None, "vault:9000"])
-
-    def test_on_a_server_of_the_owners_the_session_is_pointed_at_the_injector_itself(self):
+    def test_the_session_is_pointed_at_the_injector(self):
         w = World()
-        self.assertEqual(creds.agent_env(inv(w, "lin", {"WK_FORWARD": "20001"})), {
+        self.assertEqual(creds.agent_env(inv(w, "lin")), {
             "HTTPS_PROXY": "http://vault:3128", "https_proxy": "http://vault:3128", "NODE_EXTRA_CA_CERTS": HOME + "/injector-ca.pem",
             "CLAUDE_SECURESTORAGE_CONFIG_DIR": HOME + "/claude-login"})
-
-    def test_on_a_borrowed_box_it_is_pointed_at_the_forwarded_port(self):
-        got = creds.agent_env(inv(World(), "box", {"WK_FORWARD": "20001"}))
-        self.assertEqual((got["HTTPS_PROXY"], got["https_proxy"], got["NODE_EXTRA_CA_CERTS"]),
-                         ("http://127.0.0.1:20001", "http://127.0.0.1:20001", HOME + "/injector-ca.pem"))

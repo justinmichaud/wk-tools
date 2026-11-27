@@ -4,7 +4,6 @@ import unittest
 from tests import ROOT
 from tests.provision import DF, HOME, SHA, TOOLS, checkout, client, lanes, provisioned, server
 from tests.world import World
-from wk.core.errors import Unreachable
 from wk.core.machine import Result
 
 SMALL = {"desk": "kind=client", "lin": "kind=linux", "mac": "kind=mac", "vault": "kind=credential"}
@@ -69,52 +68,21 @@ class TestDoctor(Toy):
 
 
 class TestDoctorWorkspace(Toy):
-    def test_a_workspace_is_reported_by_its_server_whose_hooks_get_the_workspace(self):
-        self.w.workspace("x", on="mac")
-        r = self.doctor("x")
-        self.assertEqual((r.code, r.out), (0, "x (workspace on mac)\n  ok       checkout       /home/u/wk/ws/x\n"))
-        self.assertEqual(r.calls[-1], "[mac] wk doctor x --json")
+    def test_a_workspace_is_reported_by_the_server_that_holds_it_whose_hooks_get_the_workspace(self):
+        self.w.workspace("x", on="lin")
+        r = self.doctor("x", on="lin")
+        self.assertEqual((r.code, r.out), (0, "x (workspace on lin)\n  ok       checkout       /home/u/wk/ws/x\n"))
 
-    def test_a_workspace_no_server_holds_is_refused(self):
-        self.assertEqual(self.doctor("x").err, "error: no workspace named x: `wk ls` lists them, `wk new x` makes it\n")
+    def test_a_workspace_and_all_are_refused_on_the_client(self):
+        for words, what in ((("x",), "<ws>"), (("--all",), "--all")):
+            r = self.doctor(*words)
+            self.assertEqual((r.code, r.err), (1, "error: wk doctor %s runs on the server that holds the workspaces, and this is the client desk: "
+                                                  "type it there\n    `wk ls` says which\n" % what))
 
     def test_on_a_server_a_workspace_it_does_not_hold_is_refused(self):
         self.w.workspace("x", on="mac")
         r = self.doctor("x", on="lin")
         self.assertEqual((r.code, r.err), (1, "error: no workspace named x on lin: `wk ls` lists them, `wk new x` makes it\n"))
-
-    def test_a_server_whose_doctor_does_not_answer_in_json_is_an_unknown_row(self):
-        self.w.workspace("x", on="mac")
-        self.w.machines["mac"].on(("wk", "doctor"), Result(127, "", "sh: wk: command not found\n"))
-        r = self.doctor("x")
-        self.assertEqual((r.code, r.out), (4, "x\n  unknown  doctor         `wk doctor x --json` on mac answered sh: wk: command not found\n"
-                                              "           fix: wk machine setup mac\n"))
-
-    def test_a_server_that_stops_answering_after_it_listed_its_workspaces_is_one_unknown_row_and_the_others_keep_theirs(self):
-        self.w.workspace("x", on="mac")
-        self.w.workspace("y", on="lin")
-
-        def gone(call):
-            raise Unreachable("mac", "timed out")
-        self.w.machines["mac"].on(("wk", "doctor"), gone)
-        r = self.doctor("--all")
-        self.assertEqual(r.code, 4)
-        self.assertTrue(r.out.endswith("y (workspace on lin)\n  ok       checkout       /home/u/wk/ws/y\n"
-                                       "x\n  unknown  reachable      cannot reach mac: timed out\n           fix: tailscale status\n"), r.out)
-
-    def test_all_adds_every_workspace_after_the_machines(self):
-        self.w.workspace("x", on="mac")
-        self.w.workspace("y", on="lin")
-        r = self.doctor("--all")
-        self.assertEqual((r.code, r.out), (0, CLIENT + "lin\n  ok       reachable\nmac\n  ok       reachable\nvault\n  ok       reachable\n"
-                                              "y (workspace on lin)\n  ok       checkout       /home/u/wk/ws/y\n"
-                                              "x (workspace on mac)\n  ok       checkout       /home/u/wk/ws/x\n"))
-
-    def test_all_names_a_server_whose_workspaces_could_not_be_listed(self):
-        self.w.machines["mac"].on(("wk", "ls", "--json"), Result(127, "", "sh: wk: command not found\n"))
-        r = self.doctor("--all")
-        self.assertEqual(r.code, 4)
-        self.assertTrue(r.out.endswith("mac\n  unknown  workspaces     `wk ls --json` did not answer\n           fix: wk machine setup mac\n"))
 
     def test_on_a_server_all_adds_its_own_workspaces(self):
         self.w.workspace("y", on="lin")

@@ -14,16 +14,13 @@ def pins(inv, conf):
 
 
 def delivered(conf, m, wk):
-    """One row for what delivery leaves: on a borrowed box, only the two files a Claude session reads."""
-    session = {"%s/%s/.credentials.json" % (wk, agent.LOGIN_DIR): "600", "%s/%s" % (wk, agent.CA): "644"}
-    if conf.kind == "borrowed":
-        name, want, remedy = "claude login", session, "wk machine setup %s" % conf.name
-    else:
-        name, remedy = "credentials", "wk key sync %s" % conf.name
-        want = dict(session, **{wk + "/secrets": "d700", wk + "/secrets/deploy": "d700", wk + "/secrets/env.sh": "600",
-                                wk + "/secrets/ssh_config": "600", m.home + "/.pi/agent/models.json": "600"})
+    """One row for what delivery leaves on a server."""
+    want = {"%s/%s/.credentials.json" % (wk, agent.LOGIN_DIR): "600", "%s/%s" % (wk, agent.CA): "644",
+            wk + "/secrets": "d700", wk + "/secrets/deploy": "d700", wk + "/secrets/env.sh": "600",
+            wk + "/secrets/ssh_config": "600", m.home + "/.pi/agent/models.json": "600"}
     lacking = hooks.lacking(m, want)
-    return DoctorRow(name, MISSING if lacking else OK, lacking and "absent or wrongly moded: " + ", ".join(sorted(lacking)) or "", remedy)
+    return DoctorRow("credentials", MISSING if lacking else OK, lacking and "absent or wrongly moded: " + ", ".join(sorted(lacking)) or "",
+                     "wk key sync %s" % conf.name)
 
 
 def asked(name, url, remedy, verdict):

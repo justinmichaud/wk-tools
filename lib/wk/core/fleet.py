@@ -3,12 +3,15 @@
     inv.fleet.here                    # this machine's Conf; refused when it has no conf
     inv.fleet.servers()               # the Confs that hold workspaces
     inv.fleet.machine("name")         # its Machine: this host itself, or ssh
+    found, unknown = inv.fleet.workspaces()     # every Workspace on every server that answered; the servers that did not
     answers = inv.fleet.ask(lambda m: m.exists(path))     # {name: answer, or UNKNOWN when unreachable}"""
 
 import concurrent.futures
 import functools
+import json
 
 from wk.core.errors import Refused, Unreachable
+from wk.core.seams import Workspace
 
 
 class Unknown:
@@ -75,3 +78,17 @@ class Fleet:
                 return UNKNOWN
         with concurrent.futures.ThreadPoolExecutor(self.workers) as pool:
             return dict(zip(names, pool.map(one, names)))
+
+    def workspaces(self, names=None):
+        """(every Workspace on every server, or on `names`, that answered; the names of the servers that did not).
+        A server answers `wk ls --json` with one JSON object, {"workspaces": [{"name", "driver", "state", "path"}]},
+        listing its own alone; anything else it prints makes that server unknown."""
+        def listing(machine):
+            try:
+                rows = json.loads(machine.run(["wk", "ls", "--json"], timeout=30).out)["workspaces"]
+            except ValueError:
+                return UNKNOWN
+            return [Workspace(server=machine.name, **row) for row in rows]
+        answers = self.ask(listing, names)
+        return ([ws for found in answers.values() if found is not UNKNOWN for ws in found],
+                [name for name, found in answers.items() if found is UNKNOWN])

@@ -14,12 +14,10 @@ NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 NO_PUSH = "no-push://push-to-the-fork-remote"
 
 
-def check(inv, name, on):
-    """Refuse a name that cannot be a directory and a container, and a server command sent to the wrong server."""
+def check(name):
+    """Refuse a name that cannot be a directory and a container."""
     if not NAME.fullmatch(name):
         die("%s cannot name a workspace: use lowercase letters, digits and hyphens, starting with a letter or digit" % name)
-    if inv.fleet.here.kind != "client" and on not in (None, inv.fleet.hostname):
-        die("this is %s, not %s: type it on the client, which hands it to %s" % (inv.fleet.hostname, on, on))
 
 
 def made(m, ws):

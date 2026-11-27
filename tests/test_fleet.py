@@ -16,8 +16,8 @@ class TestConf(unittest.TestCase):
                          ("srv", "linux", "me", "8", "git@github.com:me/WebKit.git", "d"))
 
     def test_the_kind_decides_the_driver_and_who_holds_workspaces(self):
-        self.assertEqual([(k, conf.parse("m", "kind=" + k).driver) for k in ("linux", "mac", "borrowed")],
-                         [("linux", "container"), ("mac", "plain"), ("borrowed", "plain")])
+        self.assertEqual([(k, conf.parse("m", "kind=" + k).driver) for k in ("linux", "mac")],
+                         [("linux", "container"), ("mac", "plain")])
         self.assertEqual([conf.parse("m", text).holds_workspaces for text in ("kind=mac", "kind=client", "kind=credential")],
                          [True, False, False])
 
@@ -41,8 +41,8 @@ class TestConf(unittest.TestCase):
         self.refused("kind=linux\nkind=mac", "machines/m.conf:2: kind is set twice: delete one line")
 
     def test_a_missing_or_unknown_kind_is_refused_naming_the_kinds(self):
-        self.refused("user=me", "machines/m.conf: kind=None is not a kind: set kind= to one of client, linux, mac, borrowed, credential")
-        self.refused("kind=peer", "machines/m.conf: kind=peer is not a kind: set kind= to one of client, linux, mac, borrowed, credential")
+        self.refused("user=me", "machines/m.conf: kind=None is not a kind: set kind= to one of client, linux, mac, credential")
+        self.refused("kind=peer", "machines/m.conf: kind=peer is not a kind: set kind= to one of client, linux, mac, credential")
 
 
 class TestLoad(unittest.TestCase):
@@ -82,7 +82,7 @@ class TestLoad(unittest.TestCase):
 
     def test_the_confs_in_the_tree_load(self):
         from tests import ROOT
-        self.assertEqual({c.kind for c in conf.load(os.path.join(ROOT, "machines")).values()}, {"client", "linux", "borrowed", "credential"})
+        self.assertEqual({c.kind for c in conf.load(os.path.join(ROOT, "machines")).values()}, {"client", "linux", "credential"})
 
 
 class TestFleet(unittest.TestCase):

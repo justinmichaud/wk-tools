@@ -17,12 +17,11 @@ CCACHE = ["CC=clang", "CXX=clang++", "WEBKIT_OUTPUTDIR=/w/x/build/JSCOnly/Releas
 class TestPresets(unittest.TestCase):
     def test_the_names_and_which_kind_of_machine_builds_each(self):
         self.assertEqual(webkit.names(), ["jsc-debug", "jsc-release", "gtk-debug", "gtk-release", "wpe-release", "mac-debug", "mac-release"])
-        self.assertEqual(webkit.names("linux"), webkit.names("borrowed"))
         self.assertEqual((webkit.names("linux"), webkit.names("mac")),
                          (["jsc-debug", "jsc-release", "gtk-debug", "gtk-release", "wpe-release"], ["jsc-debug", "jsc-release", "mac-debug", "mac-release"]))
 
     def test_the_memory_of_a_job_is_by_build_system_and_port(self):
-        self.assertEqual([webkit.resolve(name, kind).mb_per_job for name, kind in (("jsc-release", "linux"), ("gtk-debug", "borrowed"),
+        self.assertEqual([webkit.resolve(name, kind).mb_per_job for name, kind in (("jsc-release", "linux"), ("gtk-debug", "linux"),
                                                                                   ("jsc-release", "mac"), ("mac-debug", "mac"))],
                          [1536, 4608, 3072, 3072])
 
@@ -33,7 +32,7 @@ class TestPresets(unittest.TestCase):
     def test_a_preset_this_kind_of_machine_cannot_build_is_refused_naming_those_it_can(self):
         self.assertRaisesRegex(Refused, "mac-release builds on a mac server, and this one is linux: the presets that build here are "
                                         "jsc-debug, jsc-release, gtk-debug, gtk-release, wpe-release", webkit.resolve, "mac-release", "linux")
-        self.assertRaisesRegex(Refused, "gtk-debug builds on a linux or borrowed server, and this one is mac: the presets that build here are "
+        self.assertRaisesRegex(Refused, "gtk-debug builds on a linux server, and this one is mac: the presets that build here are "
                                         "jsc-debug, jsc-release, mac-debug, mac-release", webkit.resolve, "gtk-debug", "mac")
 
 
@@ -53,7 +52,7 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(self.build("gtk-debug", "linux")[-4:], ["--gtk", "--debug", "--cmakeargs=" + COMMON, "--makeargs=-j8"])
 
     def test_a_full_port_does_not_ask_webkit_for_ccache_and_takes_the_machines_own_flags_last(self):
-        argv = self.build("wpe-release", "borrowed", 3, "-DUSE_LIBBACKTRACE=OFF,-DENABLE_JOURNALD_LOG=OFF")
+        argv = self.build("wpe-release", "linux", 3, "-DUSE_LIBBACKTRACE=OFF,-DENABLE_JOURNALD_LOG=OFF")
         self.assertEqual(argv[8:], ["NUMBER_OF_PROCESSORS=3", "CMAKE_BUILD_PARALLEL_LEVEL=3", "WEBKIT_NINJA_LINK_MAX=1", "Tools/Scripts/build-webkit",
                                     "--no-fatal-warnings", "--wpe", "--release",
                                     "--cmakeargs=%s %s -DENABLE_WPE_PLATFORM=ON -DUSE_LIBBACKTRACE=OFF -DENABLE_JOURNALD_LOG=OFF" % (COMMON, RELEASE),

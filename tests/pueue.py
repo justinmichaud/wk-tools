@@ -22,8 +22,8 @@ from wk.core.machine import Result
 from wk.tasks import sizing, tasks
 from wk.tasks.pueue import MTIMES, Pueue
 
-LINUX = "cores 16\navailable_kb 67108864\nload 0.50 0.40 0.30 1/100 123\n"
-MAC = "cores 10\ntotal_bytes 34359738368\nload { 1.20 1.10 1.00 }\n"
+LINUX = "cores 16\navailable_kb 67108864\n"
+MAC = "cores 10\ntotal_bytes 34359738368\n"
 
 
 def iso(t):
@@ -118,7 +118,7 @@ class FakePueue:
         self.save(state)
 
 
-def world(here="desk", **how):
+def world(here="lin", **how):
     w = World(here=here, seams={"tasks": tasks}, **how)
     w.pueue = {name: FakePueue(machine, w.clock) for name, machine in w.machines.items() if w.confs[name].kind != "client"}
     w.probe = {name: MAC if w.confs[name].kind == "mac" else LINUX for name in w.pueue}

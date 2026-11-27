@@ -63,7 +63,7 @@ class TestMachineLs(unittest.TestCase):
     def test_it_lists_each_machine_with_its_kind(self):
         r = World().wk("machine", "ls")
         self.assertEqual(r.out.splitlines()[:2] + r.out.splitlines()[-1:],
-                         ["box                  borrowed", "desk                 client", "vault                credential"])
+                         ["box                  mac", "desk                 client", "vault                credential"])
 
     def test_machine_alone_is_machine_ls(self):
         w = World()

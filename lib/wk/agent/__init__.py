@@ -1,1 +1,1 @@
-"""Agent sessions: Claude Code or pi in a workspace, under the wrapper that hides every credential from them."""
+"""Agent sessions: Claude Code or pi in a workspace, in the login's own shell."""

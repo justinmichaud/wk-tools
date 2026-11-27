@@ -101,9 +101,3 @@
             name: credentials
           when: "'linux' in group_names or 'mac' in group_names"
           tags: [credentials]
-
-        - name: Deliver what a Claude session reads on a borrowed box
-          ansible.builtin.import_role:
-            name: borrowed-claude
-          when: "'borrowed' in group_names"
-          tags: [borrowed-claude]

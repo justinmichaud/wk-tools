@@ -1,9 +1,9 @@
 """Deliver the store's credentials to your servers, or to one: the playbook's credentials role.
 
-Each Linux and Mac server gets, under ~/wk/secrets (which an agent session cannot read): the deploy keys with one
+Each Linux and Mac server gets, under ~/wk/secrets: the deploy keys with one
 ssh alias per repository, and env.sh, which an interactive shell sources so that git-webkit, gh and `git push` work
 as they are. Outside it go the injector's CA, the placeholder claude.ai login, and pi's models.json, which holds the
-LiteLLM key: the one key an agent can read. A borrowed machine gets nothing; ssh agent forwarding serves it.
+LiteLLM key.
 
 The values are read on this machine by the bao CLI. Ansible reports each file as changed or ok."""
 

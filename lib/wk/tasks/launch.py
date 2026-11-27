@@ -1,15 +1,10 @@
-"""What `wk build`, `wk run` and `wk test` share: choosing the workspace's preset, and starting a sized, guarded task
-and reporting how it ended."""
+"""What `wk build`, `wk run` and `wk test` share: choosing the workspace's preset, and starting a sized task and
+reporting how it ended."""
 
 from wk import webkit
 from wk.core import seams
 from wk.core.act import die, info
-from wk.core.errors import STALLED
-from wk.tasks import guard, sizing
-
-def allowed(argv):
-    """`argv`, an `env` line, with WK_BUILD set: without it the build-tool shims on an agent's PATH refuse (the agents role's shim.sh)."""
-    return argv[:1] + ["WK_BUILD=1"] + argv[1:]
+from wk.tasks import sizing
 
 
 def builds(tasks, ws):
@@ -27,19 +22,12 @@ def preset(inv, ws, name):
 
 
 def start(inv, ws, preset, what, group, detach, line):
-    """Queue `line(jobs)` in the workspace under the guard; unless `detach`, follow it and return its exit code."""
-    here, tasks, driver = inv.fleet.here, inv.tasks(inv.here), inv.driver(ws.driver, inv.here)
-    borrowed = here.kind == "borrowed"
-    jobs, mb = sizing.size(sizing.measure(inv.here, driver.exec_argv(ws, sizing.PROBE)), preset.mb_per_job, borrowed, inv.env)
-    budget = max(sizing.MIN_BUDGET_MB, jobs * mb)
-    path = ws.path + "/build/guard.py"
-    with open(guard.__file__) as f:
-        inv.here.write(path, f.read())
-    guarded = ["python3", "-I", path, str(budget), "1" if ws.driver == "container" else "0"]
+    """Queue `line(jobs)` in the workspace; unless `detach`, follow it and return its exit code."""
+    tasks, driver = inv.tasks(inv.here), inv.driver(ws.driver, inv.here)
+    jobs, mb = sizing.size(sizing.measure(inv.here, driver.exec_argv(ws, sizing.PROBE)), preset.mb_per_job, inv.env)
     label = "%s:%s:%s" % (ws.name, what, preset.name)
-    info("%s: %d jobs at %d MB each, a %d MB budget%s" % (label, jobs, mb, budget, ", niced: %s is borrowed" % here.name if borrowed else ""))
-    argv = guarded + (sizing.POLITE if borrowed else []) + allowed(line(jobs))
-    id = tasks.add(driver.exec_argv(ws, argv, task=True), label, group=group)
+    info("%s: %d jobs at %d MB each" % (label, jobs, mb))
+    id = tasks.add(driver.exec_argv(ws, line(jobs), task=True), label, group=group)
     if id is None:
         return 0
     if detach:
@@ -47,8 +35,6 @@ def start(inv, ws, preset, what, group, detach, line):
         return 0
     tasks.follow(id)
     task = tasks.wait(id)
-    if task.rc == guard.KILLED:
-        die("%s ran out of memory: its log says which limit (`wk status %s --log`)" % (label, ws.name), STALLED)
     if task.state != seams.DONE:
         die("%s %s%s: `wk status %s --log` has the end of its log"
             % (label, task.state, " (exit %d)" % task.rc if task.rc else "", ws.name))

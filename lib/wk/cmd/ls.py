@@ -7,7 +7,6 @@ client each row also has "server", and "unanswered" names the servers that did n
 import dataclasses
 import json
 
-from wk.core import route
 from wk.core.act import warn
 from wk.core.decl import Command, Opt
 from wk.core.errors import NEEDS_PERSON
@@ -18,7 +17,7 @@ COMMAND = Command(opts=(Opt("--json", "print JSON"),), readonly=True)
 
 def main(args, inv):
     client = inv.fleet.here.kind == "client"
-    found, unknown = route.workspaces(inv) if client else (lifecycle.listing(inv, inv.here), [])
+    found, unknown = inv.fleet.workspaces() if client else (lifecycle.listing(inv, inv.here), [])
     rows = [dataclasses.asdict(ws) for ws in sorted(found, key=lambda ws: (ws.name, ws.server))]
     if args.json and client:
         print(json.dumps({"workspaces": rows, "unanswered": unknown}))

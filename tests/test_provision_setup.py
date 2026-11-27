@@ -19,10 +19,10 @@ from wk.creds import injector
 from wk.webkit import PROJECT
 
 CONFS = {"desk": "kind=client\nlitellm_url=https://llm.example/v1\ndefault_server=lin", "lin": "kind=linux\nuser=jm",
-         "mac": "kind=mac\ncmake=/opt/cmake", "box": "kind=borrowed", "vault": "kind=credential\ninjector_port=3129"}
+         "mac": "kind=mac\ncmake=/opt/cmake", "vault": "kind=credential\ninjector_port=3129"}
 PLAYBOOK = ["ansible-playbook", "-i", ROOT + "/ansible/inventory.py"]
 SITE = [ROOT + "/ansible/site.yml"]
-ROLES = ["agents", "borrowed-claude", "credentials", "injector", "mirror", "openbao", "pueue", "sdk", "wk"]
+ROLES = ["agents", "credentials", "injector", "mirror", "openbao", "pueue", "sdk", "wk"]
 INSTALL = "    brew install ansible, or your distribution's ansible package\n"
 
 
@@ -45,13 +45,12 @@ class TestInventory(unittest.TestCase):
 
     def test_there_is_a_group_per_kind_and_the_client_is_no_host(self):
         self.assertEqual({name: group["hosts"] for name, group in self.inventory.items() if "hosts" in group},
-                         {"linux": ["lin"], "mac": ["mac"], "borrowed": ["box"], "credential": ["vault"]})
+                         {"linux": ["lin"], "mac": ["mac"], "credential": ["vault"]})
 
     def test_a_machines_kind_and_literals_are_its_variables_and_its_user_is_ansibles_login(self):
         self.assertEqual(self.inventory["_meta"]["hostvars"], {
             "lin": {"wk_kind": "linux", "wk_user": "jm", "ansible_user": "jm"},
             "mac": {"wk_kind": "mac", "wk_cmake": "/opt/cmake"},
-            "box": {"wk_kind": "borrowed"},
             "vault": {"wk_kind": "credential", "wk_injector_port": "3129"}})
 
     def test_every_host_gets_the_clients_literals_the_commit_the_store_and_the_project(self):
@@ -85,8 +84,8 @@ class TestMachineSetup(unittest.TestCase):
         self.assertEqual(self.w.wk("machine", "setup", "lin").code, 2)
 
     def test_stage_runs_the_role_of_that_name_alone(self):
-        r = self.w.wk("machine", "setup", "box", "--stage", "pueue")
-        self.assertEqual(played(r)[1], PLAYBOOK + ["--limit", "box", "--tags", "pueue"] + SITE)
+        r = self.w.wk("machine", "setup", "mac", "--stage", "pueue")
+        self.assertEqual(played(r)[1], PLAYBOOK + ["--limit", "mac", "--tags", "pueue"] + SITE)
 
     def test_the_stages_are_the_roles_and_an_unknown_one_is_refused_naming_them(self):
         r = self.w.wk("machine", "setup", "lin", "--stage", "fourth")
@@ -127,7 +126,7 @@ class TestMachineSetup(unittest.TestCase):
 
     def test_the_client_and_an_unknown_machine_are_refused(self):
         self.assertEqual(self.w.wk("machine", "setup", "desk").err, "error: desk is the client, and setup converges a server: `wk doctor` reports what the client needs\n")
-        self.assertEqual(self.w.wk("machine", "setup", "nope").err, "error: no machine named nope: machines/ has box, desk, lin, mac, vault\n")
+        self.assertEqual(self.w.wk("machine", "setup", "nope").err, "error: no machine named nope: machines/ has desk, lin, mac, vault\n")
 
 
 class TestKeySync(unittest.TestCase):
@@ -188,7 +187,7 @@ class TestTheInventoryScript(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.machines = tmp.name
-        for name, text in (("srv-a", "kind=credential"), ("srv-b", "kind=borrowed"), (self.host, "kind=client")):
+        for name, text in (("srv-a", "kind=credential"), ("srv-b", "kind=mac"), (self.host, "kind=client")):
             with open(os.path.join(self.machines, name + ".conf"), "w") as f:
                 f.write(text + "\n")
 
@@ -197,7 +196,7 @@ class TestTheInventoryScript(unittest.TestCase):
                            env=dict(os.environ, WK_MACHINES_DIR=self.machines))
         self.assertEqual((r.returncode, r.stderr), (0, b""))
         inventory = json.loads(r.stdout)
-        self.assertEqual((inventory["credential"], inventory["borrowed"], sorted(inventory["_meta"]["hostvars"])),
+        self.assertEqual((inventory["credential"], inventory["mac"], sorted(inventory["_meta"]["hostvars"])),
                          ({"hosts": ["srv-a"]}, {"hosts": ["srv-b"]}, ["srv-a", "srv-b"]))
         self.assertRegex(inventory["all"]["vars"]["wk_commit"], "^[0-9a-f]{40}$")
 

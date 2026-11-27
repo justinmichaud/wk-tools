@@ -16,15 +16,14 @@ def fetch(name, on="lin"):
 
 def make(**how):
     w = World(**how)
-    for name in ("lin", "mac", "box"):
-        server(w, name)
+    server(w, "lin")
     w.workspace("x")
     w.workspace("y")
     w.workspace("half", state=seams.BROKEN)
     return w
 
 
-class TestSyncOnAServer(unittest.TestCase):
+class TestSync(unittest.TestCase):
     def setUp(self):
         self.w = make(here="lin")
 
@@ -70,34 +69,7 @@ class TestSyncOnAServer(unittest.TestCase):
 
 
 class TestSyncOnTheClient(unittest.TestCase):
-    def setUp(self):
-        self.w = make()
-        self.w.workspace("m", on="mac")
-
-    def test_with_no_name_every_server_syncs_in_turn(self):
-        r = self.w.wk("sync")
-        self.assertEqual(r.code, 0)
-        self.assertEqual(r.effects, [line.replace("[lin]", "[box]") for line in REFRESH] + REFRESH + [fetch("x"), fetch("y")]
-                         + [line.replace("[lin]", "[mac]") for line in REFRESH] + [fetch("m", "mac")])
-
-    def test_a_named_workspace_is_synced_on_its_server_alone(self):
-        r = self.w.wk("sync", "m")
-        self.assertEqual(r.effects, [line.replace("[lin]", "[mac]") for line in REFRESH] + [fetch("m", "mac")])
-
-    def test_a_server_that_does_not_answer_is_warned_about_and_the_rest_still_sync(self):
-        self.w.machines["lin"].down = True
-        r = self.w.wk("sync")
-        self.assertEqual((r.code, r.effects[-1]), (4, fetch("m", "mac")))
-        self.assertIn("warning: cannot reach lin", r.err)
-
-    def test_a_server_whose_sync_fails_fails_the_whole(self):
-        self.w.machines["box"].on(("git", "-C", MIRROR, "fetch"), Result(128, "", "fatal\n"))
-        r = self.w.wk("sync")
-        self.assertEqual((r.code, r.effects[-1]), (1, fetch("m", "mac")))
-
-    def test_a_fleet_with_no_server_syncs_nothing(self):
-        r = World(confs={"desk": "kind=client"}).wk("sync")
-        self.assertEqual((r.code, r.calls), (0, []))
-
-    def test_the_dry_run_is_the_plan_across_the_hand_over(self):
-        dry_run_is_the_plan(self, make, "sync", "x")
+    def test_it_is_refused_naming_the_servers(self):
+        r = make().wk("sync")
+        self.assertEqual((r.code, r.calls), (1, []))
+        self.assertIn("error: wk sync runs on the server that holds the workspace, and this is desk", r.err)

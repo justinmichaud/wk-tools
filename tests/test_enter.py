@@ -28,13 +28,13 @@ class TestEnter(unittest.TestCase):
         r = self.w.wk("enter", "x", "--", "make", "-j", "4")
         self.assertEqual((r.code, r.calls), (3, ["[lin] fake-enter x make -j 4"]))
 
-    def test_typed_on_the_client_it_runs_on_the_workspaces_server(self):
-        w = World()
-        w.workspace("x", on="mac")
-        self.assertEqual(w.wk("enter", "x", "--", "true").effects, ["[mac] fake-enter x true"])
+    def test_typed_on_the_client_it_is_refused_naming_the_servers(self):
+        r = World().wk("enter", "x", "--", "true")
+        self.assertEqual((r.code, r.calls), (1, []))
+        self.assertIn("error: wk enter runs on the server that holds the workspace, and this is desk, which holds none", r.err)
 
     def test_on_each_real_driver_with_and_without_a_terminal_it_is_the_one_wrapper_that_sources_the_delivered_environment(self):
-        for on, before in (("lin", "podman exec --interactive%s --workdir " + SRC + " wk-x env SHELL=/bin/bash "), ("mac", "%.0s"), ("box", "%.0s")):
+        for on, before in (("lin", "podman exec --interactive%s --workdir " + SRC + " wk-x env SHELL=/bin/bash "), ("mac", "%.0s")):
             w = World(here=on, seams={"driver": driver})
             w.workspace("x", on=on)
             w.machines[on].on(("podman", "container", "exists"), Result(0))
