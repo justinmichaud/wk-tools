@@ -19,7 +19,7 @@ import types
 from tests.world import World
 from wk import webkit
 from wk.core.machine import Result
-from wk.tasks import sizing, tasks
+from wk.tasks import pueue, sizing, tasks
 from wk.tasks.pueue import MTIMES, Pueue
 
 LINUX = "cores 16\navailable_kb 67108864\n"
@@ -133,5 +133,7 @@ def world(here="lin", **how):
 
 
 def added(w, name):
-    """What each task added on `name` runs, as an argv."""
-    return [shlex.split(call.argv[-1]) for call in w.machines[name].calls if call.argv[3:4] == ("add",)]
+    """What each task added on `name` runs, as an argv, behind the clean environment every task starts from."""
+    lines = [call.argv[-1] for call in w.machines[name].calls if call.argv[3:4] == ("add",)]
+    assert all(line.startswith(pueue.CLEAN + " ") for line in lines), lines
+    return [shlex.split(line[len(pueue.CLEAN) + 1:]) for line in lines]

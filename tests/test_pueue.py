@@ -2,6 +2,8 @@ import contextlib
 import io
 import json
 import os
+import shlex
+import subprocess
 import unittest
 
 from tests import ROOT
@@ -11,7 +13,7 @@ from wk.core.errors import Refused
 from wk.core.fakes import Fake, FakeClock
 from wk.core.machine import Result
 from wk.tasks import tasks
-from wk.tasks.pueue import MTIMES, job, jobs, stamp
+from wk.tasks.pueue import CLEAN, MTIMES, job, jobs, stamp
 
 BIN = "/home/u/wk/cache/pueue-4.0.5/pueue --config /home/u/wk/pueue/pueue.yml"
 
@@ -67,16 +69,17 @@ class TestClient(unittest.TestCase):
 
     def test_add_queues_one_shell_string_in_the_group_under_the_label_and_returns_the_id(self):
         self.assertEqual((self.t.add(["make", "a b"], "x:test:jsc-release"), self.t.add(["ls"], "y", cwd="/w")), (0, 1))
-        self.assertEqual(self.effects(), ["[srv] pueue add --print-task-id --group default --label x:test:jsc-release --working-directory /home/u -- 'make '\"'\"'a b'\"'\"''",
-                                          "[srv] pueue add --print-task-id --group default --label y --working-directory /w -- ls"])
-        self.assertEqual(self.t.status(), [seams.Task(0, "x:test:jsc-release", "default", "running", "make 'a b'", None, 1000.0),
-                                           seams.Task(1, "y", "default", "queued", "ls", None, 1000.0)])
+        self.assertEqual(self.effects(), ["[srv] pueue add --print-task-id --group default --label x:test:jsc-release --working-directory /home/u -- "
+                                          + shlex.quote(CLEAN + " " + shlex.join(["make", "a b"])),
+                                          "[srv] pueue add --print-task-id --group default --label y --working-directory /w -- " + shlex.quote(CLEAN + " ls")])
+        self.assertEqual(self.t.status(), [seams.Task(0, "x:test:jsc-release", "default", "running", CLEAN + " " + shlex.join(["make", "a b"]), None, 1000.0),
+                                           seams.Task(1, "y", "default", "queued", CLEAN + " ls", None, 1000.0)])
 
-    def test_a_task_runs_under_the_systems_path_alone_whatever_the_one_it_was_typed_under(self):
-        self.t.add(["build-jsc"], "x")
-        self.t.status()
-        self.assertEqual([(c.argv[3], c.env) for c in self.m.calls if c.argv[3:4] in (("add",), ("status",))],
-                         [("add", {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}), ("status", None)])
+    def test_a_task_starts_from_the_systems_path_and_a_few_of_the_logins_variables_alone(self):
+        login = {"PATH": "/old/wk/bin:/usr/bin", "HOME": "/home/u", "LANG": "C.UTF-8", "SDKROOT": "/sdk", "CPATH": "/inc", "CLAUDECODE": "1",
+                 "SHELL": "/bin/zsh"}
+        r = subprocess.run(["/bin/sh", "-c", CLEAN + " env"], stdout=subprocess.PIPE, universal_newlines=True, env=login)
+        self.assertEqual(sorted(r.stdout.splitlines()), ["HOME=/home/u", "LANG=C.UTF-8", "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "SHELL=/bin/zsh"])
 
     def test_the_first_build_makes_the_build_group_with_a_limit_of_one(self):
         self.t.add(["make"], "x", group="build")

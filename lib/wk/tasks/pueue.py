@@ -21,8 +21,11 @@ from wk.core.vars import VARS
 
 VERSION = VARS["wk_pueue_version"]
 LIMITS = {"build": 1}
-# A task keeps the environment `pueue add` runs in, so its PATH is the system's alone, whatever a login put on it.
-TASK_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+# pueue gives a task the environment `pueue add` ran in: a login's PATH, and on a Mac the SDKROOT, CPATH and
+# LIBRARY_PATH that Apple's /usr/bin/python3 exports to what it runs (measured: WebKit's Makefile turns SDKROOT into a
+# --sdk it refuses). A task starts from an empty environment with the system's PATH and these of the login's.
+KEPT = ("HOME", "USER", "LOGNAME", "SHELL", "TMPDIR", "LANG", "XDG_RUNTIME_DIR")
+CLEAN = "env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin " + " ".join('${%s+"%s=$%s"}' % (k, k, k) for k in KEPT)
 MTIMES = """import os, sys
 for name in os.listdir(sys.argv[1]):
     if name.endswith(".log"):
@@ -73,8 +76,8 @@ class Pueue(seams.Tasks):
                 % (self.m.name, r.err.strip(), self.m.name))
         return json.loads(r.out)
 
-    def _act(self, *words, env=None):
-        r = self.m.act(self.argv(*words), env=env)
+    def _act(self, *words):
+        r = self.m.act(self.argv(*words))
         if not r.ok:
             die("pueue %s failed on %s: %s\n    `wk doctor` says whether its daemon answers" % (words[0], self.m.name, r.err.strip()))
         return r.out
@@ -91,7 +94,7 @@ class Pueue(seams.Tasks):
         if group in LIMITS:
             self.limit(group, LIMITS[group])
         out = self._act("add", "--print-task-id", "--group", group, "--label", label, "--working-directory", cwd or self.m.home,
-                        "--", shlex.join(argv), env={"PATH": TASK_PATH})
+                        "--", CLEAN + " " + shlex.join(argv))
         return int(out) if out else None
 
     def status(self):
