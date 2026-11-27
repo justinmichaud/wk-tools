@@ -88,6 +88,17 @@ class TestLocal(OnDisk):
         with self.assertRaisesRegex(Refused, "cannot write .*file/under on here: "):
             self.m.write(os.path.join(self.dir, "file", "under"), "")
 
+    def test_create_makes_a_file_only_where_there_is_none_and_says_which(self):
+        path = os.path.join(self.dir, "ws", "x")
+        self.assertTrue(self.m.create(path, "lin"))
+        self.assertFalse(self.m.create(path, "mac"))
+        self.assertEqual(self.m.read(path), "lin")
+
+    def test_a_create_that_cannot_be_made_is_refused_with_the_reason(self):
+        self.m.write(os.path.join(self.dir, "file"), "")
+        with self.assertRaisesRegex(Refused, "cannot create .*file/under on here: "):
+            self.m.create(os.path.join(self.dir, "file", "under"), "lin")
+
     def test_an_absent_file_reads_as_none_does_not_exist_and_lists_nothing(self):
         path = os.path.join(self.dir, "absent")
         self.assertEqual((self.m.read(path), self.m.exists(path), self.m.listdir(path)), (None, False, []))

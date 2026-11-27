@@ -19,7 +19,7 @@ class TestDoctor(unittest.TestCase):
         self.w = World(here="desk", seams={"tasks": tasks})
         self.m = self.w.machines["lin"]
         self.daemon = FakePueue(self.m, self.w.clock, up=False)
-        fleet = Fleet(lambda: self.w.confs, "desk", self.w.machines.get, self.w.machines["desk"], workers=1)
+        fleet = Fleet(lambda: self.w.confs, "desk", self.w.machines.get, self.w.machines["desk"])
         self.inv = Inv("/", {}, fleet, self.w.clock, None, {}, self.w.seams)
 
     def rows(self):

@@ -16,7 +16,7 @@ STORE_FIX = "mkdir -m 700 %s/secrets, then `wk key set <name>` for each" % HOME
 HELD = (200, b"wk injector\nlogin held\n")
 DELIVERED = {HOME + "/claude-login/.credentials.json": "-rw-------", HOME + "/injector-ca.pem": "-rw-r--r--",
              HOME + "/secrets": "drwx------", HOME + "/secrets/deploy": "drwx------", HOME + "/secrets/env.sh": "-rw-------",
-             HOME + "/secrets/ssh_config": "-rw-------", HOME + "/secrets/rotate-key": "-rw-------", "/home/u/.pi/agent/models.json": "-rw-------"}
+             HOME + "/secrets/ssh_config": "-rw-------", "/home/u/.pi/agent/models.json": "-rw-------"}
 
 
 class TestDoctor(unittest.TestCase):
@@ -35,8 +35,8 @@ class TestDoctor(unittest.TestCase):
 
     def test_what_is_absent_or_moded_otherwise_is_named_and_the_credentials_role_is_the_remedy(self):
         modes = dict(DELIVERED, **{HOME + "/secrets": "drwxr-xr-x"})
-        del modes[HOME + "/secrets/rotate-key"]
-        self.assertEqual(self.rows("lin", modes), [DoctorRow("credentials", MISSING, "absent or wrongly moded: %s/secrets, %s/secrets/rotate-key"
+        del modes[HOME + "/secrets/env.sh"]
+        self.assertEqual(self.rows("lin", modes), [DoctorRow("credentials", MISSING, "absent or wrongly moded: %s/secrets, %s/secrets/env.sh"
                                                              % (HOME, HOME), "wk machine setup lin --stage credentials, typed on vault")])
 
     def test_the_controller_answers_for_its_secrets_directory_and_the_injector_and_is_delivered_nothing(self):

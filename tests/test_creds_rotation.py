@@ -124,14 +124,9 @@ class TestRotate(unittest.TestCase):
         self.assertIn("not asked: there is no terminal\n    re-run in a terminal, or pass --yes", r.err)
         self.assertEqual([method for method, _, _, _ in http.asked], ["GET"] * len(FORKS))
 
-    def test_the_forced_command_and_the_playbook_answer_its_question(self):
-        text = {}
-        for p in ("defaults/main.yml", "tasks/rotate.yml"):
-            with open(ROOT + "/ansible/roles/credentials/" + p) as f:
-                text[p] = f.read()
-        self.assertIn('wk_rotate_command: "{{ wk_controller_home }}/bin/wk key rotate {{ inventory_hostname }} --yes"', text["defaults/main.yml"])
-        self.assertIn('line: \'restrict,command="{{ wk_rotate_command }}" ', text["tasks/rotate.yml"])
-        self.assertIn('argv: ["{{ wk_root }}/wk", key, rotate, "{{ inventory_hostname }}", --yes]', text["tasks/rotate.yml"])
+    def test_the_playbook_answers_its_question(self):
+        with open(ROOT + "/ansible/roles/credentials/tasks/rotate.yml") as f:
+            self.assertIn('argv: ["{{ wk_root }}/wk", key, rotate, "{{ inventory_hostname }}", --yes]', f.read())
 
     def test_only_a_server_is_rotated_and_only_on_the_controller(self):
         self.assertIn("error: vault holds no workspace: it is the controller", make()[0].wk("key", "rotate", "vault").err)

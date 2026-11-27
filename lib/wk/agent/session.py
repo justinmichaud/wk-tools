@@ -5,10 +5,10 @@ are the playbook's agents role's to install, under <wk_home>/cache/agents."""
 import json
 
 from wk import creds
+from wk.api import client
 from wk.core.act import die, info
 from wk.core.errors import NEEDS_PERSON
 from wk.core.vars import VARS
-from wk.creds import rotation
 from wk.workspace import lifecycle
 
 # On a server of the owner's an agent asks permission for nothing (DESIGN.md, Trust).
@@ -51,7 +51,7 @@ def start(inv, agent, name, tail):
             % (agent, conf.name, argv[0], NEEDS[agent] and NEEDS[agent] % conf.name, conf.name, inv.fleet.controller.name))
     if agent == "claude":
         trust(m, ws.path + "/src")
-    rotation.renew(inv)
+    client.rotate(inv)
     info("starting %s in %s" % (agent, name))
     env = ["env", "WK_WORKSPACE=" + ws.name] + ["%s=%s" % kv for kv in sorted(extra.items())]
     return m.act(inv.driver(ws.driver, m).enter_argv(ws, env + argv + tail, tty=tty), stream=True, tty=tty).rc

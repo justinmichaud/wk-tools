@@ -19,11 +19,16 @@ class Journal:
     def __init__(self):
         self.entries = []           # (line, whether it changed state)
         self.stop_after = None      # the number of effects after which the next one raises Killed
+        self.muted = 0              # while above 0 nothing is recorded: another process's work, which no kill reaches
 
     def read(self, who, what):
+        if self.muted:
+            return
         self.entries.append(("[%s] %s" % (who, what), False))
 
     def effect(self, who, what):
+        if self.muted:
+            return
         if self.stop_after is not None and len(self.effects()) >= self.stop_after:
             raise Killed()
         self.entries.append(("[%s] %s" % (who, what), True))
@@ -79,14 +84,21 @@ class Fake(Machine):
               a str (its stdout), a Result, or a function of the Call returning either or None; the function may
               edit `files`. A `run` nothing scripts is an AssertionError; an `act` nothing scripts succeeds."""
 
-    home = "/home/u"
-
     def __init__(self, name, journal=None):
-        self.name, self.journal = name, journal or Journal()
+        self.name, self.journal, self._home = name, journal or Journal(), "/home/u"
         self.files, self.modes, self.calls, self.spawned, self.scripts, self.down = {}, {}, [], [], {}, False
 
     def on(self, prefix, answer):
         self.scripts[tuple(prefix)] = answer
+
+    @property
+    def home(self):
+        self._up()
+        return self._home
+
+    @home.setter
+    def home(self, value):
+        self._home = value
 
     def _up(self):
         if self.down:
@@ -130,6 +142,12 @@ class Fake(Machine):
 
     def _write(self, path, data, mode):
         self.files[path], self.modes[path] = data, mode
+
+    def _create(self, path, text):
+        made = path not in self.files
+        if made:
+            self.files[path], self.modes[path] = text, "644"
+        return made
 
     def _remove(self, path):
         for p in [p for p in self.files if p == path or p.startswith(path.rstrip("/") + "/")]:

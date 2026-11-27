@@ -1,0 +1,10 @@
+[Unit]
+Description=wk API: the fleet's workspace names and the push keys' rotation, at {{ wk_commit }}
+
+[Service]
+ExecStart={{ wk_root }}/wk serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

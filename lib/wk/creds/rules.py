@@ -42,10 +42,10 @@ class Rule:
     probe: Callable
 
 
-def ask(method, url, token=None, body=None, headers=None):
-    """(status, the answer as a dict), or (None, why) when nothing answered."""
+def ask(method, url, token=None, body=None, headers=None, timeout=net.TIMEOUT):
+    """(status, the answer as a dict), or (None, {"message": why}) when nothing answered."""
     try:
-        status, raw = net.request(method, url, dict(headers or {}, **({"Authorization": "Bearer " + token} if token else {})), body)
+        status, raw = net.request(method, url, dict(headers or {}, **({"Authorization": "Bearer " + token} if token else {})), body, timeout)
     except net.NoAnswer as e:
         return None, {"message": str(e)}
     try:

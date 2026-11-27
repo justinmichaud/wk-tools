@@ -1,4 +1,3 @@
-import json
 import unittest
 
 from tests.world import World
@@ -10,21 +9,22 @@ class TestLsOnAServer(unittest.TestCase):
     def setUp(self):
         self.w = World(here="lin")
 
-    def test_json_is_the_contract_a_workstation_reads(self):
-        self.w.workspace("x")
-        r = self.w.wk("ls", "--json")
-        self.assertEqual((r.code, json.loads(r.out)),
-                         (0, {"workspaces": [{"name": "x", "driver": "container", "state": "ready", "path": "/home/u/wk/ws/x"}]}))
-
     def test_a_server_with_no_workspace_lists_none(self):
-        r = self.w.wk("ls", "--json")
-        self.assertEqual((r.code, r.out, self.w.wk("ls").out), (0, '{"workspaces": []}\n', ""))
+        r = self.w.wk("ls")
+        self.assertEqual((r.code, r.out), (0, ""))
 
     def test_text_is_one_line_per_workspace_in_name_order(self):
         self.w.workspace("b")
         self.w.workspace("a", state=seams.BROKEN)
         self.assertEqual(self.w.wk("ls").out, "a                        lin              container  broken\n"
                                               "b                        lin              container  ready\n")
+
+    def test_it_lists_its_own_and_asks_no_controller(self):
+        self.w.workspace("x")
+        self.w.reserve("y", "mac")
+        self.w.machines["vault"].down = True
+        r = self.w.wk("ls")
+        self.assertEqual((r.code, r.out.split()), (0, ["x", "lin", "container", "ready"]))
 
     def test_no_ready_and_a_wk_new_running_is_creating(self):
         self.w.workspace("my-ws", state=seams.BROKEN)
@@ -40,7 +40,7 @@ class TestLsOnAServer(unittest.TestCase):
     def test_a_pgrep_that_fails_is_not_read_as_no_process(self):
         self.w.workspace("x", state=seams.BROKEN)
         self.w.machines["lin"].on(("pgrep",), Result(127, "", "pgrep: not found\n"))
-        r = self.w.wk("ls", "--json")
+        r = self.w.wk("ls")
         self.assertEqual((r.code, r.out), (1, ""))
         self.assertIn("error: cannot tell whether a `wk new x` is running on lin: pgrep failed (exit 127): pgrep: not found\n", r.err)
         self.assertEqual(self.w.wk("ls", "--force").out.split()[-1], "broken")
@@ -51,32 +51,27 @@ class TestLsOnAServer(unittest.TestCase):
         self.assertEqual((self.w.wk("ls").effects, self.w.state()), ([], before))
 
 
-class TestLsOnAWorkstation(unittest.TestCase):
+class TestLsOffAServer(unittest.TestCase):
     def setUp(self):
         self.w = World()
         self.w.workspace("b", on="lin")
         self.w.workspace("a", on="mac", state=seams.BROKEN)
 
-    def test_every_servers_workspaces_are_merged(self):
+    def test_every_name_the_controller_holds_is_listed_with_its_server_and_no_server_is_asked(self):
         r = self.w.wk("ls")
-        self.assertEqual((r.code, r.err), (0, ""))
-        self.assertEqual(r.out, "a                        mac              plain      broken\n"
-                                "b                        lin              container  ready\n")
+        self.assertEqual((r.code, r.err, r.out), (0, "", "a                        mac\nb                        lin\n"))
+        self.assertEqual(r.calls, ["[vault] GET /ws"])
 
-    def test_json_names_each_workspaces_server(self):
-        r = self.w.wk("ls", "--json")
-        self.assertEqual(json.loads(r.out), {"unanswered": [], "workspaces": [
-            {"name": "a", "server": "mac", "path": "/home/u/wk/ws/a", "driver": "plain", "state": "broken"},
-            {"name": "b", "server": "lin", "path": "/home/u/wk/ws/b", "driver": "container", "state": "ready"}]})
-
-    def test_a_server_that_does_not_answer_is_named_and_the_listing_needs_a_person(self):
-        self.w.machines["mac"].down = True
-        self.w.machines["box"].on(("pgrep",), Result(2, "", "bad"))
-        self.w.workspace("c", on="box", state=seams.BROKEN)
+    def test_a_controller_that_does_not_answer_needs_a_person(self):
+        self.w.machines["vault"].down = True
         r = self.w.wk("ls")
-        self.assertEqual((r.code, r.out.split()), (4, ["b", "lin", "container", "ready"]))
-        self.assertEqual(r.err, "warning: box did not answer: its workspaces are unknown\nwarning: mac did not answer: its workspaces are unknown\n")
-        self.assertEqual(json.loads(self.w.wk("ls", "--json").out)["unanswered"], ["box", "mac"])
+        self.assertEqual((r.code, r.out), (4, ""))
+        self.assertEqual(r.err, "error: the controller, vault, did not answer (the fake is down)\n"
+                                "    so which server holds which workspace is unknown: check `tailscale status`\n")
 
-    def test_the_controller_asks_every_server_too(self):
+    def test_the_controller_asks_its_own_api_too(self):
         self.assertEqual(self.w.wk("ls", on="vault").out, self.w.wk("ls").out)
+
+    def test_listing_changes_nothing(self):
+        before = self.w.state()
+        self.assertEqual((self.w.wk("ls").effects, self.w.state()), ([], before))

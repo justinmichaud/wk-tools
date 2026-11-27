@@ -29,7 +29,7 @@ class Http:
     def __init__(self, answers):
         self.answers, self.asked = answers, []
 
-    def __call__(self, method, url, headers=None, body=None):
+    def __call__(self, method, url, headers=None, body=None, timeout=None):
         self.asked.append((method, url, headers or {}, body))
         if (method, url) not in self.answers:
             raise AssertionError("an unscripted request: %s %s" % (method, url))

@@ -40,18 +40,6 @@
   loop_control:
     label: "{{ item.item.tool }}"
 
-- name: Find the controller's ssh public key
-  ansible.builtin.set_fact:
-    wk_install_public_keys: >-
-      {{ query('ansible.builtin.first_found', {'files': ['id_ed25519.pub', 'id_ecdsa.pub', 'id_rsa.pub'],
-                                               'paths': [lookup('ansible.builtin.env', 'HOME') ~ '/.ssh'], 'skip': true}) }}
-
-- name: Assert the controller has an ssh public key
-  ansible.builtin.assert:
-    that: wk_install_public_keys | length == 1
-    fail_msg: "the controller has no ssh public key to authorise on {{ inventory_hostname }}: ssh-keygen -t ed25519"
-    quiet: true
-
 - name: Ask for the credentials' names
   ansible.builtin.import_tasks: ../roles/credentials/tasks/names.yml
 
@@ -64,7 +52,6 @@
 
 - name: Read the secrets
   ansible.builtin.set_fact:
-    wk_install_public_key: "{{ lookup('ansible.builtin.file', wk_install_public_keys[0]) }}"
     wk_install_secret:
       bmc_user: "{{ lookup('ansible.builtin.file', wk_store ~ '/bmc/' ~ inventory_hostname ~ '/user') }}"
       bmc_password: "{{ lookup('ansible.builtin.file', wk_store ~ '/bmc/' ~ inventory_hostname ~ '/password') }}"

@@ -19,6 +19,7 @@ MAKE = [CLONE,
         "[lin] mkdir -p %s/ws/x/build" % HOME,
         "[lin] driver create x",
         "[lin] write %s/ws/x/.ready" % HOME]
+RESERVE, RELEASE = "[vault] PUT /ws/x", "[vault] DELETE /ws/x"
 WIPE = ["[lin] remove %s/ws/x/.ready" % HOME, "[lin] driver destroy x", "[lin] remove %s/ws/x" % HOME]
 FETCHED = "[lin] git -C %s rev-parse --verify --quiet refs/heads/main" % MIRROR
 
@@ -48,4 +49,4 @@ def server(w, name="lin"):
 
 
 def inv(w, here="desk", env=None):
-    return Inv("/", env or {}, Fleet(lambda: w.confs, here, w.machines.get, w.machines[here], workers=1), w.clock, None, {}, w.seams)
+    return Inv("/", env or {}, Fleet(lambda: w.confs, here, w.machines.get, w.machines[here]), w.clock, None, {}, w.seams)

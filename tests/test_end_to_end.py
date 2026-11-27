@@ -14,6 +14,7 @@ from tests.world import CONFS, World
 from wk import tasks, workspace
 from wk.agent import session
 from wk.core.machine import Result
+from wk.core.vars import VARS
 from wk.tasks import sizing
 from wk.workspace import mirror
 from wk.workspace.drivers import ENTER, INSIDE
@@ -25,7 +26,10 @@ MIRROR = HOME + "/git/WebKit.git"
 SECRETS = HOME + "/secrets"
 PUEUE = "%s/cache/pueue-4.0.5/pueue --config %s/pueue/pueue.yml" % (HOME, HOME)
 IMAGE = "ghcr.io/igalia/wkdev-sdk:2.55-v5-94a7493"
+GH = "https://api.github.com/repos/%s/keys"
 ANSWERS = {("GET", "http://vault:3128/"): (200, b"wk injector\nlogin held\n")}
+for _fork in VARS["wk_forks"]:
+    ANSWERS.update({("POST", GH % _fork): (201, {"id": 9}), ("GET", GH % _fork + "?per_page=100"): (200, [{"id": 9, "title": "wk"}])})
 PLAYBOOK = "[vault] ansible-playbook -i %s/ansible/inventory.py" % ROOT
 SITE = " %s/ansible/site.yml" % ROOT
 CLAUDE_ENV = {"CLAUDE_SECURESTORAGE_CONFIG_DIR": HOME + "/claude-login", "DISABLE_AUTOUPDATER": "1", "HTTPS_PROXY": "http://vault:3128",
@@ -33,8 +37,8 @@ CLAUDE_ENV = {"CLAUDE_SECURESTORAGE_CONFIG_DIR": HOME + "/claude-login", "DISABL
 CLAUDE = session.claude_bin(HOME)
 PLACEHOLDER, CA = HOME + "/claude-login/.credentials.json", HOME + "/injector-ca.pem"
 DELIVERED = {SECRETS + "/deploy": "drwx------", SECRETS + "/env.sh": "-rw-------", SECRETS + "/ssh_config": "-rw-------",
-             SECRETS + "/rotate-key": "-rw-------", "/home/u/.pi/agent/models.json": "-rw-------"}
-KEYS = {"justinmichaud/WebKit": "k\n"}
+             "/home/u/.pi/agent/models.json": "-rw-------"}
+DEPLOYED = ["%s/deploy/%s" % (SECRETS, fork.replace("/", "--")) for fork in sorted(VARS["wk_forks"])]
 
 
 def inside(w, name, inner):
@@ -57,7 +61,6 @@ def machine(w, name):
     f.update(DELIVERED)
     m.on(("id", "-un"), "u\n")
     m.on(("node", "--version"), "v22.19.0\n")
-    m.on(("ssh", "-i", SECRETS + "/rotate-key"), json.dumps(KEYS))
     m.on(("git", "clone"), lambda call: f.update({call.argv[-1] + "/.git/HEAD": "ref: refs/heads/main\n"}))
     m.on(("git", "-C", MIRROR, "rev-parse"), lambda call: Result(0 if MIRROR + "/refs/heads/main" in f else 1))
     m.on(("sh", "-c", 'cd "$0" && exec "$@"'), lambda call: inside(w, name, list(call.argv[4:])))
@@ -83,6 +86,9 @@ def world():
     provision.controller(vault)
     vault.on(("ansible-playbook", "-i"), "")
     vault.on(("ls", "-ld"), "drwx------ 2 u u 64 Nov 22 16:07 %s\n" % SECRETS)
+    vault.on(("mktemp", "-d"), "/tmp/k\n")
+    vault.on(("rm", "-rf"), "")
+    vault.on(("ssh-keygen",), lambda call: vault.files.update({call.argv[-1]: "private\n", call.argv[-1] + ".pub": "ssh-ed25519 PUB\n"}))
     for name in ("lin", "mac", "box"):
         machine(w, name)
     w.secrets.values.update({"github-user": "me", "github-token": TOKEN, "bugzilla-user": "me@example.test", "bugzilla-password": "pw",
@@ -117,11 +123,12 @@ class EndToEnd(unittest.TestCase):
     def started(self, w, name):
         """`wk new x`, a detached build and its status, on the server `name`; returns the build's line."""
         made = self.ok(w.wk("new", "x", on=name))
-        self.assertEqual(made.effects[0], "[%s] git clone --shared --no-tags -c fetch.writeCommitGraph=false -c gc.writeCommitGraph=false %s %s"
-                         % (name, MIRROR, SRC))
-        self.assertEqual(made.effects[6:], ["[%s] mkdir -p %s" % (name, OUT)] + [RUN % name] * (w.confs[name].driver == "container")
+        self.assertEqual(made.effects[:2], ["[vault] PUT /ws/x", "[%s] git clone --shared --no-tags -c fetch.writeCommitGraph=false -c gc.writeCommitGraph=false %s %s"
+                         % (name, MIRROR, SRC)])
+        self.assertEqual(made.effects[7:], ["[%s] mkdir -p %s" % (name, OUT)] + [RUN % name] * (w.confs[name].driver == "container")
                          + ["[%s] write %s/.ready" % (name, WS)])
-        self.assertEqual(self.ok(w.wk("ls")).out.split(), ["x", name, w.confs[name].driver, "ready"])
+        self.assertEqual(self.ok(w.wk("ls")).out.split(), ["x", name])
+        self.assertEqual(self.ok(w.wk("ls", on=name)).out.split(), ["x", name, w.confs[name].driver, "ready"])
         built = self.ok(w.wk("build", "x", "jsc-release", "--detach", on=name))
         self.assertIn("%s add --print-task-id --group build --label x:build:jsc-release " % PUEUE, built.effects[-1])
         line = added(w, name)[0]
@@ -136,9 +143,9 @@ class EndToEnd(unittest.TestCase):
         inner = ["env", "WK_WORKSPACE=x"] + ["%s=%s" % kv for kv in sorted(CLAUDE_ENV.items())] + [CLAUDE] + MODE + ["--remote-control", "x"]
         entered = ["sh", "-c", ENTER, SRC, SECRETS + "/env.sh", "-c", shlex.join(inner)]
         start = EXEC_TTY[name] + ["env", "SHELL=/bin/bash"] + entered if name == "lin" else entered
-        self.assertEqual(run.effects, ["[%s] write /home/u/.claude.json" % name, run.effects[1], "[%s] write %s/deploy/justinmichaud--WebKit"
-                                       % (name, SECRETS), "[%s] %s" % (name, shlex.join(start))])
-        self.assertTrue(run.effects[1].startswith("[%s] ssh -i %s/rotate-key " % (name, SECRETS)), run.effects[1])
+        self.assertEqual(run.effects, ["[%s] write /home/u/.claude.json" % name, "[vault] POST /rotate"]
+                         + ["[%s] write %s" % (name, path) for path in DEPLOYED] + ["[%s] %s" % (name, shlex.join(start))])
+        self.assertEqual({w.machines[name].files[path] for path in DEPLOYED}, {"private\n"})
         return run
 
 
@@ -163,7 +170,7 @@ class TestYourServers(EndToEnd):
     def journey(self, name, removed):
         w = world()
         self.started(w, name)
-        self.assertEqual(self.agent(w, name).err, "==> rotated the push keys of justinmichaud/WebKit\n==> starting claude in x\n")
+        self.assertEqual(self.agent(w, name).err, "==> rotated the push keys of %s\n==> starting claude in x\n" % ", ".join(sorted(VARS["wk_forks"])))
         for on in (name, "vault"):
             doctor = self.ok(w.wk("doctor", on=on))
             self.assertEqual([line for line in doctor.out.splitlines() if not line.startswith(" ")], [on])
@@ -171,7 +178,9 @@ class TestYourServers(EndToEnd):
         self.assertEqual(self.ok(w.wk("doctor", "x", on=name)).out, "x (workspace on %s)\n" % name)
         self.assertIn("error: workspace x has a running task (x:build:jsc-release)", self.ok(w.wk("rm", "x", "--yes", on=name), 2).err)
         self.ok(w.wk("build", "x", "--kill", on=name))
-        self.assertEqual(self.ok(w.wk("rm", "x", "--yes", on=name)).effects, ["[%s] remove %s/.ready" % (name, WS)] + removed + ["[%s] remove %s" % (name, WS)])
+        self.assertEqual(self.ok(w.wk("rm", "x", "--yes", on=name)).effects, ["[%s] remove %s/.ready" % (name, WS)] + removed
+                         + ["[%s] remove %s" % (name, WS), "[vault] DELETE /ws/x"])
+        self.assertEqual(self.ok(w.wk("ls")).out, "")
         gc = self.ok(w.wk("gc", on=name))
         self.assertEqual((gc.out, gc.effects), ("nothing to reclaim\n", []))
         w.machines[name].files[HOME + "/cache/pueue-3.4.1"] = "old"
@@ -188,12 +197,13 @@ class TestYourServers(EndToEnd):
         self.assertIn("error: wk new runs on a Linux server or a Mac server (box, lin, mac), and this is vault, the controller",
                       self.ok(w.wk("new", "x", on="vault"), 1).err)
         self.assertEqual([line.split()[1] for line in self.ok(w.wk("doctor", on="vault")).out.splitlines()[1:]],
-                         ["secrets", "injector", "ssh", "git", "tailscale", "ansible", "xorriso", "qemu-nbd", "websocat"])
+                         ["api", "secrets", "injector", "ssh", "git", "tailscale", "ansible", "xorriso", "qemu-nbd", "websocat"])
 
-    def test_the_workstation_lists_every_servers_workspaces_and_opens_one_in_zed(self):
+    def test_the_workstation_lists_every_workspace_the_controller_holds_and_opens_one_in_zed(self):
         w = world()
         self.ok(w.wk("new", "x", on="mac"))
-        self.assertEqual(self.ok(w.wk("ls")).out.split(), ["x", "mac", "plain", "ready"])
+        self.assertEqual(self.ok(w.wk("ls")).out.split(), ["x", "mac"])
+        self.assertIn("error: workspace x is mac's", self.ok(w.wk("new", "x", on="lin"), 1).err)
         self.assertEqual(self.ok(w.wk("zed", "x")).effects, ["[desk] zed ssh://mac%s" % SRC])
 
     def test_wk_typed_inside_the_container_queues_a_build_the_servers_daemon_starts(self):

@@ -9,7 +9,7 @@ def delivered(inv, conf, m, wk):
     """One row for what delivery leaves on a server."""
     want = {"%s/%s/.credentials.json" % (wk, agent.LOGIN_DIR): "600", "%s/%s" % (wk, agent.CA): "644",
             wk + "/secrets": "d700", wk + "/secrets/deploy": "d700", wk + "/secrets/env.sh": "600",
-            wk + "/secrets/ssh_config": "600", wk + "/secrets/rotate-key": "600", m.home + "/.pi/agent/models.json": "600"}
+            wk + "/secrets/ssh_config": "600", m.home + "/.pi/agent/models.json": "600"}
     lacking = hooks.lacking(m, want)
     return DoctorRow("credentials", MISSING if lacking else OK, lacking and "absent or wrongly moded: " + ", ".join(sorted(lacking)) or "",
                      "wk machine setup %s --stage credentials, typed on %s" % (conf.name, inv.fleet.controller.name))

@@ -1,7 +1,7 @@
 ---
-# The controller's own: `wk` in its bin, which a server's rotation key runs; the pinned websocat an install carries the
-# image to a BMC with; and the injector, the forward proxy that holds the one claude.ai login
-# (lib/wk/creds/injector.py), as a systemd user unit. The injector makes its own CA at its first start.
+# The controller's own: `wk` in its bin; the pinned websocat an install carries the image to a BMC with; and two
+# systemd user units: the injector, the forward proxy that holds the one claude.ai login (lib/wk/creds/injector.py),
+# which makes its own CA at its first start, and the API, `wk serve` (lib/wk/api).
 
 - name: Make the controller's bin
   ansible.builtin.file:
@@ -87,47 +87,55 @@
         dest: "{{ wk_injector_dir }}/login/delivered"
         mode: "0600"
 
-- name: Write the injector's unit
+- name: Write the units
   ansible.builtin.template:
-    src: wk-injector.service.j2
-    dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/wk-injector.service"
+    src: "{{ item }}.j2"
+    dest: "{{ wk_unit_dir }}/{{ item }}"
     mode: "0644"
+  loop: "{{ wk_units | list }}"
 
-- name: Enable and start the injector
+- name: Enable and start the units
   ansible.builtin.systemd_service:
-    name: wk-injector.service
+    name: "{{ item }}"
     scope: user
     enabled: true
     state: started
     daemon_reload: true
   environment: "{{ wk_user_bus }}"
+  loop: "{{ wk_units | list }}"
 
-# Restarted whenever its program or unit is newer than the running injector, which a run killed or failed between the
-# copy and the restart also leaves behind.
-- name: Look at the injector's program and unit
+# A unit is restarted whenever its program or unit file is newer than the running process, which a run killed or failed
+# between the copy and the restart also leaves behind. The API's unit names the commit it serves, so a new commit
+# rewrites it.
+- name: Look at the units' programs and unit files
   ansible.builtin.stat:
     path: "{{ item }}"
-  loop: ["{{ wk_injector_dir }}/injector.py", "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/wk-injector.service"]
-  register: wk_injector_files
+  loop: "{{ wk_units | list | map('regex_replace', '^', wk_unit_dir ~ '/') | list + wk_units.values() | flatten }}"
+  register: wk_unit_files
 
-- name: Ask when the injector started
+- name: Ask when the units started
   ansible.builtin.command:
-    argv: [systemctl, --user, show, wk-injector.service, --property, ActiveEnterTimestamp, --timestamp=unix, --value]
+    argv: [systemctl, --user, show, "{{ item }}", --property, ActiveEnterTimestamp, --timestamp=unix, --value]
   environment: "{{ wk_user_bus }}"
-  register: wk_injector_started
+  loop: "{{ wk_units | list }}"
+  register: wk_unit_started
   changed_when: false
   check_mode: false
 
-- name: Restart the injector, older than its program or unit
+- name: Restart a unit older than its program or unit file
   ansible.builtin.systemd_service:
-    name: wk-injector.service
+    name: "{{ item.item }}"
     scope: user
     state: restarted
     daemon_reload: true
   environment: "{{ wk_user_bus }}"
+  loop: "{{ wk_unit_started.results }}"
+  loop_control:
+    label: "{{ item.item }}"
   when: >-
-    (wk_injector_started.stdout | trim | regex_replace('^@', '') | int)
-    < (wk_injector_files.results | map(attribute='stat.mtime', default=0) | max | int)
+    (item.stdout | trim | regex_replace('^@', '') | int)
+    < (wk_unit_files.results | selectattr('item', 'in', [wk_unit_dir ~ '/' ~ item.item] + wk_units[item.item])
+       | map(attribute='stat.mtime', default=0) | max | int)
 
 - name: Wait for the injector's CA
   ansible.builtin.wait_for:

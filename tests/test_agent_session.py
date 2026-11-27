@@ -1,12 +1,15 @@
 import json
 import shlex
 import unittest
+from unittest import mock
 
 from tests import agent_toy
 from tests.world import CONFS, World
 from wk.agent import session
-from wk.core.machine import ALIVE, Result
+from wk.core.act import die
+from wk.core.machine import Result
 from wk.core.vars import VARS
+from wk.creds import rotation
 
 HOME = "/home/u/wk"
 SRC = HOME + "/ws/x/src"
@@ -16,13 +19,19 @@ CLAUDE = [session.claude_bin(HOME), "--dangerously-skip-permissions", "--remote-
 PI = [session.pi_bin(HOME)]
 ANSWERED = session.answered(None, SRC)
 KEYS = {fork: "-----BEGIN OPENSSH PRIVATE KEY-----\n%s\n-----END OPENSSH PRIVATE KEY-----\n" % fork for fork in VARS["wk_forks"]}
-ASK = ["ssh", "-i", HOME + "/secrets/rotate-key", "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes"] + ALIVE + ["vault"]
+ASK = "[vault] POST /rotate"
 
 
 def renewed(on):
     """What a rotation does on the server `on`: the controller asked, and each fork's key written."""
-    return (["[%s] %s" % (on, shlex.join(ASK))]
-            + ["[%s] write %s/secrets/deploy/%s" % (on, HOME, fork.replace("/", "--")) for fork in sorted(KEYS)])
+    return [ASK] + ["[%s] write %s/secrets/deploy/%s" % (on, HOME, fork.replace("/", "--")) for fork in sorted(KEYS)]
+
+
+def rotating(case, rotate=lambda inv, server: dict(KEYS)):
+    """The controller's rotation, scripted for the test `case`; the real one asks GitHub."""
+    patch = mock.patch.object(rotation, "rotate", rotate)
+    patch.start()
+    case.addCleanup(patch.stop)
 
 
 def make(on="lin", state="ready", confs=CONFS):
@@ -30,7 +39,6 @@ def make(on="lin", state="ready", confs=CONFS):
     w = World(here=on, commands=[agent_toy], confs=confs)
     w.workspace("x", on=on, state=state)
     w.machines[on].files.update({session.claude_bin(HOME): "claude", session.pi_bin(HOME): "pi"})
-    w.machines[on].on(("ssh", "-i"), json.dumps(KEYS))
     return w
 
 
@@ -40,6 +48,9 @@ def line(on, argv, env, tty=False):
 
 
 class TestStart(unittest.TestCase):
+    def setUp(self):
+        rotating(self)
+
     def test_claude_is_started_in_the_login_shell_on_the_terminal_through_the_injector_with_remote_control_named_for_the_workspace(self):
         w = make()
         r = w.wk("ai", "claude", "x", tty=True)
@@ -97,36 +108,55 @@ class TestStart(unittest.TestCase):
 
 class TestRotation(unittest.TestCase):
     def test_the_keys_are_written_whole_0600_where_the_ssh_aliases_name_them(self):
+        rotating(self)
         w = make()
         w.wk("ai", "pi", "x", tty=True)
         for fork, key in KEYS.items():
             path = "%s/secrets/deploy/%s" % (HOME, fork.replace("/", "--"))
             self.assertEqual((w.machines["lin"].files[path], w.machines["lin"].modes[path]), (key, "600"))
 
-    def test_the_controller_is_reached_as_its_confs_user(self):
-        w = make(confs=dict(CONFS, vault=CONFS["vault"] + "\nuser=ops"))
-        self.assertEqual(w.wk("ai", "pi", "x", tty=True).calls[0], "[lin] %s" % shlex.join(ASK[:-1] + ["ops@vault"]))
+    def test_the_controller_rotates_the_keys_of_the_server_that_asks(self):
+        asked = []
+        rotating(self, lambda inv, server: asked.append((inv.fleet.hostname, server)) or dict(KEYS))
+        make("mac").wk("ai", "pi", "x", tty=True, on="mac")
+        self.assertEqual(asked, [("vault", "mac")])
 
     def test_a_rotation_that_fails_refuses_the_session_and_writes_no_key(self):
-        for answer, said in ((Result(255, "", "Permission denied (publickey).\n"), "(exit 255): Permission denied (publickey)."),
-                             ("not json", "(exit 0): not json"), (json.dumps(["k"]), '(exit 0): ["k"]'),
-                             (json.dumps({"no fork": "k"}), '(exit 0): {"no fork": "k"}')):
-            w = make()
-            w.machines["lin"].on(("ssh", "-i"), answer)
-            r = w.wk("ai", "pi", "x", tty=True)
-            self.assertEqual((r.code, r.effects), (1, renewed("lin")[:1]))
-            self.assertIn("error: the controller did not rotate lin's push keys %s\n    `wk machine setup lin --stage credentials`, typed on vault, "
-                          "remakes the rotation key; forced, the session starts with the keys this server has\n    --force crosses this\n" % said, r.err)
+        def failing(inv, server):
+            die("POST /repos/o/r/keys answered HTTP 401: Bad credentials")
+        rotating(self, failing)
+        r = make().wk("ai", "pi", "x", tty=True)
+        self.assertEqual((r.code, r.effects), (4, [ASK]))
+        self.assertEqual(r.err, "error: the controller, vault, answered HTTP 502: POST /repos/o/r/keys answered HTTP 401: Bad credentials\n"
+                                "    so lin's push keys are not rotated; forced, the session starts with the keys this server has\n"
+                                "    --force crosses this\n")
+
+    def test_an_answer_that_holds_no_keys_is_refused_too(self):
+        for keys in ({}, {"no fork": "k"}, {"o/r": 1}):
+            rotating(self, lambda inv, server, keys=keys: keys)
+            r = make().wk("ai", "pi", "x", tty=True)
+            self.assertEqual((r.code, r.effects), (4, [ASK]), keys)
+            self.assertIn("error: the controller's answer holds no push keys\n", r.err)
+
+    def test_a_controller_that_does_not_answer_refuses_the_session(self):
+        w = make()
+        w.machines["vault"].down = True
+        r = w.wk("ai", "pi", "x", tty=True)
+        self.assertEqual((r.code, r.effects), (4, []))
+        self.assertIn("error: the controller, vault, did not answer (the fake is down)\n", r.err)
 
     def test_force_starts_the_session_with_the_keys_the_server_has_and_says_so_at_exit(self):
         w = make()
-        w.machines["lin"].on(("ssh", "-i"), Result(255, "", "timed out\n"))
+        w.machines["vault"].down = True
         r = w.wk("ai", "pi", "x", "--force", tty=True)
-        self.assertEqual((r.code, r.effects), (0, renewed("lin")[:1] + [line("lin", PI, {}, tty=True)]))
-        self.assertIn("warning: this command was forced past: the controller did not rotate lin's push keys", r.err)
+        self.assertEqual((r.code, r.effects), (0, [line("lin", PI, {}, tty=True)]))
+        self.assertIn("warning: this command was forced past: the controller, vault, did not answer", r.err)
 
 
 class TestRefusals(unittest.TestCase):
+    def setUp(self):
+        rotating(self)
+
     def refused(self, w, want, *words):
         r = w.wk(*(words or ("ai", "claude", "x")), tty=True)
         self.assertEqual((r.code, r.err, r.effects), (1, "error: %s\n" % want, []))

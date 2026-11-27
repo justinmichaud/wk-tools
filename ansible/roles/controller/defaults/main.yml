@@ -1,3 +1,8 @@
 ---
 wk_injector_dir: "{{ wk_home }}/injector"
 wk_websocat_platform: "{{ ansible_facts['system'] }} {{ ansible_facts['architecture'] }}"
+wk_unit_dir: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user"
+# Each unit, and the programs beside its unit file whose change restarts it.
+wk_units:
+  wk-injector.service: ["{{ wk_injector_dir }}/injector.py"]
+  wk-api.service: []

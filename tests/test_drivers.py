@@ -4,7 +4,7 @@ import tempfile
 import unittest
 
 from tests.world import CONFS, World
-from tests.ws import HOME, MAKE, MIRROR, inv, server
+from tests.ws import HOME, MAKE, MIRROR, RESERVE, inv, server
 from wk.core import seams
 from wk.core.errors import Refused
 from wk.core.machine import Local, Result
@@ -136,7 +136,7 @@ class TestContainer(unittest.TestCase):
         m = server(w)
         m.files[ENV_SH] = ""
         podman(m, None)
-        self.assertEqual(w.wk("new", "x", on="lin").effects, MAKE[:-2] + [RUN, MAKE[-1]])
+        self.assertEqual(w.wk("new", "x", on="lin").effects, [RESERVE] + MAKE[:-2] + [RUN, MAKE[-1]])
         podman(m, "running")
         self.assertEqual(w.wk("ls", on="lin").out.split(), ["x", "lin", "container", "ready"])
         self.assertEqual(w.wk("rm", "x", "--yes", on="lin").effects[1], "[lin] podman rm --force --ignore wk-x")

@@ -3,9 +3,8 @@
 For each fork in wk_forks (ansible/group_vars/all.json) a new ed25519 key is made and added to the fork as a writable
 deploy key titled `wk <server> <UTC time>`; then every other key of that fork titled `wk <server> ...` is deleted.
 The private keys are printed as one JSON object, {"<owner>/<repo>": "<private key>"}. It asks GitHub with
-github-token. Two callers: the credentials role of `wk machine setup`, and the server itself at each `wk ai`, through
-its rotation key, whose line in this machine's authorized_keys runs this command, with --yes, and nothing else.
-It revokes keys, so it asks first; --yes answers."""
+github-token. The credentials role of `wk machine setup` runs it; the controller's API (`wk serve`) runs the same
+rotation when a server asks at each `wk ai`. It revokes keys, so it asks first; --yes answers."""
 
 import json
 

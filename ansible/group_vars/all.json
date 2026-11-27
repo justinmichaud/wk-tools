@@ -27,6 +27,7 @@
     }
   },
   "wk_injector_port": 3128,
+  "wk_api_port": 3129,
   "wk_claude_version": "2.1.308",
   "wk_pi_package": "@earendil-works/pi-coding-agent",
   "wk_node": "22.19",

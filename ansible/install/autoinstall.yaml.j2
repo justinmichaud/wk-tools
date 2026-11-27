@@ -37,9 +37,9 @@ autoinstall:
       sizing-policy: all
       match:
         size: largest
+  # Tailscale SSH answers on the tailnet; there is no OpenSSH server and no authorised key.
   ssh:
-    install-server: true
-    allow-pw: false
+    install-server: false
 {% if wk_wifi is defined %}
   # From the medium's own pool, so the installed system joins WiFi whether or not the installer did.
   packages: [wpasupplicant]
@@ -49,7 +49,6 @@ autoinstall:
   # cloud-init's, for the installed system's first boot.
   user-data:
     hostname: {{ wk_install_name | to_json }}
-    ssh_pwauth: false
     users:
       - name: {{ wk_install_user | to_json }}
         gecos: {{ wk_install_user | to_json }}
@@ -57,8 +56,6 @@ autoinstall:
         groups: [adm, sudo]
         sudo: "ALL=(ALL) NOPASSWD:ALL"
         lock_passwd: true
-        ssh_authorized_keys:
-          - {{ wk_install_public_key | to_json }}
     apt:
       sources:
         tailscale.list:

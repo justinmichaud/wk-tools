@@ -24,7 +24,8 @@ PLAYBOOK = ["ansible-playbook", "-i", ROOT + "/ansible/inventory.py", "--limit",
 INSTALL = [ROOT + "/ansible/install.yml"]
 ASKED = "ERASE lin's disk and install Ubuntu on it, through its BMC at 10.0.0.2? [y/N]"
 NEXT = "==> lin is installed and on the tailnet; converge it next: wk machine setup lin\n"
-HELD = ("error: lin holds x, y, and its disk is erased: remove each with `wk rm <ws>`\n    --force crosses this\n")
+HELD = ("error: lin holds x, y, and its disk is erased: remove each with `wk rm <ws>`; forced, the names are released\n"
+        "    --force crosses this\n")
 
 
 def make():
@@ -74,26 +75,28 @@ class TestMachineInstall(unittest.TestCase):
         self.assertIn("attach the install image to lin through its BMC at 10.0.0.2, in place of one an earlier run left? nothing boots [y/N]", r.err)
         self.assertNotIn(NEXT, r.err)
 
-    def test_a_rehearsal_erases_nothing_so_it_asks_no_server_what_it_holds_and_meets_no_barrier(self):
-        self.w.workspace("x")
+    def test_a_rehearsal_erases_nothing_so_it_meets_no_barrier_and_releases_no_name(self):
+        self.w.reserve("x", "lin")
         held = self.w.wk("machine", "install", "lin", "--rehearse", "--yes")
         self.assertEqual((held.code, played(held)), (0, [PLAYBOOK + ["--skip-tags", "wipe"] + INSTALL]))
-        self.assertEqual([line for line in held.calls if not line.startswith("[vault]")], [])
+        self.assertEqual(self.w.machines["vault"].files["/home/u/wk/ws/x"], "lin")
 
-    def test_a_server_that_holds_a_workspace_is_a_barrier_that_force_crosses(self):
-        self.w.workspace("x")
-        self.w.workspace("y")
+    def test_a_server_that_holds_workspace_names_is_a_barrier_and_forced_its_names_are_released(self):
+        self.w.reserve("x", "lin")
+        self.w.reserve("y", "lin")
+        self.w.reserve("z", "bare")
         r = self.w.wk("machine", "install", "lin", "--yes")
         self.assertEqual((r.code, r.err, r.effects), (1, HELD, []))
         forced = self.w.wk("machine", "install", "lin", "--yes", "--force")
         self.assertEqual((forced.code, played(forced)), (0, [PLAYBOOK + INSTALL]))
+        self.assertEqual(forced.effects[:2], ["[vault] remove /home/u/wk/ws/x", "[vault] remove /home/u/wk/ws/y"])
         self.assertIn("warning: this command was forced past: lin holds x, y", forced.err)
+        self.assertEqual(self.w.machines["vault"].listdir("/home/u/wk/ws"), ["z"])
 
-    def test_a_server_that_does_not_answer_is_installed_and_no_other_server_is_asked(self):
+    def test_no_server_is_asked_what_it_holds(self):
         self.w.machines["lin"].down = self.w.machines["bare"].down = True
         r = self.w.wk("machine", "install", "lin", "--yes")
         self.assertEqual((r.code, played(r)), (0, [PLAYBOOK + INSTALL]))
-        self.assertIn("==> lin does not answer, so what it holds is unknown: a machine being reinstalled usually does not\n", r.err)
         self.assertEqual([line for line in r.calls if not line.startswith("[vault]")], [])
 
     def test_a_machine_with_no_bmc_is_refused_naming_the_key(self):
@@ -206,7 +209,7 @@ class TestThePlaybook(unittest.TestCase):
                 self.assertIn(machine.get("arch"), VARS["wk_ubuntu"][machine.get("os")], machine.name)
 
 
-VARIABLES = dict(VARS, wk_install_name="lin", wk_install_user="jm", wk_install_codename="noble", wk_install_public_key="ssh-ed25519 AAAA me@desk",
+VARIABLES = dict(VARS, wk_install_name="lin", wk_install_user="jm", wk_install_codename="noble",
                  wk_install_tailscale_key="-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nmQIN\n-----END PGP PUBLIC KEY BLOCK-----\n",
                  wk_install_secret={"ssid": 'Café "5G": #1', "psk": "pass: 'word' \\ {x}", "auth_key": "tskey-auth-k1"})
 RENDER = "content={{ lookup('ansible.builtin.template', src) | from_yaml | to_json }} dest={{ dest }}"
@@ -246,7 +249,7 @@ class TestLive(unittest.TestCase):
         auto = self.render()
         self.assertEqual((auto["version"], auto["interactive-sections"], auto["shutdown"]), (1, [], "reboot"))
         self.assertEqual(auto["storage"], {"layout": {"name": "lvm", "sizing-policy": "all", "match": {"size": "largest"}}})
-        self.assertEqual(auto["ssh"], {"install-server": True, "allow-pw": False})
+        self.assertEqual(auto["ssh"], {"install-server": False})
         self.assertEqual((auto["locale"], auto["keyboard"], auto["timezone"], auto["apt"]),
                          ("en_US.UTF-8", {"layout": "us"}, "Etc/UTC", {"fallback": "offline-install"}))
         self.assertNotIn("identity", auto)
@@ -263,9 +266,9 @@ class TestLive(unittest.TestCase):
 
     def test_live_the_first_boot_makes_the_user_installs_the_packages_and_joins_the_tailnet(self):
         first = self.render()["user-data"]
-        self.assertEqual((first["hostname"], first["ssh_pwauth"], first["package_update"]), ("lin", False, True))
+        self.assertEqual((first["hostname"], first["package_update"]), ("lin", True))
         self.assertEqual(first["users"], [{"name": "jm", "gecos": "jm", "shell": "/bin/bash", "groups": ["adm", "sudo"], "sudo": "ALL=(ALL) NOPASSWD:ALL",
-                                           "lock_passwd": True, "ssh_authorized_keys": ["ssh-ed25519 AAAA me@desk"]}])
+                                           "lock_passwd": True}])
         self.assertEqual(first["apt"]["sources"]["tailscale.list"], {
             "source": "deb [signed-by=$KEY_FILE] https://pkgs.tailscale.com/stable/ubuntu noble main", "key": VARIABLES["wk_install_tailscale_key"]})
         self.assertLessEqual({"git", "podman", "uidmap", "bubblewrap", "python3", "curl", "openssl", "tar", "tailscale"}, set(first["packages"]))

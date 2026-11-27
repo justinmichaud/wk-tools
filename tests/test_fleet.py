@@ -1,12 +1,11 @@
 import os
 import tempfile
-import threading
 import unittest
 
 from wk.core import conf
 from wk.core.errors import Refused
 from wk.core.fakes import Fake
-from wk.core.fleet import UNKNOWN, Fleet
+from wk.core.fleet import Fleet
 
 
 class TestConf(unittest.TestCase):
@@ -89,7 +88,7 @@ class TestFleet(unittest.TestCase):
         self.confs = {n: conf.parse(n, t) for n, t in (("desk", "kind=workstation"), ("lin", "kind=linux"), ("mac", "kind=mac"),
                                                        ("vault", "kind=controller"))}
         self.fakes = {n: Fake(n) for n in self.confs}
-        self.fleet = Fleet(lambda: self.confs, "lin", self.fakes.get, self.fakes["lin"], workers=4)
+        self.fleet = Fleet(lambda: self.confs, "lin", self.fakes.get, self.fakes["lin"])
 
     def test_it_lists_machines_by_name_and_servers_are_those_that_hold_workspaces(self):
         self.assertEqual(([c.name for c in self.fleet.machines()], [c.name for c in self.fleet.servers()]),
@@ -122,21 +121,3 @@ class TestFleet(unittest.TestCase):
             with self.assertRaises(Refused) as e:
                 self.fleet.server(name)
             self.assertEqual(str(e.exception), "%s holds no workspace: it is %s\n    servers: lin, mac" % (name, what))
-
-    def test_asking_reaches_every_server_and_an_unreachable_one_is_unknown_not_empty(self):
-        self.fakes["lin"].files["/f"] = ""
-        self.fakes["mac"].down = True
-        answers = self.fleet.ask(lambda m: m.listdir("/"))
-        self.assertEqual(answers, {"lin": ["f"], "mac": UNKNOWN})
-        self.assertEqual(repr(UNKNOWN), "UNKNOWN")
-
-    def test_asking_takes_the_names_it_is_given(self):
-        self.assertEqual(self.fleet.ask(lambda m: m.name, ["vault", "desk"]), {"vault": "vault", "desk": "desk"})
-
-    def test_the_servers_are_asked_at_the_same_time(self):
-        together = threading.Barrier(2, timeout=10)
-        self.assertEqual(sorted(self.fleet.ask(lambda m: together.wait()).values()), [0, 1])
-
-    def test_an_error_that_is_not_unreachability_is_not_swallowed(self):
-        with self.assertRaises(ZeroDivisionError):
-            self.fleet.ask(lambda m: 1 / 0)

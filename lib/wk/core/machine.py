@@ -3,6 +3,7 @@
     r = m.run(["git", "status"], cwd=src)      # a read: runs under --dry-run too; r.rc, r.out, r.err, r.ok
     m.act(["git", "fetch"], cwd=src)           # a state change: printed, not run, under --dry-run
     m.write(path, text, mode="600")            # atomic; parents made; bytes travel on stdin, never argv
+    m.create(path, text)                       # only when there is no such file (O_EXCL): True when this call made it
     m.read(path)  m.exists(path)  m.listdir(path)  m.remove(path)  m.copy(src, to_machine, dst)  m.spawn(argv, log)
 
 Paths are absolute; `m.home` is the login's home. `run` and `act` take input= (str or bytes, on stdin), timeout=
@@ -56,7 +57,7 @@ def local_run(argv, input=None, timeout=None, cwd=None, env=None, stream=False, 
 
 
 class Machine:
-    """The interface. An implementation supplies _run, _write, _remove, _spawn, read, exists, listdir and home."""
+    """The interface. An implementation supplies _run, _write, _create, _remove, _spawn, read, exists, listdir and home."""
 
     name = ""
 
@@ -72,6 +73,9 @@ class Machine:
     def write(self, path, data, mode="644"):
         self._gate("write %s" % path, lambda: self._write(path, data, mode))
 
+    def create(self, path, text):
+        return self._gate("create %s" % path, lambda: self._create(path, text), True)
+
     def remove(self, path):
         """The file or the whole tree at `path`; an absent one is already removed."""
         self._gate("remove %s" % path, lambda: self._remove(path))
@@ -86,6 +90,8 @@ class Machine:
 
 
 WRITE = 'mkdir -p "$(dirname "$1")" && (umask 077 && cat >"$1.tmp") && chmod "$2" "$1.tmp" && mv -f "$1.tmp" "$1"'
+# noclobber opens with O_EXCL, and printf is a builtin: the name and its holder appear together.
+CREATE = 'mkdir -p "$(dirname "$1")" && set -C && printf %s "$2" >"$1"'
 SPAWN = 'nohup "$@" >"$0" 2>&1 </dev/null &'
 
 
@@ -115,6 +121,12 @@ class Shell(Machine):
 
     def _write(self, path, data, mode):
         self._must("write %s" % path, ["sh", "-c", WRITE, "sh", path, mode], data)
+
+    def _create(self, path, text):
+        r = self._run(["sh", "-c", CREATE, "sh", path, text])
+        if not r.ok and not self.exists(path):
+            raise Refused("cannot create %s on %s: %s" % (path, self.name, r.err.strip()))
+        return r.ok
 
     def _remove(self, path):
         self._must("remove %s" % path, ["rm", "-rf", path])
