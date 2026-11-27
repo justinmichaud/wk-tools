@@ -1,0 +1,94 @@
+---
+# Xcode on a Mac, from the .xip a person downloads once into the controller's cache: Apple's download needs an Apple
+# Account. It is installed where /Applications/Xcode.app is absent; then, as root, it is selected, its licence accepted
+# and its first launch run, each only while it is not yet so.
+
+- name: Look for Xcode
+  ansible.builtin.stat:
+    path: /Applications/Xcode.app
+  register: wk_xcode
+
+- name: Ask for the credentials' names
+  ansible.builtin.import_role:
+    name: credentials
+    tasks_from: names
+
+- name: Install Xcode from the controller's xip
+  when: not wk_xcode.stat.exists
+  block:
+    - name: Look for the xip on the controller
+      ansible.builtin.stat:
+        path: "{{ wk_controller_home }}/cache/{{ wk_xcode_xip }}"
+      delegate_to: localhost
+      register: wk_xip
+
+    - name: Assert the controller holds the xip
+      ansible.builtin.assert:
+        that: wk_xip.stat.exists
+        fail_msg: >-
+          {{ inventory_hostname }} has no Xcode, and the controller has no {{ wk_xcode_xip }} to install it from:
+          download it from https://developer.apple.com/download/all/ into {{ wk_controller_home }}/cache/, then this again
+        quiet: true
+
+    - name: Make a scratch directory
+      ansible.builtin.tempfile:
+        state: directory
+      register: wk_xcode_scratch
+
+    - name: Copy the xip
+      ansible.builtin.copy:
+        src: "{{ wk_controller_home }}/cache/{{ wk_xcode_xip }}"
+        dest: "{{ wk_xcode_scratch.path }}/{{ wk_xcode_xip }}"
+        mode: "0644"
+
+    - name: Expand it
+      ansible.builtin.command:
+        argv: [xip, --expand, "{{ wk_xcode_scratch.path }}/{{ wk_xcode_xip }}"]
+        chdir: "{{ wk_xcode_scratch.path }}"
+
+    - name: Move it into /Applications
+      ansible.builtin.command:
+        argv: [mv, "{{ wk_xcode_scratch.path }}/Xcode.app", /Applications/Xcode.app]
+        creates: /Applications/Xcode.app
+
+  always:
+    - name: Remove the scratch directory
+      ansible.builtin.file:
+        path: "{{ wk_xcode_scratch.path }}"
+        state: absent
+      when: wk_xcode_scratch.path is defined
+
+- name: Ask which developer directory is selected
+  ansible.builtin.command:
+    argv: [/usr/bin/xcode-select, --print-path]
+  register: wk_xcode_selected
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Ask whether the licence is accepted and the first launch run
+  ansible.builtin.command:
+    argv: "{{ item }}"
+  loop:
+    - [/usr/bin/xcodebuild, -license, check]
+    - [/usr/bin/xcodebuild, -checkFirstLaunchStatus]
+  environment:
+    DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+  register: wk_xcode_ready
+  changed_when: false
+  failed_when: false
+  check_mode: false
+
+- name: Select Xcode, accept its licence and run its first launch
+  become: true
+  vars:
+    ansible_become_password: "{{ lookup('ansible.builtin.file', wk_store ~ '/sudo-password') if 'sudo-password' in wk_store_names else '' }}"
+  ansible.builtin.command:
+    argv: "{{ item.argv }}"
+  loop:
+    - {argv: [/usr/bin/xcode-select, --switch, /Applications/Xcode.app], when: "{{ wk_xcode_selected.stdout != '/Applications/Xcode.app/Contents/Developer' }}"}
+    - {argv: [/usr/bin/xcodebuild, -license, accept], when: "{{ wk_xcode_ready.results[0].rc != 0 }}"}
+    - {argv: [/usr/bin/xcodebuild, -runFirstLaunch], when: "{{ wk_xcode_ready.results[1].rc != 0 }}"}
+  loop_control:
+    label: "{{ item.argv | join(' ') }}"
+  when: item.when | bool

@@ -1,6 +1,6 @@
-"""Install a Linux server's operating system from nothing, unattended, through its BMC. Its disk is erased.
+"""Install a server's operating system from nothing: a Linux server unattended through its BMC, a Mac by a person.
 
-It runs `ansible-playbook --limit <server> ansible/install.yml` and its exit code is ansible-playbook's. The
+Linux: it runs `ansible-playbook --limit <server> ansible/install.yml` and its exit code is ansible-playbook's. The
 playbook puts an autoinstall file into Ubuntu's pinned image, attaches the image to the server as its BMC's virtual USB
 disk (qemu-nbd serves it on the controller, the pinned websocat carries it to the BMC's websocket), boots the server
 from it once, and waits for the installed system to join the tailnet; then it retires the old system's node, gives the
@@ -10,6 +10,10 @@ bmc/<server>/password, tailnet-auth-key and tailnet-api-key, wifi-ssid and wifi-
 sudo-password while the system being replaced asks for one. While it runs, the server's serial console is
 `ssh -p 2200 <BMC login>@<bmc>`. `--dry-run` reads the credentials, asks the BMC and changes nothing.
 
+Mac: it erases nothing. It prints the one line a person types in Terminal on the Mac once it is erased and set up with
+its conf's user: Homebrew, Tailscale and a one-off auth key that joins it to the tailnet under its name. Then
+`wk machine setup <mac>`.
+
 A server holding workspace names is a barrier: forced, its names are released, since its disk is gone. A rehearsal
 erases nothing and leaves them."""
 
@@ -17,11 +21,11 @@ from wk.api import names
 from wk.core import act
 from wk.core.act import barrier, confirm, die, info
 from wk.core.decl import CONTROLLER, Command, Opt
-from wk.provision import ansible
+from wk.provision import ansible, join
 
 COMMAND = Command(on=CONTROLLER, takes=("server",), destructive=True,
                   opts=(Opt("--rehearse", "attach the image, see it from the server and detach it: nothing boots and no disk is erased"),))
-NOT_INSTALLED = {"workstation": "a workstation", "controller": "the controller, which runs the install", "mac": "a Mac"}
+NOT_INSTALLED = {"workstation": "a workstation", "controller": "the controller, which runs the install"}
 
 
 def held(inv, name):
@@ -37,11 +41,25 @@ def release(inv, found):
         names.release(inv.here, inv.wk_home, ws)
 
 
+def mac(inv, name):
+    api_key, found = join.token(inv), held(inv, name)
+    confirm("make a one-off key that joins %s to the tailnet once a person has erased it?" % name)
+    release(inv, found)
+    auth_key = join.key(inv, name, api_key)
+    if auth_key:
+        info("on %s, erased and set up with its conf's user, type this in Terminal; then: wk machine setup %s" % (name, name))
+        print(join.line(auth_key, name))
+
+
 def main(args, inv):
     conf = inv.fleet.get(args.server)
     name = conf.name
     if conf.kind in NOT_INSTALLED:
-        die("%s is %s, and install puts Ubuntu on a Linux server of yours" % (name, NOT_INSTALLED[conf.kind]))
+        die("%s is %s, and install puts an operating system on a server of yours" % (name, NOT_INSTALLED[conf.kind]))
+    if conf.kind == "mac":
+        if args.rehearse:
+            die("a Mac is installed by a person, so there is nothing to rehearse: `wk machine install %s` prints its line" % name)
+        return mac(inv, name)
     if not conf.get("bmc"):
         die("%s has no BMC to be installed through: set bmc=<its BMC's address> in machines/%s.conf (`wk machine install -h` "
             "lists the other keys)" % (name, name))

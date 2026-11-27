@@ -29,6 +29,7 @@
   "wk_injector_port": 3128,
   "wk_api_port": 3129,
   "wk_claude_version": "2.1.308",
+  "wk_xcode_xip": "Xcode_27.2.xip",
   "wk_pi_package": "@earendil-works/pi-coding-agent",
   "wk_node": "22.19",
   "wk_ubuntu": {
@@ -56,5 +57,7 @@
   "wk_install_reset": "PowerForceRestart",
   "wk_install_console_port": 2200,
   "wk_tailnet_api": "https://api.tailscale.com/api/v2",
+  "wk_server_tags": ["tag:workstation"],
+  "wk_homebrew_install": "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh",
   "wk_tailscale_apt": "https://pkgs.tailscale.com/stable/ubuntu"
 }

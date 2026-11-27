@@ -11,11 +11,13 @@ import tempfile
 import unittest
 
 from tests import REAL_PATH, ROOT
+from tests.credsworld import Http
 from tests.provision import checkout, controller
 from tests.world import World
 from wk.core import conf
 from wk.core.machine import Result
 from wk.core.vars import VARS
+from wk.creds import net
 
 BMC = "bmc=10.0.0.2\narch=arm64\nos=24.04"
 CONFS = {"desk": "kind=workstation", "lin": "kind=linux\nuser=jm\nwifi=wlp1s0\nconsole=ttyAMA0,115200\n" + BMC, "bare": "kind=linux",
@@ -105,10 +107,10 @@ class TestMachineInstall(unittest.TestCase):
         self.assertEqual(r.err, "error: bare has no BMC to be installed through: set bmc=<its BMC's address> in machines/bare.conf "
                                 "(`wk machine install -h` lists the other keys)\n")
 
-    def test_a_workstation_the_controller_and_a_mac_are_refused_whatever_is_forced(self):
-        for name, what in (("desk", "a workstation"), ("vault", "the controller, which runs the install"), ("mac", "a Mac")):
+    def test_a_workstation_and_the_controller_are_refused_whatever_is_forced(self):
+        for name, what in (("desk", "a workstation"), ("vault", "the controller, which runs the install")):
             r = self.w.wk("machine", "install", name, "--yes", "--force")
-            self.assertEqual((r.code, r.err, r.calls), (1, "error: %s is %s, and install puts Ubuntu on a Linux server of yours\n" % (name, what), []))
+            self.assertEqual((r.code, r.err, r.calls), (1, "error: %s is %s, and install puts an operating system on a server of yours\n" % (name, what), []))
 
     def test_it_is_typed_on_the_controller_and_an_unknown_machine_is_refused(self):
         self.assertIn("error: wk machine install runs on the controller (vault)", self.w.wk("machine", "install", "lin", "--yes", on="lin").err)
@@ -124,6 +126,71 @@ class TestMachineInstall(unittest.TestCase):
         self.assertEqual(hostvars["lin"], {
             "wk_kind": "linux", "wk_user": "jm", "ansible_user": "jm", "wk_wifi": "wlp1s0", "wk_console": "ttyAMA0,115200",
             "wk_bmc": "10.0.0.2", "wk_arch": "arm64", "wk_os": "24.04"})
+
+
+KEYS = ("POST", VARS["wk_tailnet_api"] + "/tailnet/-/keys")
+AUTH_KEY = "tskey-auth-k1-SECRET"
+JOINS = ('sudo -v && NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL %s)" && eval "$(/opt/homebrew/bin/brew shellenv)" '
+         '&& brew install tailscale && sudo "$(brew --prefix)/bin/tailscaled" install-system-daemon '
+         '&& sudo "$(brew --prefix)/bin/tailscale" up --ssh --auth-key=%s --hostname=mac\n' % (VARS["wk_homebrew_install"], AUTH_KEY))
+
+
+class TestMacInstall(unittest.TestCase):
+    def setUp(self):
+        self.w = make()
+        self.w.secrets.values["tailnet-api-key"] = "tskey-api-k2-API"
+        self.http = Http({KEYS: (200, {"id": "k1", "key": AUTH_KEY})})
+        patch = self.http.patch()
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_it_prints_the_line_that_joins_the_mac_with_a_one_off_pre_approved_tagged_key_and_erases_nothing(self):
+        r = self.w.wk("machine", "install", "mac", "--yes")
+        self.assertEqual((r.code, r.out, played(r)), (0, JOINS, []))
+        self.assertIn("==> on mac, erased and set up with its conf's user, type this in Terminal; then: wk machine setup mac\n", r.err)
+        method, url, headers, body = self.http.asked[0]
+        self.assertEqual(headers["Authorization"], "Bearer tskey-api-k2-API")
+        self.assertEqual(json.loads(body), {"capabilities": {"devices": {"create": {"reusable": False, "ephemeral": False, "preauthorized": True,
+                                                                                    "tags": VARS["wk_server_tags"]}}},
+                                            "expirySeconds": 86400, "description": "wk install mac"})
+
+    def test_it_asks_before_it_makes_a_key(self):
+        r = self.w.wk("machine", "install", "mac", stdin="n\n", tty=True)
+        self.assertEqual((r.code, r.out, self.http.asked), (1, "", []))
+        self.assertIn("make a one-off key that joins mac to the tailnet once a person has erased it? [y/N]", r.err)
+
+    def test_a_dry_run_makes_no_key_and_prints_no_line(self):
+        r = self.w.wk("machine", "install", "mac", "--dry-run")
+        self.assertEqual((r.code, r.out, self.http.asked), (0, "", []))
+        self.assertIn("would: [tailscale] POST /tailnet/-/keys for mac\n", r.err)
+
+    def test_names_the_mac_holds_are_a_barrier_and_forced_they_are_released(self):
+        self.w.reserve("x", "mac")
+        r = self.w.wk("machine", "install", "mac", "--yes")
+        self.assertEqual((r.code, r.out, self.http.asked), (1, "", []))
+        self.assertIn("error: mac holds x, and its disk is erased", r.err)
+        forced = self.w.wk("machine", "install", "mac", "--yes", "--force")
+        self.assertEqual((forced.code, forced.out, forced.effects), (0, JOINS, ["[vault] remove /home/u/wk/ws/x"]))
+
+    def test_no_api_key_is_refused_before_the_question(self):
+        del self.w.secrets.values["tailnet-api-key"]
+        r = self.w.wk("machine", "install", "mac", "--yes")
+        self.assertEqual((r.code, r.err), (1, "error: the join key is made with tailnet-api-key, and the controller holds none: "
+                                              "`wk key set tailnet-api-key`\n"))
+
+    def test_a_key_the_api_does_not_make_needs_a_person_naming_the_tags(self):
+        for answer, said in (((403, {"message": "tags not permitted"}), "answered HTTP 403: tags not permitted"),
+                             ((200, {"key": "nope"}), "answered HTTP 200: "), (net.NoAnswer("timed out"), "did not answer (timed out)")):
+            self.http.answers[KEYS] = answer
+            r = self.w.wk("machine", "install", "mac", "--yes")
+            self.assertEqual((r.code, r.out), (4, ""))
+            self.assertIn("error: the tailnet's API made no auth key: it %s\n    tailnet-api-key must be allowed to make keys tagged %s"
+                          % (said, ", ".join(VARS["wk_server_tags"])), r.err)
+
+    def test_there_is_nothing_to_rehearse(self):
+        r = self.w.wk("machine", "install", "mac", "--rehearse", "--yes")
+        self.assertEqual((r.code, r.calls), (1, []))
+        self.assertIn("a Mac is installed by a person, so there is nothing to rehearse", r.err)
 
 
 def tasks():

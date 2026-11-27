@@ -2,7 +2,7 @@
 
 It runs `ansible-playbook --limit <server>` and its exit code is ansible-playbook's. Every task is idempotent: a
 second run reports changed=0, and killed anywhere and typed again, setup converges. `--stage <role>` runs one role
-(wk, pueue, mirror, sdk, agents, credentials; controller on the controller); `--dry-run` runs Ansible's check
+(wk, pueue, mirror, sdk, agents, credentials, xcode on a Mac; controller on the controller); `--dry-run` runs Ansible's check
 mode with diffs. The server fetches exactly this checkout's commit, so uncommitted changes and an unpushed commit
 are refused. Nothing is installed with a package manager, and nothing needs root: what a server must already have is
 asserted, and named when it is absent."""

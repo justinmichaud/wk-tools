@@ -300,7 +300,7 @@ All of it runs on the controller, typed by the person.
 - The inventory is `machines/*.conf`: a host per machine, a group per kind,
   each conf literal as `wk_<key>`, this checkout's commit.
 - Roles: `wk`, `pueue`, `mirror`, `sdk` (Linux), `agents`, `credentials`
-  (servers), `controller` (websocat, the injector and the API, `wk serve`). Every task but the rotation is idempotent: a second run
+  (servers), `xcode` (Mac), `controller` (websocat, the injector and the API, `wk serve`). Every task but the rotation is idempotent: a second run
   reports changed only for the keys it rotated.
 - A server fetches exactly the controller's commit from the repository's
   public URL. Uncommitted changes, and a commit on no remote branch, are
@@ -403,7 +403,7 @@ ansible/install.yml     a Linux server's operating system, through its BMC (task
 ansible/check.yml       the end-to-end check of a server
 ansible/inventory.py    prints `wk machine inventory`
 ansible/group_vars/     all.json: the pins and ports the playbooks and the program share
-ansible/roles/          wk, pueue, mirror, sdk, agents, credentials, controller
+ansible/roles/          wk, pueue, mirror, sdk, agents, credentials, xcode, controller
 lib/wk/core/            dispatch, decl, act, inv, machine, clock, conf, fleet, errors, seams, hooks, fakes
 lib/wk/cmd/             one module per command: COMMAND table + main
 lib/wk/workspace/       drivers, mirror, git wiring, lifecycle

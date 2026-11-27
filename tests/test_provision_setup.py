@@ -23,7 +23,7 @@ CONFS = {"desk": "kind=workstation", "lin": "kind=linux\nuser=jm", "mac": "kind=
          "vault": "kind=controller\ninjector_port=3129\nlitellm_url=https://llm.example/v1"}
 PLAYBOOK = ["ansible-playbook", "-i", ROOT + "/ansible/inventory.py"]
 SITE = [ROOT + "/ansible/site.yml"]
-ROLES = ["agents", "controller", "credentials", "mirror", "pueue", "sdk", "wk"]
+ROLES = ["agents", "controller", "credentials", "mirror", "pueue", "sdk", "wk", "xcode"]
 INSTALL = "    sudo apt install ansible\n"
 
 

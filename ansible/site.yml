@@ -49,6 +49,12 @@
       environment:
         PATH: "{{ wk_login_path.stdout }}"
       block:
+        - name: Install Xcode
+          ansible.builtin.import_role:
+            name: xcode
+          when: "'mac' in group_names"
+          tags: [xcode]
+
         - name: Install wk itself
           ansible.builtin.import_role:
             name: wk
