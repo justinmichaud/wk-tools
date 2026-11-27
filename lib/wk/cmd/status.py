@@ -12,12 +12,12 @@ Exit code: 0 idle or done, 1 failed or killed, 2 busy, 3 stalled."""
 import json
 
 from wk.core.act import die, info, warn
-from wk.core.decl import Command, Opt
+from wk.core.decl import SERVERS, Command, Opt
 from wk.core.errors import BUSY, Usage
 from wk.tasks import status
 
 LOG_LINES = 100
-COMMAND = Command(where="server", takes=("ws?",), readonly=True,
+COMMAND = Command(on=SERVERS, takes=("ws?",), readonly=True,
                   opts=(Opt("--log", "print the last %d lines of the workspace's latest log" % LOG_LINES),
                         Opt("--follow", "stream the workspace's latest log until its task ends"),
                         Opt("--wait", "block while a task is queued or running"), Opt("--json", "print one JSON object")))

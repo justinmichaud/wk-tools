@@ -88,7 +88,7 @@
         msg: >-
           {{ inventory_hostname }} was not installed: the task "{{ ansible_failed_task.name }}" failed
           ({{ ansible_failed_result.msg | default('it logs nothing') }}). The image is detached and the boot override
-          cleared now. The server's serial console shows where it stands: `{{ wk_install_console }}`, with the store's
+          cleared now. The server's serial console shows where it stands: `{{ wk_install_console }}`, with the controller's
           bmc/{{ inventory_hostname }}/password. A server that still answers as before never booted the image, and its
           old system is untouched. An installer that stopped has /var/log/installer; an installed system that did not
           join has /var/log/cloud-init-output.log, where `tailscale up` says what it made of tailnet-auth-key

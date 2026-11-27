@@ -1,35 +1,18 @@
-"""Credentials in `wk doctor` and `wk gc`: what delivery leaves on a server, and the injector and the store on the
-credential server."""
-
-import json
+"""Credentials in `wk doctor`: what delivery leaves on a server, and the store and the injector on the controller."""
 
 from wk.core import hooks
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
-from wk.core.vars import VARS
-from wk.creds import agent, bao, injector, net
+from wk.creds import agent, injector, net
 
 
-def pins(inv, conf):
-    return ["openbao-" + VARS["wk_openbao_version"]]
-
-
-def delivered(conf, m, wk):
+def delivered(inv, conf, m, wk):
     """One row for what delivery leaves on a server."""
     want = {"%s/%s/.credentials.json" % (wk, agent.LOGIN_DIR): "600", "%s/%s" % (wk, agent.CA): "644",
             wk + "/secrets": "d700", wk + "/secrets/deploy": "d700", wk + "/secrets/env.sh": "600",
-            wk + "/secrets/ssh_config": "600", m.home + "/.pi/agent/models.json": "600"}
+            wk + "/secrets/ssh_config": "600", wk + "/secrets/rotate-key": "600", m.home + "/.pi/agent/models.json": "600"}
     lacking = hooks.lacking(m, want)
     return DoctorRow("credentials", MISSING if lacking else OK, lacking and "absent or wrongly moded: " + ", ".join(sorted(lacking)) or "",
-                     "wk key sync %s" % conf.name)
-
-
-def asked(name, url, remedy, verdict):
-    """A row for a service asked one plain request: `verdict(status, body)` is (whether it is as it should be, the detail)."""
-    try:
-        good, detail = verdict(*net.request("GET", url))
-    except net.NoAnswer as e:
-        return DoctorRow(name, UNKNOWN, "%s did not answer (%s)" % (url, e), remedy)
-    return DoctorRow(name, OK if good else MISSING, detail, remedy)
+                     "wk machine setup %s --stage credentials, typed on %s" % (conf.name, inv.fleet.controller.name))
 
 
 def holds(status, body):
@@ -42,17 +25,23 @@ def holds(status, body):
     return True, "it holds the claude.ai login"
 
 
-def unsealed(status, body):
-    said = json.loads(body) if status == 200 else {}
-    return said.get("initialized") is True and said.get("sealed") is False, "HTTP %d, initialized %s, sealed %s" % (
-        status, said.get("initialized"), said.get("sealed"))
+def answering(url, remedy):
+    """The injector's row: it is asked one plain request."""
+    try:
+        good, detail = holds(*net.request("GET", url))
+    except net.NoAnswer as e:
+        return DoctorRow("injector", UNKNOWN, "%s did not answer (%s)" % (url, e), remedy)
+    return DoctorRow("injector", OK if good else MISSING, detail, remedy)
 
 
 def doctor(inv, conf, ws):
     if ws is not None:
         return []
-    m, remedy = inv.machine(conf.name), "wk machine setup %s" % conf.name
+    m = inv.machine(conf.name)
     if conf.holds_workspaces:
-        return [delivered(conf, m, inv.wk_home_on(m))]
-    return [asked("injector", "http://%s/" % agent.injector(inv), remedy, holds),
-            asked("openbao", bao.address(inv) + "/v1/sys/seal-status", remedy, unsealed)]
+        return [delivered(inv, conf, m, inv.wk_home_on(m))]
+    store = inv.wk_home_on(m) + "/secrets"
+    lacking = hooks.lacking(m, {store: "d700"})
+    return [DoctorRow("secrets", MISSING if lacking else OK, lacking and "%s is absent or not mode 0700" % store or "",
+                      "mkdir -m 700 %s, then `wk key set <name>` for each" % store),
+            answering("http://%s/" % agent.injector(inv), "wk machine setup %s --stage controller" % conf.name)]

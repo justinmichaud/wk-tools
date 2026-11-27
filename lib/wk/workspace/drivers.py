@@ -39,7 +39,8 @@ class Container(Driver):
             return
         store, env = mirror.where(self.home), self.home + "/secrets/env.sh"
         if not self.m.exists(env):
-            die("%s has no %s for a shell in the container to source\n    `wk key sync` delivers the credentials there" % (self.m.name, env))
+            die("%s has no %s for a shell in the container to source\n    `wk machine setup %s --stage credentials`, typed on the "
+                "controller, delivers it" % (self.m.name, env, self.m.name))
         # podman caps a container at 2048 processes, threads included; its seccomp allow-list lacks
         # personality(ADDR_NO_RANDOMIZE), which lldb and gdb launch a process with.
         must(self.m, ["podman", "run", "--detach", "--replace", "--pull=never", "--name", "wk-" + ws.name, "--init",

@@ -1,4 +1,4 @@
-"""The one function that speaks HTTP for the client: the store and every credential's probe go through it, and a test
+"""The one function that speaks HTTP for wk: every credential's probe and the rotation go through it, and a test
 replaces it, so no test reaches the network."""
 
 import http.client

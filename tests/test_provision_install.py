@@ -11,15 +11,15 @@ import tempfile
 import unittest
 
 from tests import REAL_PATH, ROOT
-from tests.provision import checkout, client
+from tests.provision import checkout, controller
 from tests.world import World
 from wk.core import conf
 from wk.core.machine import Result
 from wk.core.vars import VARS
 
 BMC = "bmc=10.0.0.2\narch=arm64\nos=24.04"
-CONFS = {"desk": "kind=client", "lin": "kind=linux\nuser=jm\nwifi=wlp1s0\nconsole=ttyAMA0,115200\n" + BMC, "bare": "kind=linux",
-         "mac": "kind=mac\n" + BMC, "vault": "kind=credential\n" + BMC}
+CONFS = {"desk": "kind=workstation", "lin": "kind=linux\nuser=jm\nwifi=wlp1s0\nconsole=ttyAMA0,115200\n" + BMC, "bare": "kind=linux",
+         "mac": "kind=mac\n" + BMC, "vault": "kind=controller\n" + BMC}
 PLAYBOOK = ["ansible-playbook", "-i", ROOT + "/ansible/inventory.py", "--limit", "lin"]
 INSTALL = [ROOT + "/ansible/install.yml"]
 ASKED = "ERASE lin's disk and install Ubuntu on it, through its BMC at 10.0.0.2? [y/N]"
@@ -28,15 +28,15 @@ HELD = ("error: lin holds x, y, and its disk is erased: remove each with `wk rm 
 
 
 def make():
-    w = World(confs=CONFS)
-    checkout(w.machines["desk"])
-    client(w.machines["desk"])
-    w.machines["desk"].on(("ansible-playbook", "-i"), "")
+    w = World(here="vault", confs=CONFS)
+    checkout(w.machines["vault"])
+    controller(w.machines["vault"])
+    w.machines["vault"].on(("ansible-playbook", "-i"), "")
     return w
 
 
 def played(run):
-    return [line[len("[desk] "):].split() for line in run.calls if line.startswith("[desk] ansible-playbook -i")]
+    return [line[len("[vault] "):].split() for line in run.calls if line.startswith("[vault] ansible-playbook -i")]
 
 
 class TestMachineInstall(unittest.TestCase):
@@ -45,11 +45,11 @@ class TestMachineInstall(unittest.TestCase):
 
     def test_it_is_one_ansible_playbook_of_install_yml_limited_to_the_server_then_names_setup(self):
         r = self.w.wk("machine", "install", "lin", "--yes")
-        self.assertEqual((r.code, played(r), r.effects), (0, [PLAYBOOK + INSTALL], ["[desk] " + " ".join(PLAYBOOK + INSTALL)]))
+        self.assertEqual((r.code, played(r), r.effects), (0, [PLAYBOOK + INSTALL], ["[vault] " + " ".join(PLAYBOOK + INSTALL)]))
         self.assertTrue(r.err.endswith(NEXT), r.err)
 
     def test_its_exit_code_is_ansibles_and_a_failed_install_names_no_next_step(self):
-        self.w.machines["desk"].on(("ansible-playbook", "-i"), Result(2))
+        self.w.machines["vault"].on(("ansible-playbook", "-i"), Result(2))
         r = self.w.wk("machine", "install", "lin", "--yes")
         self.assertEqual((r.code, NEXT in r.err), (2, False))
 
@@ -78,9 +78,7 @@ class TestMachineInstall(unittest.TestCase):
         self.w.workspace("x")
         held = self.w.wk("machine", "install", "lin", "--rehearse", "--yes")
         self.assertEqual((held.code, played(held)), (0, [PLAYBOOK + ["--skip-tags", "wipe"] + INSTALL]))
-        self.assertEqual([line for line in held.calls if not line.startswith("[desk]")], [])
-        vault = self.w.wk("machine", "install", "vault", "--rehearse", "--yes")
-        self.assertEqual((vault.code, len(played(vault))), (0, 1))
+        self.assertEqual([line for line in held.calls if not line.startswith("[vault]")], [])
 
     def test_a_server_that_holds_a_workspace_is_a_barrier_that_force_crosses(self):
         self.w.workspace("x")
@@ -96,7 +94,7 @@ class TestMachineInstall(unittest.TestCase):
         r = self.w.wk("machine", "install", "lin", "--yes")
         self.assertEqual((r.code, played(r)), (0, [PLAYBOOK + INSTALL]))
         self.assertIn("==> lin does not answer, so what it holds is unknown: a machine being reinstalled usually does not\n", r.err)
-        self.assertEqual([line for line in r.calls if not line.startswith("[desk]")], [])
+        self.assertEqual([line for line in r.calls if not line.startswith("[vault]")], [])
 
     def test_a_machine_with_no_bmc_is_refused_naming_the_key(self):
         r = self.w.wk("machine", "install", "bare", "--yes", "--force")
@@ -104,25 +102,17 @@ class TestMachineInstall(unittest.TestCase):
         self.assertEqual(r.err, "error: bare has no BMC to be installed through: set bmc=<its BMC's address> in machines/bare.conf "
                                 "(`wk machine install -h` lists the other keys)\n")
 
-    def test_the_client_and_a_mac_are_refused_whatever_is_forced(self):
-        for name, what in (("desk", "the client"), ("mac", "a Mac")):
+    def test_a_workstation_the_controller_and_a_mac_are_refused_whatever_is_forced(self):
+        for name, what in (("desk", "a workstation"), ("vault", "the controller, which runs the install"), ("mac", "a Mac")):
             r = self.w.wk("machine", "install", name, "--yes", "--force")
             self.assertEqual((r.code, r.err, r.calls), (1, "error: %s is %s, and install puts Ubuntu on a Linux server of yours\n" % (name, what), []))
 
-    def test_the_credential_server_is_a_barrier_that_force_crosses(self):
-        r = self.w.wk("machine", "install", "vault", "--yes")
-        self.assertEqual((r.code, r.effects), (1, []))
-        self.assertEqual(r.err, "error: vault is the credential server: its disk holds the store and the claude.ai login, and both go with it\n"
-                                "    --force crosses this\n")
-        forced = self.w.wk("machine", "install", "vault", "--yes", "--force")
-        self.assertEqual((forced.code, played(forced)), (0, [PLAYBOOK[:3] + ["--limit", "vault"] + INSTALL]))
-
-    def test_it_is_typed_on_the_client_and_an_unknown_machine_is_refused(self):
-        self.assertIn("error: wk machine install runs on the client", self.w.wk("machine", "install", "lin", "--yes", on="lin").err)
+    def test_it_is_typed_on_the_controller_and_an_unknown_machine_is_refused(self):
+        self.assertIn("error: wk machine install runs on the controller (vault)", self.w.wk("machine", "install", "lin", "--yes", on="lin").err)
         self.assertIn("error: no machine named nope", self.w.wk("machine", "install", "nope", "--yes").err)
 
-    def test_a_client_without_ansible_is_refused_after_the_question(self):
-        self.w.machines["desk"].on(("ansible-playbook", "--version"), Result(127, "", "not found\n"))
+    def test_a_controller_without_ansible_is_refused_after_the_question(self):
+        self.w.machines["vault"].on(("ansible-playbook", "--version"), Result(127, "", "not found\n"))
         r = self.w.wk("machine", "install", "lin", "--yes")
         self.assertEqual((r.code, r.effects), (4, []))
 
@@ -180,6 +170,10 @@ class TestThePlaybook(unittest.TestCase):
             self.assertRegex(play, r'%s: "{{ wk_install_build }}/' % made)
         self.assertIn('dest: "{{ wk_install_build }}/', tasks()["media.yml"])
 
+    def test_the_bridge_is_the_pinned_websocat_the_controller_role_fetched(self):
+        self.assertIn('argv: ["{{ wk_websocat }}", --binary,', tasks()["media.yml"])
+        self.assertIn('{tool: "{{ wk_websocat }}", asks: --version', tasks()["install.yml"])
+
     def test_the_bmcs_password_reaches_the_bridge_in_a_file_and_no_command_line(self):
         media = tasks()["media.yml"]
         self.assertIn("--basic-auth-file", media)
@@ -199,7 +193,7 @@ class TestThePlaybook(unittest.TestCase):
     def test_a_task_that_carries_a_secret_logs_nothing(self):
         for name, text in tasks().items():
             for task in re.split(r"\n(?= *- name: )", text):
-                if re.search(r"lookup\('ansible.builtin.pipe'|Authorization|autoinstall\.yaml\.j2|content: .*password", task):
+                if re.search(r"wk_store ~|Authorization|autoinstall\.yaml\.j2|content: .*password", task):
                     self.assertIn("no_log: true", task, "%s: %s" % (name, task.strip().splitlines()[0]))
 
     def test_no_secret_is_written_in_the_playbook(self):

@@ -1,0 +1,114 @@
+---
+# The controller's own: `wk` in its bin, which a server's rotation key runs; the pinned websocat an install carries the
+# image to a BMC with; and the injector, the forward proxy that holds the one claude.ai login
+# (lib/wk/creds/injector.py), as a systemd user unit. The injector makes its own CA at its first start.
+
+- name: Make the controller's bin
+  ansible.builtin.file:
+    path: "{{ wk_home }}/bin"
+    state: directory
+    mode: "0755"
+
+- name: Link the checkout that provisions into bin
+  ansible.builtin.file:
+    src: "{{ wk_root }}/wk"
+    dest: "{{ wk_home }}/bin/wk"
+    state: link
+
+- name: Assert this platform has a pinned websocat
+  ansible.builtin.assert:
+    that: wk_websocat_platform in wk_websocat_assets
+    fail_msg: >-
+      websocat {{ wk_websocat_version }} has no pinned binary for {{ inventory_hostname }} ({{ wk_websocat_platform }}):
+      the controller is one of {{ wk_websocat_assets | join(', ') }}
+    quiet: true
+
+- name: Make websocat's directory
+  ansible.builtin.file:
+    path: "{{ wk_websocat | dirname }}"
+    state: directory
+    mode: "0755"
+
+- name: Fetch the pinned websocat
+  ansible.builtin.get_url:
+    url: "https://github.com/vi/websocat/releases/download/v{{ wk_websocat_version }}/websocat.{{ wk_websocat_assets[wk_websocat_platform].target }}"
+    dest: "{{ wk_websocat }}"
+    checksum: "sha256:{{ wk_websocat_assets[wk_websocat_platform].sha256 }}"
+    mode: "0755"
+
+- name: Make the injector's directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0700"
+  loop: ["{{ wk_injector_dir }}", "{{ wk_injector_dir }}/login"]
+
+- name: Copy the injector
+  ansible.builtin.copy:
+    src: "{{ wk_root }}/lib/wk/creds/injector.py"
+    dest: "{{ wk_injector_dir }}/injector.py"
+    mode: "0600"
+  notify: Restart the injector
+
+- name: Ask for the credentials' names
+  ansible.builtin.import_role:
+    name: credentials
+    tasks_from: names
+
+- name: Say why the injector holds no login
+  ansible.builtin.debug:
+    msg: "the controller holds no claude-login, so the injector holds no login: wk key set claude-login, then this again"
+  when: "'claude-login' not in wk_store_names"
+
+# The injector rewrites the login at each refresh, and the stored copy is spent by the first: the login is delivered
+# only when the stored one differs from the one delivered last, whose digest the marker keeps.
+- name: Deliver the stored claude.ai login
+  when: "'claude-login' in wk_store_names"
+  no_log: true
+  diff: false
+  block:
+    - name: Compare it with the login delivered last
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.file', wk_store ~ '/claude-login') | hash('sha256') }}"
+        dest: "{{ wk_injector_dir }}/login/delivered"
+        mode: "0600"
+      check_mode: true
+      register: wk_login_marker
+
+    - name: Deliver the login
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.file', wk_store ~ '/claude-login') | from_json | to_json }}\n"
+        dest: "{{ wk_injector_dir }}/login/.credentials.json"
+        mode: "0600"
+      when: wk_login_marker is changed
+
+    - name: Record the login delivered
+      ansible.builtin.copy:
+        content: "{{ lookup('ansible.builtin.file', wk_store ~ '/claude-login') | hash('sha256') }}"
+        dest: "{{ wk_injector_dir }}/login/delivered"
+        mode: "0600"
+
+- name: Write the injector's unit
+  ansible.builtin.template:
+    src: wk-injector.service.j2
+    dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/wk-injector.service"
+    mode: "0644"
+  notify: Restart the injector
+
+- name: Enable and start the injector
+  ansible.builtin.systemd_service:
+    name: wk-injector.service
+    scope: user
+    enabled: true
+    state: started
+    daemon_reload: true
+  environment: "{{ wk_user_bus }}"
+
+- name: Restart the injector now if its program or unit changed
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for the injector's CA
+  ansible.builtin.wait_for:
+    path: "{{ wk_injector_dir }}/ca.pem"
+    timeout: 60
+  when: not ansible_check_mode

@@ -1,1 +1,1 @@
-from wk.provision.hooks import doctor, gc  # noqa: F401
+from wk.provision.hooks import doctor, gc, pins  # noqa: F401

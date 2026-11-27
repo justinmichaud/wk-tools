@@ -13,10 +13,12 @@ from wk.core.act import barrier, die
 from wk.core.errors import NEEDS_PERSON
 from wk.core.machine import ALIVE
 from wk.core.vars import VARS
-from wk.creds import bao, injector
+from wk.creds import injector, store
 from wk.webkit import PROJECT
 
-INSTALL = "brew install ansible, or your distribution's ansible package"
+INSTALL = "sudo apt install ansible"
+# Ansible dies when the login's locale is one this machine lacks, as a Mac's LANG is on Ubuntu.
+LOCALE = {"LC_ALL": "C.UTF-8"}
 
 
 def head(inv):
@@ -24,22 +26,32 @@ def head(inv):
     return inv.here.run(["git", "-C", inv.root, "rev-parse", "HEAD"]).out.strip()
 
 
+def websocat(home):
+    """The pinned websocat in the controller's cache: install.yml runs it, the controller role fetches it."""
+    return "%s/cache/websocat-%s/websocat" % (home, VARS["wk_websocat_version"])
+
+
+def literals(conf):
+    return {"wk_" + key: value for key, value in conf.values.items()}
+
+
 def host(conf):
-    """A conf as Ansible's variables: its kind and each of its literals, as wk_<key>; its user= is also Ansible's login."""
-    return dict({"wk_" + key: value for key, value in conf.values.items()}, wk_kind=conf.kind,
-                **({"ansible_user": conf.get("user")} if conf.get("user") else {}))
+    """A conf as Ansible's variables: its kind and each of its literals, as wk_<key>; its user= is also Ansible's login,
+    and the controller is this machine, reached without ssh."""
+    return dict(literals(conf), wk_kind=conf.kind, **({"ansible_user": conf.get("user")} if conf.get("user") else {}),
+                **({"ansible_connection": "local"} if conf.kind == "controller" else {}))
 
 
 def inventory(inv):
-    """What Ansible's script inventory plugin reads: a group per kind and each machine's variables. The client is no
-    host: its literals are every host's defaults."""
+    """What Ansible's script inventory plugin reads: a group per kind and each machine's variables. A workstation is no
+    host. The controller's literals are every host's defaults."""
     fleet = inv.fleet
-    servers, vault = [c for c in fleet.machines() if c.kind != "client"], fleet.credential
-    groups = {kind: {"hosts": [c.name for c in servers if c.kind == kind]} for kind in ("linux", "mac", "credential")}
-    shared = dict(host(fleet.here), wk_root=inv.root, wk_commit=head(inv), wk_project=PROJECT, wk_credential_server=vault.name,
-                  wk_bao_addr=bao.address(inv), wk_claude_placeholder=json.loads(injector.placeholder()),
-                  ansible_ssh_common_args=" ".join(ALIVE))
-    return dict(groups, all={"vars": shared}, _meta={"hostvars": {c.name: host(c) for c in servers}})
+    hosts, controller = [c for c in fleet.machines() if c.kind != "workstation"], fleet.controller
+    groups = {kind: {"hosts": [c.name for c in hosts if c.kind == kind]} for kind in ("controller", "linux", "mac")}
+    shared = dict(literals(controller), wk_root=inv.root, wk_commit=head(inv), wk_project=PROJECT, wk_controller=controller.name,
+                  wk_controller_home=inv.wk_home, wk_store=store.directory(inv.wk_home), wk_websocat=websocat(inv.wk_home),
+                  wk_claude_placeholder=json.loads(injector.placeholder()), ansible_ssh_common_args=" ".join(ALIVE))
+    return dict(groups, all={"vars": shared}, _meta={"hostvars": {c.name: host(c) for c in hosts}})
 
 
 def given(inv):
@@ -61,13 +73,13 @@ def roles(inv):
 
 
 def play(inv, limit, tag, book="site.yml", more=()):
-    """Run the playbook `book` against `limit` (None: every server), `tag` alone (None: every role), with `more`
+    """Run the playbook `book` against `limit` (None: every host), `tag` alone (None: every role), with `more`
     options; returns its exit code. Under --dry-run it runs in Ansible's check mode, which changes nothing and
     prints what would."""
     here, files = inv.here, inv.root + "/ansible/"
-    if not here.run(["ansible-playbook", "--version"]).ok:
+    if not here.run(["ansible-playbook", "--version"], env=LOCALE).ok:
         die("this machine has no ansible-playbook, which is what provisions a server\n    %s" % INSTALL, NEEDS_PERSON)
     dry = act.flags.dry_run
     argv = (["ansible-playbook", "-i", files + "inventory.py"] + (["--limit", limit] if limit else []) + (["--tags", tag] if tag else [])
             + list(more) + (["--check", "--diff"] if dry else []) + [files + book])
-    return (here.run if dry else here.act)(argv, stream=True).rc
+    return (here.run if dry else here.act)(argv, stream=True, env=LOCALE).rc

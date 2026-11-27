@@ -78,7 +78,7 @@ class TestContainer(unittest.TestCase):
     def test_create_without_delivered_secrets_is_refused_naming_the_delivery(self):
         podman(self.m, None)
         del self.m.files[ENV_SH]
-        self.assertRaisesRegex(Refused, r"lin has no /home/u/wk/secrets/env.sh for a shell in the container to source\n    `wk key sync` delivers", self.d.create, X)
+        self.assertRaisesRegex(Refused, r"lin has no /home/u/wk/secrets/env.sh for a shell in the container to source\n    `wk machine setup lin --stage credentials`, typed on the controller, delivers it", self.d.create, X)
         self.assertEqual(self.w.journal.effects(), [])
 
     def test_a_run_that_fails_is_refused_with_what_podman_said(self):

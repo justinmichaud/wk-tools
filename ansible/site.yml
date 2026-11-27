@@ -1,22 +1,17 @@
 ---
-# Provisioning, whole. `wk machine setup <server>` runs it against the inventory `wk machine inventory` prints:
-#   ansible-playbook -i ansible/inventory.py --limit <server> [--tags <role>] ansible/site.yml
-# Nothing here needs root: sudo on the owner's servers asks for a password.
+# Provisioning, whole, run on the controller. `wk machine setup <machine>` runs it against the inventory
+# `wk machine inventory` prints:
+#   ansible-playbook -i ansible/inventory.py --limit <machine> [--tags <role>] ansible/site.yml
+# Nothing here needs root. The credentials are files on the controller, read by the `file` lookup.
 
-- name: Converge a server
+- name: Converge a server or the controller
   hosts: all
   gather_facts: false
   vars:
-    wk_home: "{{ ansible_facts['env']['HOME'] }}/wk"
+    wk_home: "{{ wk_controller_home if 'controller' in group_names else ansible_facts['env']['HOME'] ~ '/wk' }}"
     # A user unit is reached over the user's bus, which an ssh session without a login does not name.
     wk_user_bus:
       XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts['user_uid'] }}"
-    # A task delegated to the client runs the client's tools, not the server's.
-    wk_client_env:
-      PATH: "{{ lookup('ansible.builtin.env', 'PATH') }}"
-      BAO_ADDR: "{{ wk_bao_addr }}"
-    # One value of the store, read on the client by the bao CLI as the person: a pipe lookup's command line.
-    wk_bao_get: "BAO_ADDR={{ wk_bao_addr | quote }} bao kv get -field=value -mount=secret wk/"
 
   pre_tasks:
     - name: Gather the facts the roles read
@@ -39,7 +34,7 @@
         argv: [loginctl, enable-linger, "{{ ansible_facts['user_id'] }}"]
         creates: "/var/lib/systemd/linger/{{ ansible_facts['user_id'] }}"
       when: "'mac' not in group_names"
-      tags: [pueue, openbao, injector]
+      tags: [pueue, controller]
 
     - name: Make the directory of the user's units
       ansible.builtin.file:
@@ -47,7 +42,7 @@
         state: directory
         mode: "0755"
       when: "'mac' not in group_names"
-      tags: [pueue, openbao, injector]
+      tags: [pueue, controller]
 
   tasks:
     - name: Run the roles under the login shell's PATH
@@ -57,19 +52,19 @@
         - name: Install wk itself
           ansible.builtin.import_role:
             name: wk
-          when: "'credential' not in group_names"
+          when: "'controller' not in group_names"
           tags: [wk]
 
         - name: Install pueue and keep its daemon running
           ansible.builtin.import_role:
             name: pueue
-          when: "'credential' not in group_names"
+          when: "'controller' not in group_names"
           tags: [pueue]
 
         - name: Make the mirror
           ansible.builtin.import_role:
             name: mirror
-          when: "'credential' not in group_names"
+          when: "'controller' not in group_names"
           tags: [mirror]
 
         - name: Prepare the SDK container's build environment
@@ -81,20 +76,14 @@
         - name: Install the agents
           ansible.builtin.import_role:
             name: agents
-          when: "'credential' not in group_names"
+          when: "'controller' not in group_names"
           tags: [agents]
 
-        - name: Install OpenBao
+        - name: Install websocat and the injector
           ansible.builtin.import_role:
-            name: openbao
-          when: "'credential' in group_names"
-          tags: [openbao]
-
-        - name: Install the injector
-          ansible.builtin.import_role:
-            name: injector
-          when: "'credential' in group_names"
-          tags: [injector]
+            name: controller
+          when: "'controller' in group_names"
+          tags: [controller]
 
         - name: Deliver the credentials
           ansible.builtin.import_role:

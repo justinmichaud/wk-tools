@@ -1,14 +1,14 @@
 """Print the machines as Ansible's inventory: what ansible/inventory.py hands `ansible-playbook`.
 
-One JSON object: a group per kind (linux, mac, credential), each machine's conf as variables
-named wk_<key>, and for every host the client's literals, this checkout's commit and the store's address."""
+One JSON object: a group per kind (controller, linux, mac), each machine's conf as variables named wk_<key>, and for
+every host the controller's literals, its name and wk home, and this checkout's commit."""
 
 import json
 
-from wk.core.decl import Command
+from wk.core.decl import CONTROLLER, Command
 from wk.provision import ansible
 
-COMMAND = Command(where="client", readonly=True)
+COMMAND = Command(on=CONTROLLER, readonly=True)
 
 
 def main(args, inv):

@@ -1,19 +1,16 @@
 ---
-# Installing a server's operating system from nothing, unattended, through its BMC. `wk machine install <server>` runs
+# Installing a server's operating system from nothing, unattended, through its BMC, run on the controller.
+# `wk machine install <server>` runs
 #   ansible-playbook -i ansible/inventory.py --limit <server> [--skip-tags wipe] [--check --diff] ansible/install.yml
 # Ubuntu's own autoinstall does the installing. The image reaches the server as OpenBMC's virtual USB disk: qemu-nbd
-# serves it on the client and websocat carries that to the BMC's virtual-media websocket. Redfish sets the one boot.
+# serves it on the controller and websocat carries that to the BMC's virtual-media websocket. Redfish sets the one boot.
 # The server's disk is erased. `--skip-tags wipe` stops once the server has seen the image: nothing boots, nothing is
-# erased. `--check` asks the store and the BMC and makes nothing.
+# erased. `--check` reads the credentials, asks the BMC and makes nothing.
 
 - name: Install a server through its BMC
   hosts: all
   gather_facts: false
   vars:
-    wk_client_env:
-      PATH: "{{ lookup('ansible.builtin.env', 'PATH') }}"
-      BAO_ADDR: "{{ wk_bao_addr }}"
-    wk_bao_get: "BAO_ADDR={{ wk_bao_addr | quote }} bao kv get -field=value -mount=secret wk/"
     wk_install_name: "{{ inventory_hostname }}"
     wk_install_user: "{{ wk_user | default(lookup('ansible.builtin.env', 'USER')) }}"
     wk_install_image: "{{ wk_ubuntu[wk_os][wk_arch] }}"
@@ -25,9 +22,10 @@
     wk_install_consoles: "{{ ('console=' ~ wk_console ~ ' ') if wk_console is defined else '' }}console=tty0"
     wk_install_console: "ssh -p {{ wk_install_console_port }} {{ wk_install_secret.bmc_user }}@{{ wk_bmc }}"
     wk_install_tools:
-      - {tool: xorriso, asks: -version, brew: xorriso, does: puts the autoinstall file into Ubuntu's image}
-      - {tool: qemu-nbd, asks: --version, brew: qemu, does: serves the image to the BMC}
-      - {tool: websocat, asks: --version, brew: websocat, does: carries the image to the BMC's websocket}
+      - {tool: xorriso, asks: -version, fix: sudo apt install xorriso, does: puts the autoinstall file into Ubuntu's image}
+      - {tool: qemu-nbd, asks: --version, fix: sudo apt install qemu-utils, does: serves the image to the BMC}
+      - {tool: "{{ wk_websocat }}", asks: --version, fix: "wk machine setup {{ wk_controller }} --stage controller",
+         does: carries the image to the BMC's websocket}
     wk_install_needs: >-
       {{ ['bmc/' ~ inventory_hostname ~ '/user', 'bmc/' ~ inventory_hostname ~ '/password', 'tailnet-auth-key', 'tailnet-api-key']
          + (['wifi-ssid', 'wifi-psk'] if wk_wifi is defined else []) }}

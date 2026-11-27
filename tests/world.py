@@ -1,6 +1,6 @@
 """A World: fake machines, a fake clock and a fleet, into which a test types a command.
 
-    w = World()                              # desk (client), lin (linux), mac, box (mac), vault (credential)
+    w = World()                              # desk (workstation), lin (linux), mac, box (mac), vault (controller)
     w.workspace("x", on="lin")               # lin now holds x: its files, and its driver's part made
     r = w.wk("build", "x", "jsc-release", on="lin")    # typed on the server `lin`
     r.code, r.out, r.err                     # exit code and the two streams
@@ -24,8 +24,7 @@ from wk.core.fleet import Fleet
 from wk.core.inv import Inv
 from wk.core.machine import Result
 
-CONFS = {"desk": "kind=client", "lin": "kind=linux", "mac": "kind=mac", "box": "kind=mac",
-         "vault": "kind=credential"}
+CONFS = {"desk": "kind=workstation", "lin": "kind=linux", "mac": "kind=mac", "box": "kind=mac", "vault": "kind=controller"}
 
 
 class Stdin(io.StringIO):

@@ -1,8 +1,8 @@
 """List the machines: one line per machines/<name>.conf, with its kind."""
 
-from wk.core.decl import Command
+from wk.core.decl import CONTROLLER, Command
 
-COMMAND = Command(where="client", readonly=True, default=True)
+COMMAND = Command(on=CONTROLLER, readonly=True, default=True)
 
 
 def main(args, inv):

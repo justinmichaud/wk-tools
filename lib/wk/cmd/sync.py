@@ -5,10 +5,10 @@ The mirror fetches from GitHub; each workspace then fetches `origin` from the mi
 move: no checkout is touched."""
 
 from wk.core.act import info
-from wk.core.decl import Command
+from wk.core.decl import SERVERS, Command
 from wk.workspace import lifecycle, mirror
 
-COMMAND = Command(where="server", takes=("ws?",))
+COMMAND = Command(on=SERVERS, takes=("ws?",))
 
 
 def main(args, inv):

@@ -10,6 +10,7 @@ import concurrent.futures
 import functools
 import json
 
+from wk.core.conf import THE
 from wk.core.errors import Refused, Unreachable
 from wk.core.seams import Workspace
 
@@ -53,15 +54,15 @@ class Fleet:
     def server(self, name):
         conf = self.get(name)
         if not conf.holds_workspaces:
-            raise Refused("%s holds no workspace: it is the %s\n    servers: %s"
-                          % (name, "credential server" if conf.kind == "credential" else "client", ", ".join(c.name for c in self.servers())))
+            raise Refused("%s holds no workspace: it is %s\n    servers: %s"
+                          % (name, THE[conf.kind], ", ".join(c.name for c in self.servers())))
         return conf
 
     @property
-    def credential(self):
-        found = [c for c in self.machines() if c.kind == "credential"]
+    def controller(self):
+        found = [c for c in self.machines() if c.kind == "controller"]
         if not found:
-            raise Refused("no credential server: set kind=credential in one machines/<name>.conf")
+            raise Refused("no controller: set kind=controller in one machines/<name>.conf")
         return found[0]
 
     def machine(self, name):

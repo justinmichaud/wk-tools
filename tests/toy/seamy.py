@@ -1,8 +1,8 @@
 """Use every seam a lane provides."""
-from wk.core.decl import Command
+from wk.core.decl import SERVERS, Command
 from wk.core.seams import READY, Workspace
 
-COMMAND = Command(where="server", takes=("ws",))
+COMMAND = Command(on=SERVERS, takes=("ws",))
 
 
 def main(args, inv):

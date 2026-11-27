@@ -4,13 +4,11 @@
     rule.check(value)           # None, or why the value is not one
     rule.probe(value, ctx)      # (OK | BAD | UNKNOWN, one line); UNKNOWN is an issuer that did not answer
 
-`ctx` is a Context: the store's other values, the time, and the client's litellm_url."""
+`ctx` is a Context: the store's other values, the time, and the controller's litellm_url."""
 
-import base64
 import dataclasses
 import json
 import re
-import struct
 import urllib.parse
 from typing import Callable, Optional
 
@@ -25,11 +23,8 @@ UPSTREAM = PROJECT["upstream"][len("https://github.com/"):-len(".git")]
 BUGZILLA = PROJECT["bugzilla"]
 ANTHROPIC_API = "https://api.anthropic.com"
 TAILNET_API = "https://api.tailscale.com/api/v2"
-DEPLOY = "deploy-key/"
 BMC = re.compile(r"bmc/[a-z0-9][a-z0-9-]*/(user|password)")
-REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 WORD = re.compile(r"[A-Za-z0-9_.-]+")
-KEY_MAGIC = b"openssh-key-v1\0"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -135,7 +130,7 @@ def litellm_models(key, url):
 
 def litellm_key_probe(value, ctx):
     if not ctx.litellm:
-        return UNKNOWN, "no endpoint to ask: set litellm_url= in the client's machines/<name>.conf"
+        return UNKNOWN, "no endpoint to ask: set litellm_url= in the controller's machines/<name>.conf"
     status, doc = litellm_models(value, ctx.litellm)
     if status == 200:
         return OK, "%s accepts it and serves it %d model(s)" % (ctx.litellm, len(doc.get("data") or []))
@@ -201,61 +196,15 @@ def unasked(why):
     return lambda value, ctx: (UNKNOWN, why)
 
 
-def public_key(private):
-    """(cipher, "type base64") of an OpenSSH private key; ValueError when it is not one."""
-    lines = private.strip().splitlines()
-    if len(lines) < 3 or lines[0] != "-----BEGIN OPENSSH PRIVATE KEY-----" or lines[-1] != "-----END OPENSSH PRIVATE KEY-----":
-        raise ValueError("it is not an OpenSSH private key (`ssh-keygen -t ed25519 -N '' -f <file>` makes one)")
-    try:
-        blob = base64.b64decode("".join(lines[1:-1]), validate=True)
-        if not blob.startswith(KEY_MAGIC):
-            raise ValueError
-        fields, at = [], len(KEY_MAGIC)
-        for field in range(5):      # cipher, kdf, kdf options, the key count (a bare uint32), the public key
-            size = 0 if field == 3 else struct.unpack_from(">I", blob, at)[0]
-            fields.append(blob[at + 4:at + 4 + size])
-            at += 4 + size
-        kind = fields[4][4:4 + struct.unpack_from(">I", fields[4])[0]]
-    except (ValueError, struct.error):
-        raise ValueError("its OpenSSH private key does not parse")
-    return fields[0].decode(), "%s %s" % (kind.decode(), base64.b64encode(fields[4]).decode())
-
-
-def deploy_key_check(value):
-    try:
-        cipher, _ = public_key(value)
-    except ValueError as e:
-        return str(e)
-    return None if cipher == "none" else "it has a passphrase, and nothing on a server can type one: make it with -N ''"
-
-
-def deploy_key_probe(repo):
-    def probe(value, ctx):
-        token = ctx.get("github-token")
-        if not token:
-            return UNKNOWN, "GitHub is asked with github-token: `wk key set github-token`"
-        status, doc = ask("GET", "%s/repos/%s/keys?per_page=100" % (GITHUB_API, repo), token)
-        if status != 200:
-            return unanswered("GET /repos/%s/keys" % repo, status, doc if isinstance(doc, dict) else {})
-        public = public_key(value)[1]
-        found = [k for k in doc if " ".join(k.get("key", "").split()[:2]) == public]
-        if not found:
-            return BAD, "it is not a deploy key of %s: add `%s` at https://github.com/%s/settings/keys/new, allowing write access" % (repo, public, repo)
-        if found[0].get("read_only"):
-            return BAD, "it is registered on %s read-only, so a push is refused: re-add it allowing write access" % repo
-        return OK, "registered on %s with write access" % repo
-    return probe
-
-
 INSTALL_ASKS = "it is first used by `wk machine install`, whose --dry-run asks the store and the BMC"
 RULES = (
     Rule("github-user", "your GitHub account name, which git-webkit sends with the token", one_word, github_user_probe),
-    Rule("github-token", "a classic GitHub personal access token (scope public_repo), for git-webkit and gh", github_token_check, github_token_probe),
+    Rule("github-token", "a classic GitHub personal access token (scope public_repo), for git-webkit, gh and the forks' deploy keys", github_token_check, github_token_probe),
     Rule("bugzilla-user", "your %s login, an email address" % BUGZILLA, bugzilla_user_check,
          lambda value, ctx: bugzilla_probe(value, ctx.get("bugzilla-password"))),
     Rule("bugzilla-password", "your %s password, which git-webkit sends with bugzilla-user" % BUGZILLA, bugzilla_password_check,
          lambda value, ctx: bugzilla_probe(ctx.get("bugzilla-user"), value)),
-    Rule("litellm-key", "pi's model key for the client's litellm_url; it is the one key an agent can read", litellm_key_check, litellm_key_probe),
+    Rule("litellm-key", "pi's model key for the controller's litellm_url; it is the one key an agent can read", litellm_key_check, litellm_key_probe),
     Rule("claude-login", "the claude.ai login document (.credentials.json) of a `claude` logged in for this purpose alone; "
          "only the injector holds it", claude_login_check, claude_login_probe),
     Rule("tailnet-auth-key", "the auth key a new server joins the tailnet with", tailnet_key_check, tailnet_key_probe),
@@ -263,11 +212,10 @@ RULES = (
          tailnet_api_key_check, tailnet_api_key_probe),
     Rule("wifi-ssid", "the name of the WiFi network a server with wifi= in its conf is installed onto", one_line, unasked(INSTALL_ASKS)),
     Rule("wifi-psk", "that WiFi network's passphrase", wifi_psk_check, unasked(INSTALL_ASKS)),
-    Rule("sudo-password", "the password sudo asks for on a server about to be reinstalled; an installed server asks for none",
+    Rule("sudo-password", "the password sudo asks for on a server whose system `wk machine install` replaces; one it installed asks for none",
          one_line, unasked(INSTALL_ASKS)),
 )
 BMC_WHAT = "one half of the login of a server's BMC, which `wk machine install` installs it through"
-DEPLOY_WHAT = "the ssh key that pushes to one repository: a private key with no passphrase, its public half a deploy key there"
 
 
 def find(name):
@@ -275,15 +223,12 @@ def find(name):
     for rule in RULES:
         if rule.name == name:
             return rule
-    if name.startswith(DEPLOY) and REPO.fullmatch(name[len(DEPLOY):]):
-        return Rule(name, DEPLOY_WHAT, deploy_key_check, deploy_key_probe(name[len(DEPLOY):]))
     if BMC.fullmatch(name):
         return Rule(name, BMC_WHAT, one_line, unasked(INSTALL_ASKS))
-    die("no credential is named %s: the names are %s, %s<owner>/<repo> and bmc/<machine>/user|password"
-        % (name, ", ".join(r.name for r in RULES), DEPLOY))
+    die("no credential is named %s: the names are %s and bmc/<machine>/user|password" % (name, ", ".join(r.name for r in RULES)))
 
 
 def named(names):
-    """The credentials among the store's `names` that are named for a repository or a machine."""
-    return [name for name in names if BMC.fullmatch(name) or name.startswith(DEPLOY) and REPO.fullmatch(name[len(DEPLOY):])]
+    """The credentials among the store's `names` that are named for a machine."""
+    return [name for name in names if BMC.fullmatch(name)]
 

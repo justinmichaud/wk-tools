@@ -9,12 +9,12 @@ once the build is queued, and `wk status <ws> --wait` is the outcome."""
 
 from wk import webkit
 from wk.core.act import barrier, info
-from wk.core.decl import Command, Opt
+from wk.core.decl import SERVERS, Command, Opt
 from wk.core.errors import BUSY
 from wk.tasks import launch
 from wk.workspace import lifecycle
 
-COMMAND = Command(where="server", takes=("ws", "preset?"),
+COMMAND = Command(on=SERVERS, takes=("ws", "preset?"),
                   opts=(Opt("--detach", "return once the build is queued"), Opt("--kill", "kill this workspace's build")))
 
 

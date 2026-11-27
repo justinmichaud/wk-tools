@@ -9,11 +9,11 @@ the outcome."""
 
 from wk import webkit
 from wk.core.act import barrier, die
-from wk.core.decl import Command, Opt
+from wk.core.decl import SERVERS, Command, Opt
 from wk.tasks import launch
 from wk.workspace import lifecycle
 
-COMMAND = Command(where="server", takes=("ws",),
+COMMAND = Command(on=SERVERS, takes=("ws",),
                   opts=(Opt("--preset", "the build to test, not the last one", "preset"), Opt("--detach", "return once the run is queued")),
                   tail=True)
 

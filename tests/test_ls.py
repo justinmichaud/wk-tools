@@ -10,7 +10,7 @@ class TestLsOnAServer(unittest.TestCase):
     def setUp(self):
         self.w = World(here="lin")
 
-    def test_json_is_the_contract_the_client_reads(self):
+    def test_json_is_the_contract_a_workstation_reads(self):
         self.w.workspace("x")
         r = self.w.wk("ls", "--json")
         self.assertEqual((r.code, json.loads(r.out)),
@@ -51,7 +51,7 @@ class TestLsOnAServer(unittest.TestCase):
         self.assertEqual((self.w.wk("ls").effects, self.w.state()), ([], before))
 
 
-class TestLsOnTheClient(unittest.TestCase):
+class TestLsOnAWorkstation(unittest.TestCase):
     def setUp(self):
         self.w = World()
         self.w.workspace("b", on="lin")
@@ -77,3 +77,6 @@ class TestLsOnTheClient(unittest.TestCase):
         self.assertEqual((r.code, r.out.split()), (4, ["b", "lin", "container", "ready"]))
         self.assertEqual(r.err, "warning: box did not answer: its workspaces are unknown\nwarning: mac did not answer: its workspaces are unknown\n")
         self.assertEqual(json.loads(self.w.wk("ls", "--json").out)["unanswered"], ["box", "mac"])
+
+    def test_the_controller_asks_every_server_too(self):
+        self.assertEqual(self.w.wk("ls", on="vault").out, self.w.wk("ls").out)

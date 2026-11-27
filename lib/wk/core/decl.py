@@ -3,9 +3,9 @@
     \"\"\"One line saying what it does.
 
     The rest of the docstring is what `wk <cmd> -h` prints.\"\"\"
-    from wk.core.decl import Command, Opt
+    from wk.core.decl import SERVERS, Command, Opt
 
-    COMMAND = Command(where="server", takes=("ws", "preset?"), opts=(Opt("--detach", "return at once"),),
+    COMMAND = Command(on=SERVERS, takes=("ws", "preset?"), opts=(Opt("--detach", "return at once"),),
                       tail=True, destructive=False)
 
     def main(args, inv):        # args.ws, args.preset (None when left out), args.detach, args.tail
@@ -14,8 +14,8 @@
 The module's name is the command: build.py is `wk build`, and key_set.py is the verb `wk key set` (so a command's
 name has no underscore). One verb of a group may say `default=True`: it runs when the group is typed bare.
 
-where    "client": fleet-wide, refused on a server.  "server": runs on the server that holds the workspace, and is
-         refused anywhere else, naming the servers.  "any": runs where it is typed.
+on       the kinds of machine it runs on; typed on another kind it is refused, naming where it runs. None: anywhere,
+         a machine with no conf too.
 takes    positionals in order; a trailing `?` makes one optional. The one named `ws` is the workspace.
 opts     Opt(flag, help) is a boolean, Opt(flag, help, "name") takes a value; args.<flag without dashes>.
 tail     the words after `--` belong to another program: args.tail.
@@ -39,9 +39,14 @@ class Opt:
         return self.flag.lstrip("-").replace("-", "_")
 
 
+SERVERS = ("linux", "mac")
+CONTROLLER = ("controller",)
+WORKSTATION = ("workstation",)
+
+
 @dataclasses.dataclass(frozen=True)
 class Command:
-    where: str = "any"
+    on: tuple = None
     takes: tuple = ()
     opts: tuple = ()
     tail: bool = False

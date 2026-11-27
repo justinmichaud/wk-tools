@@ -1,7 +1,7 @@
 """machines/<name>.conf: one machine, as `key=value` lines of one literal word each.
 
-    kind=linux            client | linux | mac | credential      (required)
-    user=me               the login ssh uses there, when it is not the client's   (optional)
+    kind=linux            workstation | controller | linux | mac      (required)
+    user=me               the login ssh uses there, when it is not this one's      (optional)
 
 The file is named for the machine's tailnet name, which is also its hostname. Any other lowercase key is a literal
 a lane reads with `conf.get("key")`."""
@@ -12,7 +12,8 @@ import re
 
 from wk.core.errors import Refused
 
-KINDS = ("client", "linux", "mac", "credential")
+KINDS = ("workstation", "controller", "linux", "mac")
+THE = {"workstation": "a workstation", "controller": "the controller", "linux": "a Linux server", "mac": "a Mac server"}
 DRIVERS = {"linux": "container", "mac": "plain"}
 NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
 LINE = re.compile(r"([a-z][a-z0-9_]*)=(.*)")
@@ -77,8 +78,7 @@ def load(directory):
             raise ConfError("%s: a machine is named for its tailnet name: lowercase letters, digits and hyphens" % path)
         with open(path) as f:
             confs[name] = parse(name, f.read(), path)
-    for kind in ("client", "credential"):
-        some = [c.name for c in confs.values() if c.kind == kind]
-        if len(some) > 1:
-            raise ConfError("%s: %s say kind=%s and only one machine may" % (directory, " and ".join(some), kind))
+    some = [c.name for c in confs.values() if c.kind == "controller"]
+    if len(some) > 1:
+        raise ConfError("%s: %s say kind=controller and only one machine may" % (directory, " and ".join(some)))
     return confs

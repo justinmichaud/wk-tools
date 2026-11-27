@@ -8,7 +8,7 @@ import sys
 
 from wk.core import act, decl
 from wk.core.clock import Clock
-from wk.core.conf import load
+from wk.core.conf import THE, load
 from wk.core.errors import Refused, Usage
 from wk.core.fleet import Fleet
 from wk.core.inv import Inv
@@ -44,6 +44,12 @@ def resolve(commands, words):
     raise Usage("wk %s needs one of: %s" % (words[0], ", ".join(key[1] for key in verbs)))
 
 
+def where(fleet, kinds):
+    """The kinds, and the machines of those kinds: "a Linux server or a Mac server (lin, mac)"."""
+    names = [c.name for c in fleet.machines() if c.kind in kinds]
+    return "%s (%s)" % (" or ".join(THE[kind] for kind in kinds), ", ".join(names) or "machines/ has none")
+
+
 def help_text(key, module):
     cmd = module.COMMAND
     width = max([len(o.flag) for o in cmd.opts] or [0])
@@ -71,14 +77,9 @@ def main(argv, inv):
             return 0
         args = decl.parse(cmd, rest, argv[cut + 1:] if cut < len(argv) else None)
         flags.readonly, flags.destructive = cmd.readonly, cmd.destructive
-        here = inv.fleet.here if cmd.where != "any" else None
-        if cmd.where == "client" and here.holds_workspaces:
-            raise Refused("wk %s runs on the client, and this is the server %s: type it there"
-                          % (" ".join(key), inv.fleet.hostname))
-        if cmd.where == "server" and not here.holds_workspaces:
-            raise Refused("wk %s runs on the server that holds the workspace, and this is %s, which holds none: type it there\n"
-                          "    `wk ls` says which server holds it; the servers are %s"
-                          % (" ".join(key), inv.fleet.hostname, ", ".join(c.name for c in inv.fleet.servers())))
+        if cmd.on is not None and inv.fleet.here.kind not in cmd.on:
+            raise Refused("wk %s runs on %s, and this is %s, %s: type it there"
+                          % (" ".join(key), where(inv.fleet, cmd.on), inv.fleet.hostname, THE[inv.fleet.here.kind]))
         return module.main(args, inv) or 0
     except Usage as e:
         sys.stderr.write("error: %s\n%s\n" % (e, usage))

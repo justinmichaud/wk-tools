@@ -41,7 +41,7 @@ class TestBuild(unittest.TestCase):
         self.assertEqual([(t["label"], list(t["status"])) for t in w.pueue["lin"].tasks.values()], [("x:build:gtk-release", ["Running"])])
 
     def test_a_machines_own_cmake_flags_are_the_last_cmake_arguments(self):
-        w = held(confs={"desk": "kind=client", "lin": "kind=linux\ncmake=-DUSE_LIBBACKTRACE=OFF"})
+        w = held(confs={"desk": "kind=workstation", "lin": "kind=linux\ncmake=-DUSE_LIBBACKTRACE=OFF"})
         w.wk("build", "x", "jsc-release", "--detach")
         argv = added(w, "lin")[0]
         self.assertEqual((argv[-2][-22:], argv[-1]), ("-DUSE_LIBBACKTRACE=OFF", "--makeargs=-j16"))
@@ -132,7 +132,7 @@ class TestBuild(unittest.TestCase):
         w.workspace("stopped")
         w.made.discard(("lin", "stopped"))
         for name, said in (("half", "error: workspace half on lin is not made (broken): wait for its `wk new`, or `wk new half` remakes a broken one\n"),
-                           ("stopped", "error: workspace stopped on lin is broken, not ready\n    `wk enter stopped`, typed on the client, starts its container\n"
+                           ("stopped", "error: workspace stopped on lin is broken, not ready\n    `wk enter stopped` starts its container\n"
                                        "    --force crosses this\n"),
                            ("gone", "error: no workspace named gone on lin: `wk ls` lists them, `wk new gone` makes it\n")):
             r = w.wk("build", name, "jsc-release")

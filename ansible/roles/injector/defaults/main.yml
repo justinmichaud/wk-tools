@@ -1,2 +1,0 @@
----
-wk_injector_dir: "{{ wk_home }}/injector"

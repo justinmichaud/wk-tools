@@ -1,6 +1,6 @@
 """`wk ai`: one agent session in a workspace, started as `wk enter` starts a command: the login's own shell, in the
-checkout, inside the container on Linux. The agents themselves are the playbook's agents role's to install, under
-<wk_home>/cache/agents."""
+checkout, inside the container on Linux, once the controller has rotated the server's push keys. The agents themselves
+are the playbook's agents role's to install, under <wk_home>/cache/agents."""
 
 import json
 
@@ -8,6 +8,7 @@ from wk import creds
 from wk.core.act import die, info
 from wk.core.errors import NEEDS_PERSON
 from wk.core.vars import VARS
+from wk.creds import rotation
 from wk.workspace import lifecycle
 
 # On a server of the owner's an agent asks permission for nothing (DESIGN.md, Trust).
@@ -46,10 +47,11 @@ def start(inv, agent, name, tail):
     conf, m, ws = inv.fleet.here, inv.here, lifecycle.ready(inv, name)
     argv, extra = START[agent](inv, ws, inv.wk_home)
     if not m.exists(argv[0]):
-        die("%s is not installed on %s: there is no %s\n    %swk machine setup %s"
-            % (agent, conf.name, argv[0], NEEDS[agent] and NEEDS[agent] % conf.name, conf.name))
+        die("%s is not installed on %s: there is no %s\n    %swk machine setup %s, typed on %s"
+            % (agent, conf.name, argv[0], NEEDS[agent] and NEEDS[agent] % conf.name, conf.name, inv.fleet.controller.name))
     if agent == "claude":
         trust(m, ws.path + "/src")
+    rotation.renew(inv)
     info("starting %s in %s" % (agent, name))
     env = ["env", "WK_WORKSPACE=" + ws.name] + ["%s=%s" % kv for kv in sorted(extra.items())]
     return m.act(inv.driver(ws.driver, m).enter_argv(ws, env + argv + tail, tty=tty), stream=True, tty=tty).rc

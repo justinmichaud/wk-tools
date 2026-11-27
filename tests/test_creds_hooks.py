@@ -1,4 +1,4 @@
-"""The credentials lane in `wk doctor` and `wk gc`, and what it gives an agent session."""
+"""The credentials lane in `wk doctor`, and what it gives an agent session."""
 
 import unittest
 
@@ -11,12 +11,12 @@ from wk.creds import hooks, net
 
 HOME = "/home/u/wk"
 INJECTOR = ("GET", "http://vault:3128/")
-STORE = ("GET", "http://vault:8200/v1/sys/seal-status")
-UNSEALED = (200, {"initialized": True, "sealed": False})
+FIX = "wk machine setup vault --stage controller"
+STORE_FIX = "mkdir -m 700 %s/secrets, then `wk key set <name>` for each" % HOME
 HELD = (200, b"wk injector\nlogin held\n")
 DELIVERED = {HOME + "/claude-login/.credentials.json": "-rw-------", HOME + "/injector-ca.pem": "-rw-r--r--",
              HOME + "/secrets": "drwx------", HOME + "/secrets/deploy": "drwx------", HOME + "/secrets/env.sh": "-rw-------",
-             HOME + "/secrets/ssh_config": "-rw-------", "/home/u/.pi/agent/models.json": "-rw-------"}
+             HOME + "/secrets/ssh_config": "-rw-------", HOME + "/secrets/rotate-key": "-rw-------", "/home/u/.pi/agent/models.json": "-rw-------"}
 
 
 class TestDoctor(unittest.TestCase):
@@ -31,44 +31,35 @@ class TestDoctor(unittest.TestCase):
 
     def test_a_server_with_everything_delivered_is_one_ok_row(self):
         for name in ("lin", "mac"):
-            self.assertEqual(self.rows(name, DELIVERED), [DoctorRow("credentials", OK, "", "wk key sync %s" % name)])
+            self.assertEqual(self.rows(name, DELIVERED), [DoctorRow("credentials", OK, "", "wk machine setup %s --stage credentials, typed on vault" % name)])
 
-    def test_what_is_absent_or_moded_otherwise_is_named_and_key_sync_is_the_remedy(self):
+    def test_what_is_absent_or_moded_otherwise_is_named_and_the_credentials_role_is_the_remedy(self):
         modes = dict(DELIVERED, **{HOME + "/secrets": "drwxr-xr-x"})
-        del modes[HOME + "/secrets/env.sh"]
-        self.assertEqual(self.rows("lin", modes), [DoctorRow("credentials", MISSING, "absent or wrongly moded: %s/secrets, %s/secrets/env.sh"
-                                                             % (HOME, HOME), "wk key sync lin")])
+        del modes[HOME + "/secrets/rotate-key"]
+        self.assertEqual(self.rows("lin", modes), [DoctorRow("credentials", MISSING, "absent or wrongly moded: %s/secrets, %s/secrets/rotate-key"
+                                                             % (HOME, HOME), "wk machine setup lin --stage credentials, typed on vault")])
 
-    def test_the_credential_server_answers_for_the_injector_and_the_store_and_is_delivered_nothing(self):
-        fix = "wk machine setup vault"
-        self.assertEqual(self.rows("vault", {}, {INJECTOR: HELD, STORE: UNSEALED}),
-                         [DoctorRow("injector", OK, "it holds the claude.ai login", fix),
-                          DoctorRow("openbao", OK, "HTTP 200, initialized True, sealed False", fix)])
+    def test_the_controller_answers_for_its_secrets_directory_and_the_injector_and_is_delivered_nothing(self):
+        self.assertEqual(self.rows("vault", {HOME + "/secrets": "drwx------"}, {INJECTOR: HELD}),
+                         [DoctorRow("secrets", OK, "", STORE_FIX), DoctorRow("injector", OK, "it holds the claude.ai login", FIX)])
+
+    def test_a_secrets_directory_that_is_absent_or_open_to_others_is_missing(self):
+        for modes in ({}, {HOME + "/secrets": "drwxr-xr-x"}):
+            self.assertEqual(self.rows("vault", modes, {INJECTOR: HELD})[0],
+                             DoctorRow("secrets", MISSING, "%s/secrets is absent or not mode 0700" % HOME, STORE_FIX))
 
     def test_an_injector_without_a_login_or_something_else_at_its_port_is_missing(self):
         for body, detail in ((b"wk injector: a forward proxy\nthis machine holds no claude.ai login: `wk key set claude-login`\n",
                               "this machine holds no claude.ai login: `wk key set claude-login`"),
                              (b"<html>nginx</html>", "something else answers there"), (b"", "something else answers there")):
-            self.assertEqual(self.rows("vault", {}, {INJECTOR: (200, body), STORE: UNSEALED})[0],
-                             DoctorRow("injector", MISSING, detail, "wk machine setup vault"))
+            self.assertEqual(self.rows("vault", {}, {INJECTOR: (200, body)})[1], DoctorRow("injector", MISSING, detail, FIX))
 
-    def test_a_sealed_or_uninitialised_store_or_one_that_answers_an_error_is_missing(self):
-        for answer, detail in (((200, {"initialized": True, "sealed": True}), "HTTP 200, initialized True, sealed True"),
-                               ((200, {"initialized": False, "sealed": True}), "HTTP 200, initialized False, sealed True"),
-                               ((503, b"busy"), "HTTP 503, initialized None, sealed None")):
-            self.assertEqual(self.rows("vault", {}, {INJECTOR: HELD, STORE: answer})[1],
-                             DoctorRow("openbao", MISSING, detail, "wk machine setup vault"))
-
-    def test_a_service_that_does_not_answer_is_unknown_never_missing(self):
-        rows = self.rows("vault", {}, {INJECTOR: net.NoAnswer("timed out"), STORE: net.NoAnswer("refused")})
-        self.assertEqual([(r.status, r.detail) for r in rows], [(UNKNOWN, "http://vault:3128/ did not answer (timed out)"),
-                                                                    (UNKNOWN, "http://vault:8200/v1/sys/seal-status did not answer (refused)")])
+    def test_an_injector_that_does_not_answer_is_unknown_never_missing(self):
+        row = self.rows("vault", {}, {INJECTOR: net.NoAnswer("timed out")})[1]
+        self.assertEqual((row.status, row.detail), (UNKNOWN, "http://vault:3128/ did not answer (timed out)"))
 
     def test_a_workspace_has_no_row_of_its_own(self):
         self.assertEqual(hooks.doctor(self.inv, self.w.confs["lin"], self.w.workspace("x")), [])
-
-    def test_the_pinned_openbao_is_kept_by_gc(self):
-        self.assertEqual(hooks.pins(self.inv, self.w.confs["vault"]), ["openbao-2.7.3"])
 
 
 class TestWhatASessionTakes(unittest.TestCase):

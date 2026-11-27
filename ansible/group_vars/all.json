@@ -18,16 +18,12 @@
       "pueued": "18c377cdccb7714c5545d90cf18fcc592b17ae15d5900fe8dab2f8ca9288d6f1"
     }
   },
-  "wk_openbao_version": "2.7.3",
-  "wk_openbao_port": 8200,
-  "wk_openbao_assets": {
+  "wk_forks": ["justinmichaud/WebKit", "justinmichaud/WPEWebKit", "justinmichaud/wk-tools"],
+  "wk_websocat_version": "1.14.0",
+  "wk_websocat_assets": {
     "Linux x86_64": {
-      "target": "linux_amd64",
-      "sha256": "131df9a21cf3dd2dff47107110b369c9974cbdaa482bcbc723b81b3403c68ecd"
-    },
-    "Linux aarch64": {
-      "target": "linux_arm64",
-      "sha256": "b505b07af4206fdf0e81b747fcb7e9e63f2c2b05e26ead973cce62d0ed07d0e0"
+      "target": "x86_64-unknown-linux-musl",
+      "sha256": "33a80fcbf2313e3c6e816ddafec333c1a04cc34464d4ba4970d938275775a12f"
     }
   },
   "wk_injector_port": 3128,

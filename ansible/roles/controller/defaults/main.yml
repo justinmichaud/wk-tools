@@ -1,0 +1,3 @@
+---
+wk_injector_dir: "{{ wk_home }}/injector"
+wk_websocat_platform: "{{ ansible_facts['system'] }} {{ ansible_facts['architecture'] }}"

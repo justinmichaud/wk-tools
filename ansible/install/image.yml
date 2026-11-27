@@ -4,7 +4,7 @@
 # stops casper reading the whole medium to check it, which at the media's pace would take longer than the install.
 # What follows `---` there is the installer's and, by curtin's rule, the installed system's too: the consoles.
 
-- name: Make the client's cache
+- name: Make the controller's cache
   ansible.builtin.file:
     path: "{{ wk_install_stock | dirname }}"
     state: directory

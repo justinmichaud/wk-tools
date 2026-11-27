@@ -29,7 +29,7 @@ def node(m):
 def doctor(inv, conf, ws):
     if not conf.holds_workspaces or ws:
         return []
-    m, fix = inv.machine(conf.name), "wk machine setup %s" % conf.name
+    m, fix = inv.machine(conf.name), "wk machine setup %s, typed on %s" % (conf.name, inv.fleet.controller.name)
     home = inv.wk_home_on(m)
 
     def row(name, paths, detail):

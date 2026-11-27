@@ -1,5 +1,5 @@
 ---
-# wk itself: the client's commit at <wk_home>/tools, `wk` on the login shell's PATH, and the layout.
+# wk itself: the controller's commit at <wk_home>/tools, `wk` on the login shell's PATH, and the layout.
 # python3 and git are asserted, not installed: no package manager is used.
 
 - name: Ask python3 for its version
@@ -37,7 +37,7 @@
   loop_control:
     label: "{{ item.name }}"
 
-- name: Check out the client's commit
+- name: Check out the controller's commit
   ansible.builtin.git:
     repo: "{{ wk_repo }}"
     dest: "{{ wk_home }}/tools"

@@ -5,12 +5,12 @@ so is any name while a server does not answer, since it cannot be shown to be fr
 remakes the workspace from nothing."""
 
 from wk.core.act import barrier, die
-from wk.core.decl import Command
+from wk.core.decl import SERVERS, Command
 from wk.core.errors import NEEDS_PERSON
 from wk.core.seams import CREATING
 from wk.workspace import lifecycle
 
-COMMAND = Command(where="server", takes=("ws",))
+COMMAND = Command(on=SERVERS, takes=("ws",))
 
 
 def main(args, inv):

@@ -18,7 +18,7 @@ class TestConf(unittest.TestCase):
     def test_the_kind_decides_the_driver_and_who_holds_workspaces(self):
         self.assertEqual([(k, conf.parse("m", "kind=" + k).driver) for k in ("linux", "mac")],
                          [("linux", "container"), ("mac", "plain")])
-        self.assertEqual([conf.parse("m", text).holds_workspaces for text in ("kind=mac", "kind=client", "kind=credential")],
+        self.assertEqual([conf.parse("m", text).holds_workspaces for text in ("kind=mac", "kind=workstation", "kind=controller")],
                          [True, False, False])
 
     def refused(self, text, why):
@@ -41,8 +41,8 @@ class TestConf(unittest.TestCase):
         self.refused("kind=linux\nkind=mac", "machines/m.conf:2: kind is set twice: delete one line")
 
     def test_a_missing_or_unknown_kind_is_refused_naming_the_kinds(self):
-        self.refused("user=me", "machines/m.conf: kind=None is not a kind: set kind= to one of client, linux, mac, credential")
-        self.refused("kind=peer", "machines/m.conf: kind=peer is not a kind: set kind= to one of client, linux, mac, credential")
+        self.refused("user=me", "machines/m.conf: kind=None is not a kind: set kind= to one of workstation, controller, linux, mac")
+        self.refused("kind=peer", "machines/m.conf: kind=peer is not a kind: set kind= to one of workstation, controller, linux, mac")
 
 
 class TestLoad(unittest.TestCase):
@@ -57,9 +57,9 @@ class TestLoad(unittest.TestCase):
 
     def test_every_conf_file_is_a_machine_and_other_files_are_not(self):
         self.put("b.conf", "kind=mac")
-        self.put("a-1.conf", "kind=client")
+        self.put("a-1.conf", "kind=workstation")
         self.put("notes.txt", "not a conf")
-        self.assertEqual({n: c.kind for n, c in conf.load(self.dir).items()}, {"a-1": "client", "b": "mac"})
+        self.assertEqual({n: c.kind for n, c in conf.load(self.dir).items()}, {"a-1": "workstation", "b": "mac"})
 
     def test_a_missing_directory_is_refused_naming_the_remedy(self):
         with self.assertRaisesRegex(conf.ConfError, "no machines directory at .*/absent: create it"):
@@ -70,25 +70,24 @@ class TestLoad(unittest.TestCase):
         with self.assertRaisesRegex(conf.ConfError, "My_Mac.conf: a machine is named for its tailnet name"):
             conf.load(self.dir)
 
-    def test_two_clients_or_two_credential_servers_are_refused_naming_both(self):
-        self.put("a.conf", "kind=client")
-        self.put("b.conf", "kind=client")
-        with self.assertRaisesRegex(conf.ConfError, "a and b say kind=client and only one machine may"):
-            conf.load(self.dir)
-        self.put("b.conf", "kind=credential")
-        self.put("c.conf", "kind=credential")
-        with self.assertRaisesRegex(conf.ConfError, "b and c say kind=credential and only one machine may"):
+    def test_two_controllers_are_refused_naming_both_and_two_workstations_are_not(self):
+        self.put("a.conf", "kind=workstation")
+        self.put("b.conf", "kind=workstation")
+        self.assertEqual(sorted(conf.load(self.dir)), ["a", "b"])
+        self.put("b.conf", "kind=controller")
+        self.put("c.conf", "kind=controller")
+        with self.assertRaisesRegex(conf.ConfError, "b and c say kind=controller and only one machine may"):
             conf.load(self.dir)
 
     def test_the_confs_in_the_tree_load(self):
         from tests import ROOT
-        self.assertEqual({c.kind for c in conf.load(os.path.join(ROOT, "machines")).values()}, {"client", "linux", "credential"})
+        self.assertEqual({c.kind for c in conf.load(os.path.join(ROOT, "machines")).values()}, {"controller", "linux", "mac"})
 
 
 class TestFleet(unittest.TestCase):
     def setUp(self):
-        self.confs = {n: conf.parse(n, t) for n, t in (("desk", "kind=client"), ("lin", "kind=linux"), ("mac", "kind=mac"),
-                                                       ("vault", "kind=credential"))}
+        self.confs = {n: conf.parse(n, t) for n, t in (("desk", "kind=workstation"), ("lin", "kind=linux"), ("mac", "kind=mac"),
+                                                       ("vault", "kind=controller"))}
         self.fakes = {n: Fake(n) for n in self.confs}
         self.fleet = Fleet(lambda: self.confs, "lin", self.fakes.get, self.fakes["lin"], workers=4)
 
@@ -111,11 +110,18 @@ class TestFleet(unittest.TestCase):
         fleet.machines(), fleet.here
         self.assertEqual(loads, [1])
 
-    def test_the_credential_server_is_the_one_with_the_role(self):
-        self.assertEqual(self.fleet.credential.name, "vault")
+    def test_the_controller_is_the_one_of_that_kind(self):
+        self.assertEqual(self.fleet.controller.name, "vault")
         del self.confs["vault"]
-        with self.assertRaisesRegex(Refused, "no credential server: set kind=credential"):
-            self.fleet.credential
+        with self.assertRaisesRegex(Refused, "no controller: set kind=controller"):
+            self.fleet.controller
+
+    def test_a_server_is_asked_for_by_name_and_another_kind_is_refused_naming_the_servers(self):
+        self.assertEqual(self.fleet.server("mac").name, "mac")
+        for name, what in (("vault", "the controller"), ("desk", "a workstation")):
+            with self.assertRaises(Refused) as e:
+                self.fleet.server(name)
+            self.assertEqual(str(e.exception), "%s holds no workspace: it is %s\n    servers: lin, mac" % (name, what))
 
     def test_asking_reaches_every_server_and_an_unreachable_one_is_unknown_not_empty(self):
         self.fakes["lin"].files["/f"] = ""

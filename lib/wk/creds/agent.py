@@ -8,8 +8,8 @@ LOGIN_DIR = "claude-login"
 
 def injector(inv):
     """The injector's "host:port" on the tailnet."""
-    vault = inv.fleet.credential
-    return "%s:%s" % (vault.name, vault.get("injector_port", VARS["wk_injector_port"]))
+    controller = inv.fleet.controller
+    return "%s:%s" % (controller.name, controller.get("injector_port", VARS["wk_injector_port"]))
 
 
 def agent_env(inv):

@@ -3,12 +3,12 @@
 Refused while a task of the workspace is queued or running, and while a `wk new` is making it."""
 
 from wk.core.act import barrier, confirm, die, info
-from wk.core.decl import Command
+from wk.core.decl import SERVERS, Command
 from wk.core.errors import BUSY
 from wk.core.seams import ABSENT, CREATING
 from wk.workspace import lifecycle
 
-COMMAND = Command(where="server", takes=("ws",), destructive=True)
+COMMAND = Command(on=SERVERS, takes=("ws",), destructive=True)
 
 
 def main(args, inv):

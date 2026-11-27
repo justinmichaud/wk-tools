@@ -9,7 +9,7 @@ from wk.core.machine import Result
 
 HOME = "/home/u/wk"
 FILES = os.path.join(ROOT, "ansible", "roles", "agents")
-FIX = "wk machine setup lin"
+FIX = "wk machine setup lin, typed on vault"
 
 
 def make(node="v22.19.0\n"):
@@ -41,7 +41,7 @@ class TestDoctor(unittest.TestCase):
         self.assertEqual([row[1:] for row in self.rows(w, "lin")], [["ok", "", ""], ["ok", "v22.19.0", ""]] + [["ok", "", ""]] * 2)
 
     def test_node_is_missing_when_absent_or_old_and_unknown_when_its_version_cannot_be_read(self):
-        fix = "install node >= 22.19 and npm on lin, then: wk machine setup lin"
+        fix = "install node >= 22.19 and npm on lin, then: wk machine setup lin, typed on vault"
         for node, row in ((Result(127), ["node", "missing", "no node runs", fix]), ("v20.1.0\n", ["node", "missing", "node v20.1.0 is older than 22.19", fix]),
                           ("?\n", ["node", "unknown", "node --version printed '?'", fix])):
             self.assertEqual(self.rows(make(node=node), "lin")[1], row)

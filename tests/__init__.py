@@ -8,7 +8,7 @@ import sys
 import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MACHINE_TOOLS = ("ssh", "scp", "podman", "pueue", "pueued", "tailscale", "bao", "ansible-playbook")
+MACHINE_TOOLS = ("ssh", "scp", "podman", "pueue", "pueued", "tailscale", "zed", "ansible-playbook")
 REACHED = 97
 REAL_PATH = os.environ["PATH"]      # where a test marked live finds a real tool
 

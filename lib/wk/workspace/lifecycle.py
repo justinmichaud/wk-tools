@@ -68,7 +68,7 @@ def ready(inv, name):
     """The ready workspace `name` on this server: what a build, a run and an agent session start from."""
     ws = need(inv, name)
     if ws.state != READY:
-        barrier("workspace %s on %s is %s, not ready\n    `wk enter %s`, typed on the client, starts its container" % (name, ws.server, ws.state, name))
+        barrier("workspace %s on %s is %s, not ready\n    `wk enter %s` starts its container" % (name, ws.server, ws.state, name))
     return ws
 
 

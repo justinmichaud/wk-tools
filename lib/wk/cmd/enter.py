@@ -5,12 +5,12 @@
 code; it gets a terminal when wk has one. A container that is not running is started first."""
 
 from wk.core.act import die
-from wk.core.decl import Command
+from wk.core.decl import SERVERS, Command
 from wk.core.errors import NEEDS_PERSON
 from wk.core.seams import READY
 from wk.workspace import lifecycle
 
-COMMAND = Command(where="server", takes=("ws",), tail=True)
+COMMAND = Command(on=SERVERS, takes=("ws",), tail=True)
 
 
 def main(args, inv):

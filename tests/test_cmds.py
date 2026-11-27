@@ -61,12 +61,12 @@ class TestSelftest(unittest.TestCase):
 
 class TestMachineLs(unittest.TestCase):
     def test_it_lists_each_machine_with_its_kind(self):
-        r = World().wk("machine", "ls")
+        r = World(here="vault").wk("machine", "ls")
         self.assertEqual(r.out.splitlines()[:2] + r.out.splitlines()[-1:],
-                         ["box                  mac", "desk                 client", "vault                credential"])
+                         ["box                  mac", "desk                 workstation", "vault                controller"])
 
     def test_machine_alone_is_machine_ls(self):
-        w = World()
+        w = World(here="vault")
         self.assertEqual(w.wk("machine").out, w.wk("machine", "ls").out)
 
 

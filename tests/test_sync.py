@@ -68,8 +68,8 @@ class TestSync(unittest.TestCase):
         dry_run_is_the_plan(self, bare, "sync")
 
 
-class TestSyncOnTheClient(unittest.TestCase):
+class TestSyncOnAWorkstation(unittest.TestCase):
     def test_it_is_refused_naming_the_servers(self):
         r = make().wk("sync")
         self.assertEqual((r.code, r.calls), (1, []))
-        self.assertIn("error: wk sync runs on the server that holds the workspace, and this is desk", r.err)
+        self.assertIn("error: wk sync runs on a Linux server or a Mac server (box, lin, mac), and this is desk, a workstation", r.err)

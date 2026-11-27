@@ -1,11 +1,10 @@
-"""The doctor rows that belong to no other lane: wk itself on a server, and what the client needs."""
+"""The doctor rows that belong to no other lane: wk itself on a server, and what the controller needs."""
 
 import shlex
 
 from wk.core import hooks
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
 from wk.core.machine import TIMED_OUT
-from wk.creds import bao
 from wk.provision import ansible
 
 PYTHON = (3, 9)
@@ -33,17 +32,14 @@ def prerequisites(m):
     return [python, tool(m, "git", ["git", "--version"], remedy)]
 
 
-def commit(inv, m, home, remedy):
-    """The commit checked out at tools/ is this checkout's, with no change to its tree."""
-    mine, sha = ansible.head(inv), m.run(["git", "-C", home + "/tools", "rev-parse", "HEAD"])
-    theirs = "no checkout"
-    if sha.ok:
-        theirs = sha.out.strip() + (" with changes" if m.run(["git", "-C", home + "/tools", "status", "--porcelain"]).out.strip() else "")
-    if not mine:
-        return DoctorRow("wk commit", UNKNOWN, "%s has no commit to compare with" % inv.root, remedy)
-    if theirs == mine:
-        return DoctorRow("wk commit", OK, mine)
-    return DoctorRow("wk commit", MISSING, "%s has %s, and this checkout is at %s" % (m.name, theirs, mine), remedy)
+def commit(m, home, remedy):
+    """tools/ is a checkout of a commit, with no change to its tree: what the controller gave it."""
+    sha = m.run(["git", "-C", home + "/tools", "rev-parse", "HEAD"])
+    if not sha.ok:
+        return DoctorRow("wk commit", MISSING, "%s has no checkout of wk" % home, remedy)
+    if m.run(["git", "-C", home + "/tools", "status", "--porcelain"]).out.strip():
+        return DoctorRow("wk commit", MISSING, "%s with changes: it runs what the controller did not give it" % sha.out.strip(), remedy)
+    return DoctorRow("wk commit", OK, sha.out.strip())
 
 
 def path(m, home, remedy):
@@ -77,17 +73,19 @@ def clock(inv, m):
 
 
 def server(inv, conf):
-    m, remedy = inv.machine(conf.name), "wk machine setup %s" % conf.name
+    m, remedy = inv.machine(conf.name), "wk machine setup %s, typed on %s" % (conf.name, inv.fleet.controller.name)
     home = inv.wk_home_on(m)
-    return prerequisites(m) + [commit(inv, m, home, remedy), path(m, home, remedy), layout(m, home, remedy),
+    return prerequisites(m) + [commit(m, home, remedy), path(m, home, remedy), layout(m, home, remedy),
                                disk(m, home), clock(inv, m)]
 
 
-def client(inv):
-    m, addr = inv.here, bao.address(inv)
-    return [tool(m, "ssh", ["ssh", "-V"], "install OpenSSH"),
-            tool(m, "git", ["git", "--version"], "install git"),
+def controller(inv, conf):
+    m, apt = inv.here, "sudo apt install %s"
+    pinned = ansible.websocat(inv.wk_home)
+    return [tool(m, "ssh", ["ssh", "-V"], apt % "openssh-client"),
+            tool(m, "git", ["git", "--version"], apt % "git"),
             tool(m, "tailscale", ["tailscale", "status", "--peers=false"], "install Tailscale, then `tailscale up`", TAILSCALE_TIMEOUT),
-            tool(m, "ansible", ["ansible-playbook", "--version"], ansible.INSTALL),
-            tool(m, "bao", ["bao", "version"], "brew install openbao, or your distribution's openbao package"),
-            tool(m, "store login", ["bao", "token", "lookup", "-format=json"], "BAO_ADDR=%s bao login" % addr, env={"BAO_ADDR": addr})]
+            tool(m, "ansible", ["ansible-playbook", "--version"], ansible.INSTALL, env=ansible.LOCALE),
+            tool(m, "xorriso", ["xorriso", "-version"], apt % "xorriso"),
+            tool(m, "qemu-nbd", ["qemu-nbd", "--version"], apt % "qemu-utils"),
+            DoctorRow("websocat", OK if m.exists(pinned) else MISSING, pinned, "wk machine setup %s --stage controller" % conf.name)]

@@ -111,7 +111,7 @@ class TestNew(unittest.TestCase):
         r = self.w.wk("new", "x")
         self.assertEqual((r.code, r.effects), (0, WIPE + MAKE))
 
-    def test_it_is_refused_on_the_client(self):
+    def test_it_is_refused_on_a_workstation(self):
         r = World().wk("new", "x")
         self.assertEqual((r.code, r.calls), (1, []))
-        self.assertIn("error: wk new runs on the server that holds the workspace, and this is desk", r.err)
+        self.assertIn("error: wk new runs on a Linux server or a Mac server (box, lin, mac), and this is desk, a workstation", r.err)

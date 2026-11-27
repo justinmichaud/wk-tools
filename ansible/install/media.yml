@@ -1,7 +1,7 @@
 ---
 # The image as the server's USB disk. OpenBMC's /vm/0/0 websocket runs an NBD client behind the BMC's USB gadget and
 # expects the far end to be the NBD server (fixed newstyle, the export named "", read-only), which is qemu-nbd on the
-# client; websocat carries the bytes. The BMC's login reaches websocat in a file.
+# controller; the pinned websocat carries the bytes. The BMC's login reaches websocat in a file.
 
 - name: Serve the image and carry it to the BMC
   delegate_to: localhost
@@ -34,7 +34,7 @@
 
     - name: Carry the image to the BMC
       ansible.builtin.command:
-        argv: [websocat, --binary, --insecure, --basic-auth-file, "{{ wk_install_build }}/bmc-login",
+        argv: ["{{ wk_websocat }}", --binary, --insecure, --basic-auth-file, "{{ wk_install_build }}/bmc-login",
                "wss://{{ wk_bmc }}/vm/0/0", "unix:{{ wk_install_socket }}"]
       async: "{{ (wk_install_minutes + wk_install_boot_minutes) * 60 }}"
       poll: 0

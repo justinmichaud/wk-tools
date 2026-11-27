@@ -1,8 +1,8 @@
 """List the names of the credentials the store holds, one to a line."""
 
-from wk.core.decl import Command
+from wk.core.decl import CONTROLLER, Command
 
-COMMAND = Command(where="client", readonly=True)
+COMMAND = Command(on=CONTROLLER, readonly=True)
 
 
 def main(args, inv):

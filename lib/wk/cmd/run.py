@@ -4,11 +4,11 @@
 runs the port's MiniBrowser instead. `--preset` chooses another build. The exit code is the program's."""
 
 from wk import webkit
-from wk.core.decl import Command, Opt
+from wk.core.decl import SERVERS, Command, Opt
 from wk.tasks import launch
 from wk.workspace import lifecycle
 
-COMMAND = Command(where="server", takes=("ws",), opts=(Opt("--preset", "the build to run, not the last one", "preset"),), tail=True)
+COMMAND = Command(on=SERVERS, takes=("ws",), opts=(Opt("--preset", "the build to run, not the last one", "preset"),), tail=True)
 
 
 def main(args, inv):

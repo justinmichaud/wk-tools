@@ -6,17 +6,20 @@ store or Ansible run is in that. "Live" means it ran on a real machine.
 
 ## Pass 1
 
-The fleet the live column is about: tolken (the client, macOS), alce (the credential server, Ubuntu 26.04 x86_64,
-1 core, 1 GB), moose (a Linux server, Ubuntu 24.04 aarch64, 80 cores, podman 4.9.3). There is no Mac server in it.
+The fleet the live column is about: alce (the controller, Ubuntu 26.04 x86_64, 1 core, 1 GB), moose (a Linux server,
+Ubuntu 24.04 aarch64, 80 cores, podman 4.9.3), tolken (a Mac server, not yet provisioned). There is no workstation
+conf. The verifications below were typed on tolken while it was the client of the previous design.
 
 | Piece | Implemented | Unit-tested | Verified live |
 | --- | --- | --- | --- |
 | Launcher, dispatcher, declared commands, `--yes`, `--force`, exit codes | yes | yes | yes |
 | `--dry-run` | yes | yes | no |
-| A server command typed on the client or the credential server is refused naming the servers | yes | yes | no |
-| Machine confs (`kind`, `user`), the fleet, `wk machine ls`, `wk machine inventory` | yes | yes | yes |
+| A command typed on a kind of machine it does not run on is refused, naming where it runs | yes | yes | no |
+| Machine confs (`kind`: workstation, controller, linux, mac; `user`), the fleet, `wk machine ls`, `wk machine inventory` on the controller | yes | yes | no |
 | `wk help`, `wk selftest` | yes | yes | yes |
-| The mirror, `wk new`, `wk rm`, `wk ls`, `wk enter -- <command>` | yes | yes, and against a real local git | yes: moose |
+| The mirror, `wk new`, `wk rm`, `wk ls` on a server, `wk enter -- <command>` | yes | yes, and against a real local git | yes: moose |
+| `wk ls` on a workstation or the controller, every server asked | yes | yes | no |
+| `wk zed <ws>` on a workstation | yes | yes | no |
 | `wk enter` as the person's door: a shell, a command, with and without a terminal | yes | yes | yes: moose (credentials sourced) |
 | `wk sync` typed by a person | yes | yes | no (`wk sync` ran as the playbook's first fetch) |
 | The `plain` driver | yes | yes | no |
@@ -26,26 +29,27 @@ The fleet the live column is about: tolken (the client, macOS), alce (the creden
 | Job sizing | yes | yes | yes: 78 jobs on moose |
 | `wk build`, `wk run`, `wk test` for `jsc-release` | yes | yes | yes: moose |
 | The other presets (`jsc-debug`, `gtk-*`, `wpe-release`, the Mac's) | yes | yes | no |
-| The store's client (the `bao` CLI): the refusal without a login | yes | yes | yes |
-| `wk key check`, `wk key ls` against a store with a login | yes | yes | yes |
-| `wk key set` | yes | yes | no: the owner typed it, not this verification |
-| Each credential's rule and live probe | yes | yes, HTTP scripted | yes: `github-user`, `github-token`, the three deploy keys, `tailnet-api-key`, `claude-login`; no for `bugzilla-*`, `litellm-key` |
+| The credentials as files under the controller's `secrets/`, 0600 in 0700 directories: `wk key set`, `wk key ls` | yes | yes, against real files | no |
+| `wk key check` | yes | yes | no |
+| Each credential's rule and live probe | yes | yes, HTTP scripted | yes: `github-user`, `github-token`, `tailnet-api-key`, `claude-login`; no for `bugzilla-*`, `litellm-key` |
+| `wk key rotate <server>`: a writable deploy key per fork, the server's older ones deleted, the private halves as JSON | yes | yes, HTTP and ssh-keygen scripted | no |
+| `wk ai` asking the controller for a rotation through the rotation key, and writing the keys; a failed one a barrier | yes | yes | no |
 | The injector: started, its CA made, answering with no login | yes | yes | yes: alce |
 | The injector: TLS for Claude under its CA, the placeholder recognised, a refresh asked for on first use | yes | yes, on loopback sockets | yes: alce, from moose |
 | The injector: the login replaced, a refreshed login kept | yes | yes, on loopback sockets | yes: alce, a refresh on first use and the login replaced on requests from moose |
 | `wk ai claude`: the session starts, with and without a terminal, and reaches the injector | yes | yes | no |
 | `wk ai claude`: an answer, Remote Control | yes | yes | no |
 | `wk ai pi` | yes | yes | its refusal alone: no server has pi |
-| `wk machine setup`: the inventory and the `ansible-playbook` line | yes | yes | yes |
+| `wk machine setup` on the controller: the inventory (the controller local) and the `ansible-playbook` line under `LC_ALL=C.UTF-8` | yes | yes | no |
 | The playbook: `wk`, `pueue`, `mirror`, `sdk`, `agents` (Claude Code) | yes | its syntax, by Ansible | yes: moose |
 | The playbook: pi | yes | its syntax | no: neither server's login `PATH` has node >= 22.19 |
-| The playbook: `openbao`, `injector` | yes | its syntax | yes: alce, with no login to deliver |
-| The playbook: `credentials` | yes | its syntax | yes: moose with the store's secrets (deploy keys, `env.sh`, `ssh_config`); no for pi's `models.json` |
+| The playbook: `controller` (`bin/wk`, the pinned websocat, the injector) | yes | its syntax | no |
+| The playbook: `credentials` (the rotation, the rotation key and its `authorized_keys` line, `env.sh`, `ssh_config`) | yes | its syntax | no |
 | The playbook on a Mac (launchd) | yes | its syntax | no |
-| `wk doctor`, `wk doctor <ws>`, `wk gc` | yes | yes | yes |
-| `wk machine install`: the refusals, the question, the `ansible-playbook` line, `--rehearse`, `--dry-run` | yes | yes | yes: `--dry-run` and `--rehearse` on moose |
+| `wk doctor`, `wk doctor <ws>`, `wk gc`, each on the machine typed on | yes | yes | no |
+| `wk machine install` on the controller: the refusals, the question, the `ansible-playbook` line, `--rehearse`, `--dry-run` | yes | yes | no |
 | The rules for `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `sudo-password`, `bmc/<machine>/user` and `password` | yes | yes, HTTP scripted | no |
-| The install playbook: the store and the BMC asked, the image made, attached through the BMC, seen from the server, detached | yes | its YAML is parsed and its autoinstall template rendered by a real Ansible | yes: moose |
+| The install playbook: the credentials read, the BMC asked, the image made, attached through the BMC by the pinned websocat, seen from the server, detached | yes | its YAML is parsed and its autoinstall template rendered by a real Ansible | no |
 | The install playbook: what is tagged `wipe` (the boot override, the restart, the installer, the tailnet node, the first ssh) | yes | its YAML is parsed | no |
 
 ## Verified live
@@ -82,16 +86,16 @@ What the live runs corrected: the unit directory is made before a unit is writte
 
 ## Needs a person
 
-- The claude.ai login is the one the previous tree's injector on the client held; its refresh token ends in 26 days, and the previous tree's copy stops working at the injector's next refresh. A login made for this purpose alone replaces it: `wk key set claude-login`, `wk machine setup alce --stage injector`.
+- The claude.ai login is the one the previous tree's injector on the client held; its refresh token ends in 26 days, and the previous tree's copy stops working at the injector's next refresh. A login made for this purpose alone replaces it: `wk key set claude-login`, `wk machine setup alce --stage controller`.
 - pi is installed on no server. moose's node is 18.19.1 and pi needs 22.19.
-- `bugzilla-password` is not in the store, and the client's conf has no `litellm_url=`: Bugzilla through `git-webkit` and pi's `models.json` wait for them.
+- `bugzilla-password` is not on the controller, and its conf has no `litellm_url=`: Bugzilla through `git-webkit` and pi's `models.json` wait for them.
 
 ## Not yet verified live
 
-- TODO: `wk key set` typed in this verification: `kv put ... value=-` from stdin.
+- TODO: `wk key set` typed on alce, each name moved from the store to `secrets/`, and `wk key rotate` against the forks.
 - TODO: pi's `models.json`, `gh` (the SDK image has none), a pull request, a Bugzilla login with `bugzilla-password`.
 - TODO: the injector's delivered-digest marker leaving a refreshed login alone at the next setup; the hosts Remote Control uses beside the injector's three.
-- TODO: a reboot of each server: OpenBao unsealed with no person and its listener once Tailscale is up, the injector, pueued under its unit on moose.
+- TODO: a reboot of each machine: the injector on alce, pueued under its unit on moose.
 - TODO: `wk machine setup --dry-run`: what Ansible's check mode reports on a bare and on a provisioned server.
 - TODO: a Mac server: the playbook there, pueued as a launchd agent (`launchctl bootstrap gui/<uid>` with no one at the console), the Xcode presets and where they leave `jsc`.
 - TODO: `wk sync` typed by a person, `wk stop --tasks`, `wk build --kill`, `wk status --follow`, a build that fails, a build killed over its budget.
@@ -103,7 +107,7 @@ What the live runs corrected: the unit directory is made before a unit is writte
 - TODO: install: `shutdown --reboot +1` itself, with `sudo-password` in the store (it holds none yet); `PowerForceRestart` for a server that does not answer.
 - TODO: install: the image under UEFI after `xorriso -boot_image any replay`, and the boot menu on the serial console.
 - TODO: install: subiquity reading `/autoinstall.yaml` from a USB disk with `autoinstall` on the kernel command line: no question asked, and its restart at the end asking for no key.
-- TODO: install: the bridge for the length of an install: the firmware's and the installer's reads at the measured pace, and the client awake throughout.
+- TODO: install: the bridge for the length of an install: the firmware's and the installer's reads at the measured pace, and the controller awake throughout.
 - TODO: install: WiFi: the installer's own system has no `wpasupplicant`, so it installs from the medium (`apt: fallback: offline-install`) and puts `wpasupplicant` on the disk from the image's pool; the conf's interface name under Ubuntu's kernel; cloud-init waiting for the WiFi network on the first boot before it installs packages.
 - TODO: install: Ubuntu's generic kernel on the server's hardware (the machine now runs a vendor kernel).
 - TODO: install: cloud-init's `apt.sources` with `signed-by=$KEY_FILE` for Tailscale's repository, and `tailscale up --auth-key=file:` under the stored key.

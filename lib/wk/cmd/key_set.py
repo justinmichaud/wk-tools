@@ -1,21 +1,21 @@
-"""Store one credential in OpenBao, after checking it.
+"""Store one credential on the controller, after checking it: the file <wk home>/secrets/<name>, mode 0600.
 
 The value is read from standard input, or asked for without echo at a terminal; it is never an argument. A value of
-several lines (a deploy key, the claude.ai login) is piped in: `wk key set deploy-key/<owner>/<repo> < keyfile`.
-It is stored unless its shape is wrong or its issuer refuses it (`--force` stores what an issuer refuses); an issuer
-that does not answer is said so.
+several lines (the claude.ai login) is piped in: `wk key set claude-login < .credentials.json`. The file is replaced
+whole, never half-written. It is stored unless its shape is wrong or its issuer refuses it (`--force` stores what an
+issuer refuses); an issuer that does not answer is said so.
 
 The names: github-user, github-token, bugzilla-user, bugzilla-password, litellm-key, claude-login, tailnet-auth-key,
-tailnet-api-key, wifi-ssid, wifi-psk, deploy-key/<owner>/<repo> and bmc/<machine>/user, bmc/<machine>/password.
+tailnet-api-key, wifi-ssid, wifi-psk, sudo-password and bmc/<machine>/user, bmc/<machine>/password.
 `wk key check` says what each is for. litellm-key is the one an agent session can read."""
 
 import getpass
 
 from wk.core.act import barrier, die, info, warn
-from wk.core.decl import Command
+from wk.core.decl import CONTROLLER, Command
 from wk.creds import rules
 
-COMMAND = Command(where="client", takes=("name",))
+COMMAND = Command(on=CONTROLLER, takes=("name",))
 
 
 def main(args, inv):
@@ -31,4 +31,4 @@ def main(args, inv):
     if verdict == rules.UNKNOWN:
         warn("%s is stored unverified: %s" % (rule.name, detail))
     store.put(rule.name, value)
-    info("stored %s%s; `wk key sync` delivers it" % (rule.name, ": " + detail if verdict == rules.OK else ""))
+    info("stored %s%s; `wk machine setup <server>` delivers it" % (rule.name, ": " + detail if verdict == rules.OK else ""))

@@ -3,10 +3,10 @@
 One row per credential: its name, present or absent, and the verdict of a live probe that writes nothing: ok, bad,
 or unknown when the issuer did not answer or cannot be asked. It exits 1 when a credential is bad."""
 
-from wk.core.decl import Command
+from wk.core.decl import CONTROLLER, Command
 from wk.creds import rules
 
-COMMAND = Command(where="client", readonly=True, default=True)
+COMMAND = Command(on=CONTROLLER, readonly=True, default=True)
 
 
 def main(args, inv):

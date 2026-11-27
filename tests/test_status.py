@@ -153,10 +153,10 @@ class TestStatus(unittest.TestCase):
             r = w.wk("status", "z", flag)
             self.assertEqual((r.code, r.err), (1, "error: z has run no task: `wk build z <preset>` starts one\n"))
 
-    def test_it_is_refused_on_the_client_naming_the_servers(self):
+    def test_it_is_refused_on_a_workstation_naming_the_servers(self):
         r = world(here="desk").wk("status")
         self.assertEqual((r.code, r.calls), (1, []))
-        self.assertIn("error: wk status runs on the server that holds the workspace, and this is desk", r.err)
+        self.assertIn("error: wk status runs on a Linux server or a Mac server (box, lin, mac), and this is desk, a workstation", r.err)
 
 
 class TestStop(unittest.TestCase):

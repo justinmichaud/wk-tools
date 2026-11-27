@@ -1,4 +1,4 @@
-"""`wk machine setup` and `wk key sync` are fronts to Ansible: the inventory made of the confs, and the one command line."""
+"""`wk machine setup` is a front to Ansible: the inventory made of the confs, and the one command line."""
 
 import json
 import os
@@ -11,64 +11,66 @@ import tempfile
 import unittest
 
 from tests import REAL_PATH, ROOT
-from tests.provision import SHA, checkout, client
+from tests.provision import SHA, checkout, controller
 from tests.world import World
 from wk.core.conf import NAME
 from wk.core.machine import Result
 from wk.creds import injector
+from wk.provision.ansible import LOCALE
 from wk.webkit import PROJECT
 
-CONFS = {"desk": "kind=client\nlitellm_url=https://llm.example/v1\ndefault_server=lin", "lin": "kind=linux\nuser=jm",
-         "mac": "kind=mac\ncmake=/opt/cmake", "vault": "kind=credential\ninjector_port=3129"}
+CONFS = {"desk": "kind=workstation", "lin": "kind=linux\nuser=jm", "mac": "kind=mac\ncmake=/opt/cmake",
+         "vault": "kind=controller\ninjector_port=3129\nlitellm_url=https://llm.example/v1"}
 PLAYBOOK = ["ansible-playbook", "-i", ROOT + "/ansible/inventory.py"]
 SITE = [ROOT + "/ansible/site.yml"]
-ROLES = ["agents", "credentials", "injector", "mirror", "openbao", "pueue", "sdk", "wk"]
-INSTALL = "    brew install ansible, or your distribution's ansible package\n"
+ROLES = ["agents", "controller", "credentials", "mirror", "pueue", "sdk", "wk"]
+INSTALL = "    sudo apt install ansible\n"
 
 
 def make(**how):
-    w = World(confs=CONFS)
-    checkout(w.machines["desk"], **how)
-    client(w.machines["desk"])
-    w.machines["desk"].on(PLAYBOOK, "")
+    w = World(here="vault", confs=CONFS)
+    checkout(w.machines["vault"], **how)
+    controller(w.machines["vault"])
+    w.machines["vault"].on(PLAYBOOK, "")
     return w
 
 
 def played(run):
     """The ansible-playbook lines a command ran, as argvs: the question whether it is installed, then the play."""
-    return [line[len("[desk] "):].split() for line in run.calls if line.startswith("[desk] ansible-playbook")]
+    return [line[len("[vault] "):].split() for line in run.calls if line.startswith("[vault] ansible-playbook")]
 
 
 class TestInventory(unittest.TestCase):
     def setUp(self):
         self.inventory = json.loads(make().wk("machine", "inventory").out)
 
-    def test_there_is_a_group_per_kind_and_the_client_is_no_host(self):
+    def test_there_is_a_group_per_kind_and_a_workstation_is_no_host(self):
         self.assertEqual({name: group["hosts"] for name, group in self.inventory.items() if "hosts" in group},
-                         {"linux": ["lin"], "mac": ["mac"], "credential": ["vault"]})
+                         {"linux": ["lin"], "mac": ["mac"], "controller": ["vault"]})
 
-    def test_a_machines_kind_and_literals_are_its_variables_and_its_user_is_ansibles_login(self):
+    def test_a_machines_kind_and_literals_are_its_variables_its_user_is_ansibles_login_and_the_controller_is_local(self):
         self.assertEqual(self.inventory["_meta"]["hostvars"], {
             "lin": {"wk_kind": "linux", "wk_user": "jm", "ansible_user": "jm"},
             "mac": {"wk_kind": "mac", "wk_cmake": "/opt/cmake"},
-            "vault": {"wk_kind": "credential", "wk_injector_port": "3129"}})
+            "vault": {"wk_kind": "controller", "wk_injector_port": "3129", "wk_litellm_url": "https://llm.example/v1", "ansible_connection": "local"}})
 
-    def test_every_host_gets_the_clients_literals_the_commit_the_store_and_the_project(self):
+    def test_every_host_gets_the_controllers_literals_name_and_wk_home_the_commit_and_the_project(self):
+        home = "/home/u/wk"
         self.assertEqual(self.inventory["all"]["vars"], {
-            "wk_kind": "client", "wk_litellm_url": "https://llm.example/v1", "wk_default_server": "lin",
-            "wk_root": ROOT, "wk_commit": SHA, "wk_project": PROJECT, "wk_credential_server": "vault", "wk_bao_addr": "http://vault:8200",
+            "wk_injector_port": "3129", "wk_litellm_url": "https://llm.example/v1",
+            "wk_root": ROOT, "wk_commit": SHA, "wk_project": PROJECT, "wk_controller": "vault", "wk_controller_home": home,
+            "wk_store": home + "/secrets", "wk_websocat": home + "/cache/websocat-1.14.0/websocat",
             "wk_claude_placeholder": json.loads(injector.placeholder()),
             "ansible_ssh_common_args": "-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"})
 
-    def test_it_changes_nothing_and_is_typed_on_the_client(self):
+    def test_the_controllers_wk_home_is_where_wk_runs_from(self):
+        inventory = json.loads(make().wk("machine", "inventory", env={"WK_HOME": "/srv/wk"}).out)["all"]["vars"]
+        self.assertEqual((inventory["wk_controller_home"], inventory["wk_store"]), ("/srv/wk", "/srv/wk/secrets"))
+
+    def test_it_changes_nothing_and_is_typed_on_the_controller(self):
         w = make()
         self.assertEqual(w.wk("machine", "inventory").effects, [])
-        self.assertIn("error: wk machine inventory runs on the client", w.wk("machine", "inventory", on="lin").err)
-
-    def test_a_fleet_with_no_credential_server_is_refused_naming_the_remedy(self):
-        w = World(confs={"desk": "kind=client", "lin": "kind=linux"})
-        checkout(w.machines["desk"])
-        self.assertEqual(w.wk("machine", "inventory").err, "error: no credential server: set kind=credential in one machines/<name>.conf\n")
+        self.assertIn("error: wk machine inventory runs on the controller (vault), and this is lin", w.wk("machine", "inventory", on="lin").err)
 
 
 class TestMachineSetup(unittest.TestCase):
@@ -79,8 +81,8 @@ class TestMachineSetup(unittest.TestCase):
         self.assertEqual(played(self.w.wk("machine", "setup", "vault"))[1], PLAYBOOK + ["--limit", "vault"] + SITE)
         r = self.w.wk("machine", "setup", "lin")
         self.assertEqual((r.code, played(r)), (0, [["ansible-playbook", "--version"], PLAYBOOK + ["--limit", "lin"] + SITE]))
-        self.assertEqual(r.effects, ["[desk] " + " ".join(PLAYBOOK + ["--limit", "lin"] + SITE)])
-        self.w.machines["desk"].on(PLAYBOOK, Result(2))
+        self.assertEqual(r.effects, ["[vault] " + " ".join(PLAYBOOK + ["--limit", "lin"] + SITE)])
+        self.w.machines["vault"].on(PLAYBOOK, Result(2))
         self.assertEqual(self.w.wk("machine", "setup", "lin").code, 2)
 
     def test_stage_runs_the_role_of_that_name_alone(self):
@@ -95,8 +97,13 @@ class TestMachineSetup(unittest.TestCase):
         r = self.w.wk("machine", "setup", "lin", "--dry-run")
         self.assertEqual((r.code, played(r)[1], r.effects, r.plan), (0, PLAYBOOK + ["--limit", "lin", "--check", "--diff"] + SITE, [], []))
 
-    def test_a_client_without_ansible_is_refused_naming_how_to_install_it(self):
-        self.w.machines["desk"].on(("ansible-playbook", "--version"), Result(127, "", "sh: ansible-playbook: command not found\n"))
+    def test_every_ansible_playbook_runs_in_a_locale_the_controller_has(self):
+        self.w.wk("machine", "setup", "lin")
+        self.assertEqual([call.env for call in self.w.machines["vault"].calls if call.argv[0] == "ansible-playbook"], [LOCALE] * 2)
+        self.assertEqual(LOCALE, {"LC_ALL": "C.UTF-8"})
+
+    def test_a_controller_without_ansible_is_refused_naming_how_to_install_it(self):
+        self.w.machines["vault"].on(("ansible-playbook", "--version"), Result(127, "", "sh: ansible-playbook: command not found\n"))
         r = self.w.wk("machine", "setup", "lin")
         self.assertEqual((r.code, r.err, r.effects),
                          (4, "error: this machine has no ansible-playbook, which is what provisions a server\n" + INSTALL, []))
@@ -124,26 +131,10 @@ class TestMachineSetup(unittest.TestCase):
         self.assertEqual((r.code, r.err, r.effects),
                          (1, "error: %s has no commit to give a machine: run wk from a clone of its repository\n" % ROOT, []))
 
-    def test_the_client_and_an_unknown_machine_are_refused(self):
-        self.assertEqual(self.w.wk("machine", "setup", "desk").err, "error: desk is the client, and setup converges a server: `wk doctor` reports what the client needs\n")
+    def test_a_workstation_and_an_unknown_machine_are_refused(self):
+        self.assertEqual(self.w.wk("machine", "setup", "desk").err,
+                         "error: desk is a workstation, and setup converges a server or the controller: a workstation needs Zed, ssh and wk\n")
         self.assertEqual(self.w.wk("machine", "setup", "nope").err, "error: no machine named nope: machines/ has desk, lin, mac, vault\n")
-
-
-class TestKeySync(unittest.TestCase):
-    def setUp(self):
-        self.w = make(status=" M wk\n")
-
-    def test_it_is_the_credentials_role_on_every_server_or_on_the_one_named_whatever_the_checkouts_state(self):
-        self.assertEqual(played(self.w.wk("key", "sync"))[1], PLAYBOOK + ["--tags", "credentials"] + SITE)
-        self.assertEqual(played(self.w.wk("key", "sync", "mac"))[1], PLAYBOOK + ["--limit", "mac", "--tags", "credentials"] + SITE)
-
-    def test_a_dry_run_is_check_mode(self):
-        self.assertEqual(played(self.w.wk("key", "sync", "mac", "-n"))[1], PLAYBOOK + ["--limit", "mac", "--tags", "credentials", "--check", "--diff"] + SITE)
-
-    def test_the_client_and_the_credential_server_are_delivered_nothing(self):
-        for name in ("desk", "vault"):
-            r = self.w.wk("key", "sync", name)
-            self.assertEqual((r.code, r.calls), (1, []))
 
 
 class TestThePlaybook(unittest.TestCase):
@@ -156,10 +147,16 @@ class TestThePlaybook(unittest.TestCase):
     def test_the_shared_variables_are_one_json_file_that_pins_every_download(self):
         with open(os.path.join(ROOT, "ansible", "group_vars", "all.json")) as f:
             shared = json.load(f)
-        self.assertEqual((shared["wk_pueue_version"], shared["wk_openbao_version"], shared["wk_claude_version"]), ("4.0.5", "2.7.3", "2.1.308"))
-        digests = [d for assets in (shared["wk_pueue_assets"], shared["wk_openbao_assets"]) for asset in assets.values()
+        self.assertEqual((shared["wk_pueue_version"], shared["wk_websocat_version"], shared["wk_claude_version"]), ("4.0.5", "1.14.0", "2.1.308"))
+        digests = [d for assets in (shared["wk_pueue_assets"], shared["wk_websocat_assets"]) for asset in assets.values()
                    for name, d in asset.items() if name != "target"]
-        self.assertEqual((len(digests), [d for d in digests if not re.fullmatch("[0-9a-f]{64}", d)]), (8, []))
+        self.assertEqual((len(digests), [d for d in digests if not re.fullmatch("[0-9a-f]{64}", d)]), (7, []))
+
+    def test_the_forks_whose_push_keys_rotate_are_named_once(self):
+        with open(os.path.join(ROOT, "ansible", "group_vars", "all.json")) as f:
+            forks = json.load(f)["wk_forks"]
+        self.assertEqual(forks, ["justinmichaud/WebKit", "justinmichaud/WPEWebKit", "justinmichaud/wk-tools"])
+        self.assertIn("https://github.com/%s.git" % forks[0], PROJECT["fork"])
 
     def test_every_module_is_named_in_full(self):
         """A module is a key of its task, beside the task's name; the same word deeper in is a module's own option."""
@@ -187,7 +184,7 @@ class TestTheInventoryScript(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.machines = tmp.name
-        for name, text in (("srv-a", "kind=credential"), ("srv-b", "kind=mac"), (self.host, "kind=client")):
+        for name, text in (("srv-a", "kind=linux"), ("srv-b", "kind=mac"), (self.host, "kind=controller")):
             with open(os.path.join(self.machines, name + ".conf"), "w") as f:
                 f.write(text + "\n")
 
@@ -196,8 +193,8 @@ class TestTheInventoryScript(unittest.TestCase):
                            env=dict(os.environ, WK_MACHINES_DIR=self.machines))
         self.assertEqual((r.returncode, r.stderr), (0, b""))
         inventory = json.loads(r.stdout)
-        self.assertEqual((inventory["credential"], inventory["mac"], sorted(inventory["_meta"]["hostvars"])),
-                         ({"hosts": ["srv-a"]}, {"hosts": ["srv-b"]}, ["srv-a", "srv-b"]))
+        self.assertEqual((inventory["controller"], inventory["linux"], inventory["mac"], sorted(inventory["_meta"]["hostvars"])),
+                         ({"hosts": [self.host]}, {"hosts": ["srv-a"]}, {"hosts": ["srv-b"]}, sorted([self.host, "srv-a", "srv-b"])))
         self.assertRegex(inventory["all"]["vars"]["wk_commit"], "^[0-9a-f]{40}$")
 
     def test_it_is_executable_as_ansibles_script_inventory_plugin_needs(self):

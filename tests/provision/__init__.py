@@ -1,8 +1,8 @@
 """What the provisioning tests share.
 
     lanes(self, "tests.provision.toy")    # hooks are collected from this package, not lib/wk, until the test ends
-    checkout(w.machines["desk"])          # the client's checkout is clean at SHA, which is on a remote branch
-    client(w.machines["desk"])            # the client's tools answer: ssh, git, tailscale, ansible-playbook, bao
+    checkout(w.machines["vault"])         # the controller's checkout is clean at SHA, which is on a remote branch
+    controller(w.machines["vault"])       # the controller's tools answer: ssh, git, tailscale, ansible-playbook, xorriso, qemu-nbd
     server(w.machines["lin"])             # git, ls, the profile, df and date answer from the fake's files
     provisioned(w.machines["lin"])        # the files the playbook's wk role leaves
 
@@ -15,6 +15,7 @@ from unittest import mock
 from tests import ROOT
 from wk.core import hooks
 from wk.core.machine import Result
+from wk.provision import ansible
 
 SHA = "5e1f" * 10
 HOME = "/home/u/wk"
@@ -36,13 +37,14 @@ def checkout(m, sha=SHA, status="", pushed="  origin/rewrite\n"):
     m.on(git + ("branch", "--remotes", "--contains"), pushed)
 
 
-def client(m):
+def controller(m, home=HOME):
     m.on(("ssh", "-V"), Result(0, "", "OpenSSH_9.6\n"))
     m.on(("git", "--version"), "git version 2.43.0\n")
-    m.on(("tailscale", "status"), "100.64.0.1 desk\n")
+    m.on(("tailscale", "status"), "100.64.0.1 vault\n")
     m.on(("ansible-playbook", "--version"), "ansible-playbook [core 2.19.3]\n  config file = None\n")
-    m.on(("bao", "version"), "OpenBao v2.7.3\n")
-    m.on(("bao", "token", "lookup"), '{"data": {"policies": ["root"]}}\n')
+    m.on(("xorriso", "-version"), "xorriso 1.5.6\n")
+    m.on(("qemu-nbd", "--version"), "qemu-nbd 8.2.2\n")
+    m.files[ansible.websocat(home)] = ""
 
 
 def server(m, home=HOME):

@@ -1,8 +1,0 @@
----
-- name: Restart OpenBao
-  ansible.builtin.systemd_service:
-    name: wk-openbao.service
-    scope: user
-    state: restarted
-    daemon_reload: true
-  environment: "{{ wk_user_bus }}"

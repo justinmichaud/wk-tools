@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from tests.credsworld import TOKEN, URL, Http, login, private_key, public_key
+from tests.credsworld import TOKEN, URL, Http, login
 from wk.core.errors import Refused
 from wk.creds import injector, net, rules
 from wk.creds.rules import BAD, OK, UNKNOWN
@@ -9,7 +9,6 @@ from wk.creds.rules import BAD, OK, UNKNOWN
 GH = "https://api.github.com"
 USER = ("GET", GH + "/user")
 PULLS = ("POST", GH + "/repos/WebKit/WebKit/pulls")
-KEYS = ("GET", GH + "/repos/o/r/keys?per_page=100")
 BZ = ("GET", "https://bugs.webkit.org/rest/user/me%40example.test?login=me%40example.test&password=k%2B1")
 MODELS = ("GET", URL + "/models")
 ANTHROPIC = ("GET", "https://api.anthropic.com/v1/models?limit=1")
@@ -38,18 +37,14 @@ class TestFind(Rules):
                                                          "claude-login", "tailnet-auth-key", "tailnet-api-key", "wifi-ssid", "wifi-psk", "sudo-password"])
         self.assertTrue(all(r.what for r in rules.RULES))
 
-    def test_a_deploy_key_is_named_for_its_repository(self):
-        self.assertEqual(rules.find("deploy-key/o/r").name, "deploy-key/o/r")
-
     def test_an_unknown_name_is_refused_naming_the_names(self):
-        for name in ("bogus", "deploy-key/norepo", "deploy-key/a/b/c"):
-            with self.assertRaisesRegex(Refused, "no credential is named %s: the names are github-user, .*, deploy-key/<owner>/<repo> and "
+        for name in ("bogus", "deploy-key/o/r", "rotate-key"):
+            with self.assertRaisesRegex(Refused, "no credential is named %s: the names are github-user, .*, sudo-password and "
                                                  r"bmc/<machine>/user\|password" % name):
                 rules.find(name)
 
-    def test_the_named_credentials_in_the_store_are_those_of_a_repository_or_a_machine(self):
-        self.assertEqual(rules.named(["github-token", "deploy-key/o/r", "deploy-key/odd", "bmc/lin/user", "bmc/lin/pin", "bmc/Lin/user"]),
-                         ["deploy-key/o/r", "bmc/lin/user"])
+    def test_the_named_credentials_in_the_store_are_those_of_a_machine(self):
+        self.assertEqual(rules.named(["github-token", "deploy-key/o/r", "bmc/lin/user", "bmc/lin/pin", "bmc/Lin/user"]), ["bmc/lin/user"])
 
 
 class TestGithub(Rules):
@@ -115,7 +110,7 @@ class TestLitellm(Rules):
 
     def test_without_an_endpoint_in_the_conf_it_is_unknown(self):
         self.assertEqual(self.probe("litellm-key", "sk-1", {}, litellm=None),
-                         (UNKNOWN, "no endpoint to ask: set litellm_url= in the client's machines/<name>.conf"))
+                         (UNKNOWN, "no endpoint to ask: set litellm_url= in the controller's machines/<name>.conf"))
 
 
 class TestClaudeLogin(Rules):
@@ -177,29 +172,3 @@ class TestInstall(Rules):
                 rules.find(name)
 
 
-class TestDeployKey(Rules):
-    def test_it_is_an_openssh_private_key_with_no_passphrase(self):
-        self.checks("deploy-key/o/r", [private_key(), private_key() + "\n"],
-                    ["", "ssh-ed25519 AAAA", private_key().replace("b3Blbn", "AAAAAA"), private_key()[:60] + "\n-----END OPENSSH PRIVATE KEY-----",
-                     "-----BEGIN OPENSSH PRIVATE KEY-----\n!!\n-----END OPENSSH PRIVATE KEY-----"])
-        self.assertIn("passphrase", rules.find("deploy-key/o/r").check(private_key(cipher=b"aes256-ctr")))
-
-    def test_the_public_half_is_read_out_of_the_private_key(self):
-        self.assertEqual(rules.public_key(private_key()), ("none", public_key()))
-
-    def test_it_is_ok_when_registered_on_its_repository_with_write_access(self):
-        keys = [{"key": public_key(b"\2"), "read_only": False}, {"key": public_key() + " a comment", "read_only": False}]
-        self.assertEqual(self.probe("deploy-key/o/r", private_key(), {KEYS: (200, keys)}, {"github-token": TOKEN}),
-                         (OK, "registered on o/r with write access"))
-        self.assertEqual(self.http.asked[0][2], {"Authorization": "Bearer " + TOKEN})
-
-    def test_it_is_bad_when_read_only_or_not_registered(self):
-        store = {"github-token": TOKEN}
-        self.assertEqual(self.probe("deploy-key/o/r", private_key(), {KEYS: (200, [{"key": public_key(), "read_only": True}])}, store)[0], BAD)
-        got = self.probe("deploy-key/o/r", private_key(), {KEYS: (200, [])}, store)
-        self.assertEqual(got, (BAD, "it is not a deploy key of o/r: add `%s` at https://github.com/o/r/settings/keys/new, allowing write access" % public_key()))
-
-    def test_it_is_unknown_without_a_token_or_an_answer(self):
-        self.assertEqual(self.probe("deploy-key/o/r", private_key(), {}), (UNKNOWN, "GitHub is asked with github-token: `wk key set github-token`"))
-        self.assertEqual([self.verdict("deploy-key/o/r", private_key(), {KEYS: a}, {"github-token": TOKEN}) for a in ((404, {}), DOWN)],
-                         [UNKNOWN, UNKNOWN])

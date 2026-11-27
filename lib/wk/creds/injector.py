@@ -1,4 +1,4 @@
-"""The injector: the forward proxy on the credential server that holds the one claude.ai login.
+"""The injector: the forward proxy on the controller that holds the one claude.ai login.
 
     python3 -I injector.py <directory> <port>
 

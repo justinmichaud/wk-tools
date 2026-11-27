@@ -5,12 +5,14 @@
 `wk ai claude <ws> -- -p <prompt>` answers one prompt, which needs no terminal.
 
 The agent runs as the login, in the workspace, as `wk enter` runs a command: inside the container on Linux, with the
-credentials a shell there has. Claude Code reaches claude.ai through the injector."""
+credentials a shell there has. Claude Code reaches claude.ai through the injector. Before it starts, the controller
+rotates this server's push keys; a rotation that fails refuses the session, and `--force` starts it with the keys the
+server has."""
 
 from wk.agent import session
-from wk.core.decl import Command
+from wk.core.decl import SERVERS, Command
 
-COMMAND = Command(where="server", takes=("agent", "ws"), tail=True)
+COMMAND = Command(on=SERVERS, takes=("agent", "ws"), tail=True)
 
 
 def main(args, inv):

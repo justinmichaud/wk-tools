@@ -120,7 +120,7 @@ class FakePueue:
 
 def world(here="lin", **how):
     w = World(here=here, seams={"tasks": tasks}, **how)
-    w.pueue = {name: FakePueue(machine, w.clock) for name, machine in w.machines.items() if w.confs[name].kind != "client"}
+    w.pueue = {name: FakePueue(machine, w.clock) for name, machine in w.machines.items() if w.confs[name].holds_workspaces}
     w.probe = {name: MAC if w.confs[name].kind == "mac" else LINUX for name in w.pueue}
     w.missing = {name: "" for name in w.pueue}
 
