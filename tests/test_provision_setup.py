@@ -173,6 +173,15 @@ class TestThePlaybook(unittest.TestCase):
                             short.append("%s: %s" % (name, line.strip()))
         self.assertEqual(short, [])
 
+    def test_nothing_waits_on_a_handler_which_a_failed_or_killed_run_forgets(self):
+        notified = []
+        for directory, dirs, names in os.walk(os.path.join(ROOT, "ansible")):
+            notified += [d for d in dirs if d == "handlers"]
+            for name in [n for n in names if n.endswith(".yml")]:
+                with open(os.path.join(directory, name)) as f:
+                    notified += ["%s: %s" % (name, line.strip()) for line in f if re.match(r" *(notify|listen):", line)]
+        self.assertEqual(notified, [])
+
     def test_no_registered_result_or_fact_hides_a_variable_of_the_inventory(self):
         """A registered result outranks an inventory variable of its name for the rest of the play."""
         inventory = json.loads(make().wk("machine", "inventory").out)

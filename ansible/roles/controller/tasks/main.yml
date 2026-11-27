@@ -48,7 +48,6 @@
     src: "{{ wk_root }}/lib/wk/creds/injector.py"
     dest: "{{ wk_injector_dir }}/injector.py"
     mode: "0600"
-  notify: Restart the injector
 
 - name: Ask for the credentials' names
   ansible.builtin.import_role:
@@ -93,7 +92,6 @@
     src: wk-injector.service.j2
     dest: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/wk-injector.service"
     mode: "0644"
-  notify: Restart the injector
 
 - name: Enable and start the injector
   ansible.builtin.systemd_service:
@@ -104,8 +102,32 @@
     daemon_reload: true
   environment: "{{ wk_user_bus }}"
 
-- name: Restart the injector now if its program or unit changed
-  ansible.builtin.meta: flush_handlers
+# Restarted whenever its program or unit is newer than the running injector, which a run killed or failed between the
+# copy and the restart also leaves behind.
+- name: Look at the injector's program and unit
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: ["{{ wk_injector_dir }}/injector.py", "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user/wk-injector.service"]
+  register: wk_injector_files
+
+- name: Ask when the injector started
+  ansible.builtin.command:
+    argv: [systemctl, --user, show, wk-injector.service, --property, ActiveEnterTimestamp, --timestamp=unix, --value]
+  environment: "{{ wk_user_bus }}"
+  register: wk_injector_started
+  changed_when: false
+  check_mode: false
+
+- name: Restart the injector, older than its program or unit
+  ansible.builtin.systemd_service:
+    name: wk-injector.service
+    scope: user
+    state: restarted
+    daemon_reload: true
+  environment: "{{ wk_user_bus }}"
+  when: >-
+    (wk_injector_started.stdout | trim | regex_replace('^@', '') | int)
+    < (wk_injector_files.results | map(attribute='stat.mtime', default=0) | max | int)
 
 - name: Wait for the injector's CA
   ansible.builtin.wait_for:
