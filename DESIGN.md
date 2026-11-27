@@ -159,7 +159,7 @@ Layout under a machine's wk home, `~/wk` (or `$WK_HOME`):
 | --- | --- | --- |
 | `tools/` | all | wk itself; on a server, exactly the controller's commit |
 | `bin/wk` | all | a link to `tools/wk`, on the login shell's `PATH` |
-| `secrets/` | controller | every credential, one file per name (`deploy-key/<owner>/<repo>` is a path), mode 0600 in 0700 directories |
+| `secrets/` | controller | every credential, one file per name (`bmc/<machine>/user` is a path), mode 0600 in 0700 directories |
 | `injector/` | controller | the injector, its CA key and the real login |
 | `git/WebKit.git` | server | the mirror; `gc.auto 0`, since workspaces borrow its objects |
 | `ws/<name>/src` | server | the checkout: `git clone --shared` from the mirror |
@@ -227,7 +227,8 @@ converges. A half-made workspace is wiped, never repaired.
   `bugzilla-user`,
   `bugzilla-password`, `litellm-key`, `claude-login`, `tailnet-auth-key`,
   `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `bmc/<machine>/user` and
-  `bmc/<machine>/password`.
+  `bmc/<machine>/password`, and `sudo-password` while a system being replaced
+  asks for one.
 - What a server holds, under `secrets/`: one deploy key per fork with its ssh
   alias, `env.sh` (`github-token`, the Bugzilla login), and its rotation key.
   pi's `litellm-key` sits in `~/.pi/agent/models.json`. Nothing else.
@@ -237,7 +238,8 @@ converges. A half-made workspace is wiped, never repaired.
   older `wk <server> ...` keys, and prints the private halves as JSON. Two
   callers: the `credentials` role, which writes them to the server; and the
   server itself, whose rotation key's `authorized_keys` line on the controller
-  is `restrict,command="wk key rotate <server>"`. `wk ai` asks for a rotation
+  is `restrict,command="wk key rotate <server> --yes"` (rotation revokes,
+  so it is destructive and asks). `wk ai` asks for a rotation
   that way before the agent starts, and writes what comes back.
 - The injector is a forward proxy on the controller, reachable only on the
   tailnet. For Claude's hosts it terminates TLS with its own CA and replaces
@@ -267,8 +269,8 @@ All of it runs on the controller, typed by the person.
 - The inventory is `machines/*.conf`: a host per machine, a group per kind,
   each conf literal as `wk_<key>`, this checkout's commit.
 - Roles: `wk`, `pueue`, `mirror`, `sdk` (Linux), `agents`, `credentials`
-  (servers), `injector` (controller). Every task is idempotent: a second run
-  reports `changed=0`.
+  (servers), `injector` (controller). Every task but the rotation is idempotent: a second run
+  reports changed only for the keys it rotated.
 - A server fetches exactly the controller's commit from the repository's
   public URL. Uncommitted changes, and a commit on no remote branch, are
   barriers.
