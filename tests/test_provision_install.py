@@ -214,8 +214,8 @@ class TestThePlaybook(unittest.TestCase):
     def test_what_boots_erases_or_retires_is_tagged_wipe_and_what_a_rehearsal_runs_is_not(self):
         text = tasks()
         self.assertIn("          ansible.builtin.import_tasks: install/boot.yml\n          tags: [wipe]\n", text["install.yml"])
-        self.assertRegex(text["install.yml"], r"command: DisableBootOverride\n +tags: \[wipe\]\n")
-        for word in ("SetOneTimeBoot", "shutdown", "wk_install_reset", "method: DELETE", "method: POST", "known_hosts"):
+        self.assertRegex(text["install.yml"], r"BootSourceOverrideEnabled: Disabled\n +status_code: \[200, 204\]\n +tags: \[wipe\]\n")
+        for word in ("BootSourceOverrideEnabled: Once", "shutdown", "wk_install_reset", "method: DELETE", "method: POST", "known_hosts"):
             self.assertIn(word, text["boot.yml"], word)
             for name in set(text) - {"boot.yml", "autoinstall.yaml.j2"}:
                 self.assertNotIn(word, text[name], "%s: %s" % (name, word))

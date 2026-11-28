@@ -9,12 +9,23 @@
       ansible.builtin.set_fact:
         wk_install_began: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
 
+    # A PATCH of its own, without If-Match: this BMC answers 412 to every If-Match, the ETag it has just sent included,
+    # and redfish_command's SetOneTimeBoot always sends one.
     - name: Boot from the USB disk once
-      community.general.redfish_command:
-        category: Systems
-        command: SetOneTimeBoot
-        bootdevice: "{{ wk_install_boot_device }}"
-        boot_override_mode: UEFI
+      ansible.builtin.uri:
+        url: "{{ wk_install_system }}"
+        method: PATCH
+        url_username: "{{ wk_install_secret.bmc_user }}"
+        url_password: "{{ wk_install_secret.bmc_password }}"
+        force_basic_auth: true
+        validate_certs: false
+        body_format: json
+        body:
+          Boot:
+            BootSourceOverrideEnabled: Once
+            BootSourceOverrideTarget: "{{ wk_install_boot_device }}"
+            BootSourceOverrideMode: UEFI
+        status_code: [200, 204]
       delegate_to: localhost
 
     - name: Restart the server from its own system

@@ -20,6 +20,7 @@
     wk_install_iso: "{{ wk_install_build }}/install.iso"
     wk_install_socket: "{{ wk_install_build }}/nbd.sock"
     wk_install_consoles: "{{ ('console=' ~ wk_console ~ ' ') if wk_console is defined else '' }}console=tty0"
+    wk_install_system: "https://{{ wk_bmc }}/redfish/v1/Systems/system"
     wk_install_console: "ssh -p {{ wk_install_console_port }} {{ wk_install_secret.bmc_user }}@{{ wk_bmc }}"
     wk_install_tools:
       - {tool: xorriso, asks: -version, fix: sudo apt install xorriso, does: puts the autoinstall file into Ubuntu's image}
@@ -66,10 +67,20 @@
             - name: Detach the image
               ansible.builtin.import_tasks: install/detach.yml
 
+            # Without If-Match, as the boot was set (install/boot.yml).
             - name: Clear the boot override
-              community.general.redfish_command:
-                category: Systems
-                command: DisableBootOverride
+              ansible.builtin.uri:
+                url: "{{ wk_install_system }}"
+                method: PATCH
+                url_username: "{{ wk_install_secret.bmc_user }}"
+                url_password: "{{ wk_install_secret.bmc_password }}"
+                force_basic_auth: true
+                validate_certs: false
+                body_format: json
+                body:
+                  Boot:
+                    BootSourceOverrideEnabled: Disabled
+                status_code: [200, 204]
               tags: [wipe]
 
           always:
