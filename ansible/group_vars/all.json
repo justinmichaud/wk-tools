@@ -59,6 +59,7 @@
   "wk_tailnet_api": "https://api.tailscale.com/api/v2",
   "wk_server_tags": ["tag:workstation"],
   "wk_zed_install": "https://zed.dev/install.sh",
+  "wk_workstation_packages": ["git", "curl", "openssh-client", "python3-psutil", "dconf-cli"],
   "wk_homebrew_install": "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh",
   "wk_tailscale_apt": "https://pkgs.tailscale.com/stable/ubuntu"
 }

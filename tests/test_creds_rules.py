@@ -39,12 +39,13 @@ class TestFind(Rules):
 
     def test_an_unknown_name_is_refused_naming_the_names(self):
         for name in ("bogus", "deploy-key/o/r", "rotate-key"):
-            with self.assertRaisesRegex(Refused, "no credential is named %s: the names are github-user, .*, sudo-password and "
-                                                 r"bmc/<machine>/user\|password" % name):
+            with self.assertRaisesRegex(Refused, "no credential is named %s: the names are github-user, .*, sudo-password, "
+                                                 r"bmc/<machine>/user\|password and sudo/<machine>" % name):
                 rules.find(name)
 
     def test_the_named_credentials_in_the_store_are_those_of_a_machine(self):
-        self.assertEqual(rules.named(["github-token", "deploy-key/o/r", "bmc/lin/user", "bmc/lin/pin", "bmc/Lin/user"]), ["bmc/lin/user"])
+        self.assertEqual(rules.named(["github-token", "deploy-key/o/r", "bmc/lin/user", "bmc/lin/pin", "bmc/Lin/user", "sudo/desk", "sudo/a/b"]),
+                         ["bmc/lin/user", "sudo/desk"])
 
 
 class TestGithub(Rules):

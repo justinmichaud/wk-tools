@@ -1,6 +1,17 @@
 ---
-# Where the person sits: Zed with their settings, ssh to every machine, and wk (the wk role). It holds no workspace and
-# no credential. Zed is installed by its own per-user installer, which needs no root, and updates itself after.
+# Where the person sits: Zed with their settings, ssh to every machine, and wk (the wk role, which runs after this one
+# and needs git). It holds no workspace and no credential. The person installs Debian; the packages wk needs come from
+# its apt with the controller's sudo/<machine>. Zed comes from its own per-user installer and updates itself after.
+
+- name: Install the packages a workstation needs
+  ansible.builtin.apt:
+    name: "{{ wk_workstation_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+  vars:
+    ansible_become_password: "{{ wk_sudo_password }}"
 
 - name: Look for Zed
   ansible.builtin.stat:
@@ -13,12 +24,12 @@
     - name: Fetch Zed's installer
       ansible.builtin.get_url:
         url: "{{ wk_zed_install }}"
-        dest: "{{ wk_home }}/cache/zed-install.sh"
+        dest: "{{ ansible_facts['env']['HOME'] }}/.cache/zed-install.sh"
         mode: "0644"
 
     - name: Run it
       ansible.builtin.command:
-        argv: [sh, "{{ wk_home }}/cache/zed-install.sh"]
+        argv: [sh, "{{ ansible_facts['env']['HOME'] }}/.cache/zed-install.sh"]
         creates: "{{ ansible_facts['env']['HOME'] }}/.local/bin/zed"
 
 - name: Make Zed's config directory
@@ -54,3 +65,9 @@
     scope: global
     name: include.path
     value: "{{ wk_home }}/tools/ansible/roles/workstation/files/gitconfig"
+
+# A workstation that sleeps leaves the tailnet, and this one did not wake from suspend-to-RAM: on mains power it stays up.
+- name: Keep the machine awake on mains power
+  community.general.dconf:
+    key: /org/gnome/settings-daemon/plugins/power/sleep-inactive-ac-type
+    value: "'nothing'"

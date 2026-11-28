@@ -24,6 +24,7 @@ BUGZILLA = PROJECT["bugzilla"]
 ANTHROPIC_API = "https://api.anthropic.com"
 TAILNET_API = "https://api.tailscale.com/api/v2"
 BMC = re.compile(r"bmc/[a-z0-9][a-z0-9-]*/(user|password)")
+SUDO = re.compile(r"sudo/[a-z0-9][a-z0-9-]*")
 WORD = re.compile(r"[A-Za-z0-9_.-]+")
 
 
@@ -216,6 +217,7 @@ RULES = (
          one_line, unasked(INSTALL_ASKS)),
 )
 BMC_WHAT = "one half of the login of a server's BMC, which `wk machine install` installs it through"
+SUDO_WHAT = "the password sudo asks for on a machine wk did not install, a workstation or a Mac, which `wk machine setup` installs packages and Xcode with"
 
 
 def find(name):
@@ -225,10 +227,12 @@ def find(name):
             return rule
     if BMC.fullmatch(name):
         return Rule(name, BMC_WHAT, one_line, unasked(INSTALL_ASKS))
-    die("no credential is named %s: the names are %s and bmc/<machine>/user|password" % (name, ", ".join(r.name for r in RULES)))
+    if SUDO.fullmatch(name):
+        return Rule(name, SUDO_WHAT, one_line, unasked("it is first used by `wk machine setup` of that machine"))
+    die("no credential is named %s: the names are %s, bmc/<machine>/user|password and sudo/<machine>" % (name, ", ".join(r.name for r in RULES)))
 
 
 def named(names):
     """The credentials among the store's `names` that are named for a machine."""
-    return [name for name in names if BMC.fullmatch(name)]
+    return [name for name in names if BMC.fullmatch(name) or SUDO.fullmatch(name)]
 

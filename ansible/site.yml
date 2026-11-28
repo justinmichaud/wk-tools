@@ -12,6 +12,10 @@
     # A user unit is reached over the user's bus, which an ssh session without a login does not name.
     wk_user_bus:
       XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts['user_uid'] }}"
+    # sudo's password on a machine wk did not install: the controller's sudo/<machine>, else sudo-password.
+    wk_sudo_password: >-
+      {{ lookup('ansible.builtin.file', wk_store ~ '/sudo/' ~ inventory_hostname, errors='ignore')
+         or lookup('ansible.builtin.file', wk_store ~ '/sudo-password', errors='ignore') }}
 
   pre_tasks:
     - name: Gather the facts the roles read
@@ -55,6 +59,12 @@
           when: "'mac' in group_names"
           tags: [xcode]
 
+        - name: Set up where the person sits, git first
+          ansible.builtin.import_role:
+            name: workstation
+          when: "'workstation' in group_names"
+          tags: [workstation]
+
         - name: Install wk itself
           ansible.builtin.import_role:
             name: wk
@@ -90,12 +100,6 @@
             name: controller
           when: "'controller' in group_names"
           tags: [controller]
-
-        - name: Set up where the person sits
-          ansible.builtin.import_role:
-            name: workstation
-          when: "'workstation' in group_names"
-          tags: [workstation]
 
         - name: Deliver the credentials
           ansible.builtin.import_role:
