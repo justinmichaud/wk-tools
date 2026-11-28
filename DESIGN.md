@@ -51,6 +51,9 @@ two is a bug.
   and `gh` work in it unmodified, with no wrapper, prompt or approval. An
   agent running on the same server could read what that shell holds, so
   `wk enter` says so and goes on: the person decides.
+- An agent's session is marked `WK_AGENT`, and `wk enter` under that mark is
+  given no credentials. That stops an agent's mistake, not an agent that
+  means to: agents are not malicious.
 - Claude runs with `--dangerously-skip-permissions` and Remote Control.
 - A server is fresh-installed often, which is how any drift, an agent's
   included, is removed. `wk machine check` proves the fresh server builds and

@@ -45,7 +45,7 @@ def make(on="lin", state="ready", confs=CONFS):
 
 def line(on, argv, env, tty=False):
     """The shell `wk enter` opens, running the agent under `env`."""
-    return "[%s] %s" % (on, shlex.join(["fake-enter"] + ["-t"] * tty + ["x", "env", "WK_WORKSPACE=x"] + ["%s=%s" % kv for kv in sorted(env.items())] + argv))
+    return "[%s] %s" % (on, shlex.join(["fake-enter"] + ["-t"] * tty + ["x", "env", "WK_AGENT=%s" % ("pi" if argv[0] == PI[0] else "claude"), "WK_WORKSPACE=x"] + ["%s=%s" % kv for kv in sorted(env.items())] + argv))
 
 
 class TestStart(unittest.TestCase):

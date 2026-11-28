@@ -78,6 +78,9 @@ def credentials(inv):
     """A person's credentials asked of the controller and written here, unless they are here already. One that cannot
     be had is said, and the shell opens without them."""
     script, deploy = written(inv)
+    if inv.env.get("WK_AGENT"):
+        info("this shell is in %s's session (WK_AGENT), so it is given no credentials" % inv.env["WK_AGENT"])
+        return
     if inv.here.exists(script):
         return
     status, doc = ask(inv, "POST", "/credentials", ROTATE_TIMEOUT)

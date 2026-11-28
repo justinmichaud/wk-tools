@@ -140,7 +140,7 @@ class EndToEnd(unittest.TestCase):
     def agent(self, w, name):
         """`wk ai claude x`: started in the login shell `wk enter` opens, with the injector's environment."""
         run = self.ok(w.wk("ai", "claude", "x", tty=True, on=name))
-        inner = ["env", "WK_WORKSPACE=x"] + ["%s=%s" % kv for kv in sorted(CLAUDE_ENV.items())] + [CLAUDE] + MODE + ["--remote-control", "x"]
+        inner = ["env", "WK_AGENT=claude", "WK_WORKSPACE=x"] + ["%s=%s" % kv for kv in sorted(CLAUDE_ENV.items())] + [CLAUDE] + MODE + ["--remote-control", "x"]
         entered = ["sh", "-c", ENTER, SRC, SECRETS + "/env.sh", "-c", shlex.join(inner)]
         start = EXEC_TTY[name] + ["env", "SHELL=/bin/bash"] + entered if name == "lin" else entered
         self.assertEqual(run.effects, ["[%s] write /home/u/.claude.json" % name, "[vault] POST /revoke", "[%s] %s" % (name, shlex.join(start))])

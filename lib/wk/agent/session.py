@@ -54,7 +54,7 @@ def start(inv, agent, name, tail):
         trust(m, ws.path + "/src")
     client.revoke(inv)
     info("starting %s in %s" % (agent, name))
-    env = ["env", "WK_WORKSPACE=" + ws.name] + ["%s=%s" % kv for kv in sorted(extra.items())]
+    env = ["env", "WK_AGENT=" + agent, "WK_WORKSPACE=" + ws.name] + ["%s=%s" % kv for kv in sorted(extra.items())]
     return m.act(inv.driver(ws.driver, m).enter_argv(ws, env + argv + tail, tty=tty), stream=True, tty=tty).rc
 
 

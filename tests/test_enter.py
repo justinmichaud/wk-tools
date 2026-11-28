@@ -118,3 +118,8 @@ class TestCredentials(unittest.TestCase):
         self.assertEqual((r.code, r.effects), (0, ["[vault] POST /credentials", "[lin] fake-enter x true"]))
         self.assertIn("warning: the controller, vault, answered HTTP 502: github-token is gone\n"
                       "    so this shell has no push keys and no GitHub or Bugzilla login", r.err)
+
+    def test_an_agents_shell_is_given_none(self):
+        r = self.w.wk("enter", "x", "--", "true", env={"WK_AGENT": "claude"})
+        self.assertEqual((r.code, r.effects), (0, ["[lin] fake-enter x true"]))
+        self.assertIn("==> this shell is in claude's session (WK_AGENT), so it is given no credentials", r.err)
