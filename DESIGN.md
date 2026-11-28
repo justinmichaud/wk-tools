@@ -308,7 +308,7 @@ All of it runs on the controller, typed by the person.
   (servers), `xcode` (Mac), `controller` (websocat, the injector and the API, `wk serve`),
   `workstation` (Zed by its own per-user installer, the person's Zed settings
   and keymap, an ssh `Host` per machine with its conf's `user`, their git
-  settings). Every task but the rotation is idempotent: a second run
+  settings, sleep in s2idle). Every task but the rotation is idempotent: a second run
   reports changed only for the keys it rotated.
 - A server fetches exactly the controller's commit from the repository's
   public URL. Uncommitted changes, and a commit on no remote branch, are

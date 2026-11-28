@@ -93,7 +93,11 @@ Typed on alce and tolken, 2026-11-28.
   as `tag:wk`, the stored auth key's tag, which reached no port of alce, so `wk machine check moose` built `jsc-release`,
   ran `jsc` and passed the stress test, then its `wk rm` could not release the name. `tailnet-auth-key` is now a
   reusable, pre-approved `tag:wk-server` key minted through the API.
-- ante froze in GNOME's idle suspend (S3 `deep`) twice; it does not resume. The role keeps it awake on mains power.
+- ante froze in GNOME's idle suspend. Measured: the kernel's `pm_test` stages (freezer, devices, platform, processors)
+  each resume; real S3 and s2idle each wake on an RTC alarm, through `rtcwake` and through `systemctl suspend`; but from
+  S3 neither a key nor the power button wakes it (the journal ends at `Performing sleep operation 'suspend'`), with or
+  without wakeup enabled on its USB hubs. The firmware is HP Q07 02.07.00 (2019), which LVFS does not carry. In s2idle a
+  key wakes it; the role writes systemd's `MemorySleepMode=s2idle`, and GNOME's idle suspend stays on.
 
 ## Verified live: the controller and tolken
 
