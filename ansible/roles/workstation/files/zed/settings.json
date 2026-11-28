@@ -1,0 +1,100 @@
+{
+  // Restricted Mode off for what `wk zed` opens: Zed lifts it only per
+  // worktree by hand, or by this; its CLI has no flag for it.
+  "icon_theme": {
+    "mode": "light",
+    "light": "Zed (Default)",
+    "dark": "Zed (Default)"
+  },
+  "cli_default_open_behavior": "existing_window",
+  "session": {
+    "trust_all_projects": true
+  },
+  "project_panel": {
+    "dock": "left"
+  },
+  "outline_panel": {
+    "dock": "left"
+  },
+  "collaboration_panel": {
+    "dock": "left"
+  },
+  "git_panel": {
+    "dock": "left"
+  },
+  "agent_servers": {
+    "claude-acp": {
+      "default_config_options": {
+        "mode": "auto"
+      },
+      "type": "registry"
+    }
+  },
+  "agent": {
+    "dock": "right",
+    "tool_permissions": {
+      "default": "allow"
+    },
+    "default_model": {
+      "provider": "zed.dev",
+      "model": "claude-sonnet-4-5"
+    },
+    "model_parameters": []
+  },
+  "terminal": {
+    "dock": "bottom"
+  },
+  "soft_wrap": "editor_width",
+  "show_whitespaces": "boundary",
+  "format_on_save": "off",
+  "remove_trailing_whitespace_on_save": false,
+  "file_scan_exclusions": [
+    "WebKitBuild",
+    "results",
+    "Source/ThirdParty",
+    "TestExpectations",
+    "LayoutTests",
+    "WebDriverTests",
+    "WebKitLibraries",
+    "PerformanceTests",
+    "ManualTests",
+    "Websites",
+    "metadata",
+    "resources",
+    ".git"
+  ],
+  "ui_font_size": 16,
+  "buffer_font_size": 16,
+  "theme": {
+    "mode": "system",
+    "light": "Gruvbox Light Hard",
+    "dark": "Gruvbox Dark Hard"
+  },
+  "use_system_path_prompts": false,
+  "lsp": {
+      "solargraph": {
+        "initialization_options": {
+          "diagnostics": false,
+          "formatting": false
+        }
+      }
+    },
+  "languages": {
+    "Ruby": {
+      "language_servers": ["solargraph", "!rubocop"],
+      "formatter": null,
+      "format_on_save": "off"
+    }
+  },
+  "cursor_blink": false,
+  "minimap": { "show": "never" },
+  "buffer_font_features": { "calt": false },
+  "git": { "inline_blame": { "enabled": false } },
+  "lsp_document_colors": "none",
+  "lsp_document_links": false,
+  "semantic_tokens": "off",
+  "diagnostics": {
+    "lsp_pull_diagnostics": { "debounce_ms": 500 },
+    "inline": { "enabled": false }
+  }
+}

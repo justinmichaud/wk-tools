@@ -43,14 +43,16 @@ def host(conf):
 
 
 def inventory(inv):
-    """What Ansible's script inventory plugin reads: a group per kind and each machine's variables. A workstation is no
-    host. The controller's literals are every host's defaults."""
+    """What Ansible's script inventory plugin reads: a group per kind and each machine's variables. The controller's
+    literals are every host's defaults; every machine's user= is every host's `wk_users`, which a workstation's ssh
+    config names."""
     fleet = inv.fleet
-    hosts, controller = [c for c in fleet.machines() if c.kind != "workstation"], fleet.controller
-    groups = {kind: {"hosts": [c.name for c in hosts if c.kind == kind]} for kind in ("controller", "linux", "mac")}
+    hosts, controller = fleet.machines(), fleet.controller
+    groups = {kind: {"hosts": [c.name for c in hosts if c.kind == kind]} for kind in ("workstation", "controller", "linux", "mac")}
     shared = dict(literals(controller), wk_root=inv.root, wk_commit=head(inv), wk_project=PROJECT, wk_controller=controller.name,
                   wk_controller_home=inv.wk_home, wk_store=store.directory(inv.wk_home), wk_websocat=websocat(inv.wk_home),
-                  wk_claude_placeholder=json.loads(injector.placeholder()), ansible_ssh_common_args=" ".join(ALIVE))
+                  wk_claude_placeholder=json.loads(injector.placeholder()), ansible_ssh_common_args=" ".join(ALIVE),
+                  wk_users={c.name: c.get("user") for c in hosts if c.kind != "workstation" and c.get("user")})
     return dict(groups, all={"vars": shared}, _meta={"hostvars": {c.name: host(c) for c in hosts}})
 
 

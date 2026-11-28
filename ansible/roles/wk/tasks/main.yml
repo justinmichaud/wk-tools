@@ -28,12 +28,15 @@
     path: "{{ wk_home }}/{{ item.name }}"
     state: directory
     mode: "{{ item.mode }}"
-  loop:
-    - {name: bin, mode: "0755"}
-    - {name: cache, mode: "0755"}
-    - {name: git, mode: "0755"}
-    - {name: ws, mode: "0755"}
-    - {name: secrets, mode: "0700"}
+  # A workstation holds no workspace and no credential.
+  loop: "{{ wk_layout if 'workstation' not in group_names else wk_layout[:2] }}"
+  vars:
+    wk_layout:
+      - {name: bin, mode: "0755"}
+      - {name: cache, mode: "0755"}
+      - {name: git, mode: "0755"}
+      - {name: ws, mode: "0755"}
+      - {name: secrets, mode: "0700"}
   loop_control:
     label: "{{ item.name }}"
 

@@ -80,7 +80,7 @@ class TestLoad(unittest.TestCase):
 
     def test_the_confs_in_the_tree_load(self):
         from tests import ROOT
-        self.assertEqual({c.kind for c in conf.load(os.path.join(ROOT, "machines")).values()}, {"controller", "linux", "mac"})
+        self.assertEqual({c.kind for c in conf.load(os.path.join(ROOT, "machines")).values()}, {"workstation", "controller", "linux", "mac"})
 
 
 class TestFleet(unittest.TestCase):

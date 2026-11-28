@@ -4,7 +4,7 @@
 #   ansible-playbook -i ansible/inventory.py --limit <machine> [--tags <role>] ansible/site.yml
 # Nothing here needs root. The credentials are files on the controller, read by the `file` lookup.
 
-- name: Converge a server or the controller
+- name: Converge a server, the controller or a workstation
   hosts: all
   gather_facts: false
   vars:
@@ -33,7 +33,7 @@
       ansible.builtin.command:
         argv: [loginctl, enable-linger, "{{ ansible_facts['user_id'] }}"]
         creates: "/var/lib/systemd/linger/{{ ansible_facts['user_id'] }}"
-      when: "'mac' not in group_names"
+      when: "'linux' in group_names or 'controller' in group_names"
       tags: [pueue, controller]
 
     - name: Make the directory of the user's units
@@ -41,7 +41,7 @@
         path: "{{ ansible_facts['env']['HOME'] }}/.config/systemd/user"
         state: directory
         mode: "0755"
-      when: "'mac' not in group_names"
+      when: "'linux' in group_names or 'controller' in group_names"
       tags: [pueue, controller]
 
   tasks:
@@ -64,13 +64,13 @@
         - name: Install pueue and keep its daemon running
           ansible.builtin.import_role:
             name: pueue
-          when: "'controller' not in group_names"
+          when: "'linux' in group_names or 'mac' in group_names"
           tags: [pueue]
 
         - name: Make the mirror
           ansible.builtin.import_role:
             name: mirror
-          when: "'controller' not in group_names"
+          when: "'linux' in group_names or 'mac' in group_names"
           tags: [mirror]
 
         - name: Prepare the SDK container's build environment
@@ -82,7 +82,7 @@
         - name: Install the agents
           ansible.builtin.import_role:
             name: agents
-          when: "'controller' not in group_names"
+          when: "'linux' in group_names or 'mac' in group_names"
           tags: [agents]
 
         - name: Install websocat and the injector
@@ -90,6 +90,12 @@
             name: controller
           when: "'controller' in group_names"
           tags: [controller]
+
+        - name: Set up where the person sits
+          ansible.builtin.import_role:
+            name: workstation
+          when: "'workstation' in group_names"
+          tags: [workstation]
 
         - name: Deliver the credentials
           ansible.builtin.import_role:

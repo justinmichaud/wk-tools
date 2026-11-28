@@ -1,0 +1,30 @@
+# Written by wk's workstation role. The fleet's machines are reached by Tailscale SSH under each conf's user=.
+{% for name, user in wk_users | dictsort %}
+
+Host {{ name }}
+  User {{ user }}
+  ServerAliveInterval 30
+  ServerAliveCountMax 6
+{% endfor %}
+
+# Igalia's build machines, behind its gateway, with the person's own key.
+Host igalia.com
+  User jmichaud
+  Port 6789
+  StrictHostKeyChecking accept-new
+  ConnectTimeout 10
+
+Host buildbox4
+  HostName buildbox4
+  User jmichaud
+  ProxyJump igalia.com
+
+Host devbox-arm64-2
+  HostName bbox-12-arm64
+  User jmichaud
+  ProxyJump igalia.com
+
+Host devbox-armhf-2
+  HostName bbox-12-armhf
+  User jmichaud
+  ProxyJump igalia.com

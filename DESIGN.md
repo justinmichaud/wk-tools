@@ -19,8 +19,10 @@ two is a bug.
   credential, the injector, the fleet's list of workspaces, and the one
   checkout of `wk` that provisions. Everything that installs, provisions or
   checks a server is typed there by a person; nothing runs on a schedule.
-- The **workstation** runs Zed. `wk` on it answers `wk ls` and opens a
-  workspace in Zed (`wk zed <ws>`), both by asking the controller.
+- The **workstation** (`ante`) runs Zed. `wk` on it answers `wk ls` and opens a
+  workspace in Zed (`wk zed <ws>`), both by asking the controller. It is the
+  one machine with personal data: the controller alone may ssh into it, to set
+  it up.
 - Every connection is Tailscale: ssh is Tailscale SSH, authorised by the
   tailnet's policy, and no machine holds an `authorized_keys` entry or an ssh
   key for another. The person and the controller may ssh into every machine,
@@ -297,10 +299,13 @@ All of it runs on the controller, typed by the person.
   and returns its exit code. `--stage <role>` adds `--tags <role>`;
   `--dry-run` adds `--check --diff`. The same line typed by hand does the
   same.
-- The inventory is `machines/*.conf`: a host per machine, a group per kind,
+- The inventory is `machines/*.conf`: a host per machine (a workstation too), a group per kind,
   each conf literal as `wk_<key>`, this checkout's commit.
 - Roles: `wk`, `pueue`, `mirror`, `sdk` (Linux), `agents`, `credentials`
-  (servers), `xcode` (Mac), `controller` (websocat, the injector and the API, `wk serve`). Every task but the rotation is idempotent: a second run
+  (servers), `xcode` (Mac), `controller` (websocat, the injector and the API, `wk serve`),
+  `workstation` (Zed by its own per-user installer, the person's Zed settings
+  and keymap, an ssh `Host` per machine with its conf's `user`, their git
+  settings). Every task but the rotation is idempotent: a second run
   reports changed only for the keys it rotated.
 - A server fetches exactly the controller's commit from the repository's
   public URL. Uncommitted changes, and a commit on no remote branch, are
@@ -352,7 +357,8 @@ controller. The BMC is OpenBMC.
   `autoinstall fsck.mode=skip --- console=<the conf's> console=tty0`.
 - The media: OpenBMC's virtual media is a websocket, `wss://<bmc>/vm/0/0`,
   behind which the BMC runs an NBD client. The controller runs `qemu-nbd` on
-  the image, on a Unix socket, and `websocat --binary` between the two.
+  the image, on a Unix socket, and `websocat --binary` between the two, again
+  whenever the BMC closes the websocket.
 - The pace: this BMC loses NBD replies that arrive together. `qemu-nbd`'s
   throttle spaces them (`wk_install_media_bps`, measured: `STATUS.md`).
 - The boot: Redfish sets a one-time UEFI boot from `Usb`, then the server is

@@ -23,7 +23,7 @@ CONFS = {"desk": "kind=workstation", "lin": "kind=linux\nuser=jm", "mac": "kind=
          "vault": "kind=controller\ninjector_port=3129\nlitellm_url=https://llm.example/v1"}
 PLAYBOOK = ["ansible-playbook", "-i", ROOT + "/ansible/inventory.py"]
 SITE = [ROOT + "/ansible/site.yml"]
-ROLES = ["agents", "controller", "credentials", "mirror", "pueue", "sdk", "wk", "xcode"]
+ROLES = ["agents", "controller", "credentials", "mirror", "pueue", "sdk", "wk", "workstation", "xcode"]
 INSTALL = "    sudo apt install ansible\n"
 
 
@@ -44,12 +44,13 @@ class TestInventory(unittest.TestCase):
     def setUp(self):
         self.inventory = json.loads(make().wk("machine", "inventory").out)
 
-    def test_there_is_a_group_per_kind_and_a_workstation_is_no_host(self):
+    def test_there_is_a_group_per_kind(self):
         self.assertEqual({name: group["hosts"] for name, group in self.inventory.items() if "hosts" in group},
-                         {"linux": ["lin"], "mac": ["mac"], "controller": ["vault"]})
+                         {"workstation": ["desk"], "linux": ["lin"], "mac": ["mac"], "controller": ["vault"]})
 
     def test_a_machines_kind_and_literals_are_its_variables_its_user_is_ansibles_login_and_the_controller_is_local(self):
         self.assertEqual(self.inventory["_meta"]["hostvars"], {
+            "desk": {"wk_kind": "workstation"},
             "lin": {"wk_kind": "linux", "wk_user": "jm", "ansible_user": "jm"},
             "mac": {"wk_kind": "mac", "wk_cmake": "/opt/cmake"},
             "vault": {"wk_kind": "controller", "wk_injector_port": "3129", "wk_litellm_url": "https://llm.example/v1", "ansible_connection": "local"}})
@@ -61,7 +62,8 @@ class TestInventory(unittest.TestCase):
             "wk_root": ROOT, "wk_commit": SHA, "wk_project": PROJECT, "wk_controller": "vault", "wk_controller_home": home,
             "wk_store": home + "/secrets", "wk_websocat": home + "/cache/websocat-1.14.0/websocat",
             "wk_claude_placeholder": json.loads(injector.placeholder()),
-            "ansible_ssh_common_args": "-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new"})
+            "ansible_ssh_common_args": "-o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o StrictHostKeyChecking=accept-new",
+            "wk_users": {"lin": "jm"}})
 
     def test_the_controllers_wk_home_is_where_wk_runs_from(self):
         inventory = json.loads(make().wk("machine", "inventory", env={"WK_HOME": "/srv/wk"}).out)["all"]["vars"]
@@ -131,9 +133,10 @@ class TestMachineSetup(unittest.TestCase):
         self.assertEqual((r.code, r.err, r.effects),
                          (1, "error: %s has no commit to give a machine: run wk from a clone of its repository\n" % ROOT, []))
 
-    def test_a_workstation_and_an_unknown_machine_are_refused(self):
-        self.assertEqual(self.w.wk("machine", "setup", "desk").err,
-                         "error: desk is a workstation, and setup converges a server or the controller: a workstation needs Zed, ssh and wk\n")
+    def test_a_workstation_is_set_up_as_any_machine(self):
+        self.assertEqual(played(self.w.wk("machine", "setup", "desk"))[-1], ["ansible-playbook", "-i", ROOT + "/ansible/inventory.py", "--limit", "desk"] + SITE)
+
+    def test_an_unknown_machine_is_refused(self):
         self.assertEqual(self.w.wk("machine", "setup", "nope").err, "error: no machine named nope: machines/ has desk, lin, mac, vault\n")
 
 
