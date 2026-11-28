@@ -1,7 +1,8 @@
 ---
 # Where the person sits: Zed with their settings, ssh to every machine, and wk (the wk role, which runs after this one
-# and needs git). It holds no workspace and no credential. The person installs Debian; the packages wk needs come from
-# its apt with the controller's sudo/<machine>. Zed comes from its own per-user installer and updates itself after.
+# and needs git). It holds no workspace and no credential. The person installs Debian and gives the conf's user sudo
+# without a password, as an installed server's has; the packages wk needs come from apt. Zed comes from its own
+# per-user installer and updates itself after.
 
 - name: Install the packages a workstation needs
   ansible.builtin.apt:
@@ -10,8 +11,6 @@
     update_cache: true
     cache_valid_time: 86400
   become: true
-  vars:
-    ansible_become_password: "{{ wk_sudo_password }}"
 
 - name: Look for Zed
   ansible.builtin.stat:

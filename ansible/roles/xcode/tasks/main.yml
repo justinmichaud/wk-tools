@@ -82,7 +82,7 @@
 - name: Select Xcode, accept its licence and run its first launch
   become: true
   vars:
-    ansible_become_password: "{{ wk_sudo_password }}"
+    ansible_become_password: "{{ lookup('ansible.builtin.file', wk_store ~ '/sudo-password') if 'sudo-password' in wk_store_names else '' }}"
   ansible.builtin.command:
     argv: "{{ item.argv }}"
   loop:

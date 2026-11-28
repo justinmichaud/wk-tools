@@ -22,7 +22,8 @@ two is a bug.
 - The **workstation** (`ante`) runs Zed. `wk` on it answers `wk ls` and opens a
   workspace in Zed (`wk zed <ws>`), both by asking the controller. It is the
   one machine with personal data: the controller alone may ssh into it, to set
-  it up.
+  it up. The person installs its Debian and gives the conf's user sudo
+  without a password; `wk machine setup` does the rest.
 - Every connection is Tailscale: ssh is Tailscale SSH, authorised by the
   tailnet's policy, and no machine holds an `authorized_keys` entry or an ssh
   key for another. The person and the controller may ssh into every machine,

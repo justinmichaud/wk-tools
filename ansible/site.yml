@@ -12,10 +12,6 @@
     # A user unit is reached over the user's bus, which an ssh session without a login does not name.
     wk_user_bus:
       XDG_RUNTIME_DIR: "/run/user/{{ ansible_facts['user_uid'] }}"
-    # sudo's password on a machine wk did not install: the controller's sudo/<machine>, else sudo-password.
-    wk_sudo_password: >-
-      {{ lookup('ansible.builtin.file', wk_store ~ '/sudo/' ~ inventory_hostname, errors='ignore')
-         or lookup('ansible.builtin.file', wk_store ~ '/sudo-password', errors='ignore') }}
 
   pre_tasks:
     - name: Gather the facts the roles read
