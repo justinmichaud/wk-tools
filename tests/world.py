@@ -67,6 +67,7 @@ class World:
         for name, machine in self.machines.items():
             machine.on(("wk",), lambda call, name=name: self._far(name, call))
             machine.on(("pgrep",), Result(1))       # no `wk new` is in flight
+            machine.on(("ps", "-A", "-o", "pid=,args="), "")      # no agent session runs
             machine.on(("tailscale", "ip", "-4"), lambda call: call.argv[-1] + "\n")     # a node's address is its name
             machine.on(("tailscale", "whois", "--json"), lambda call: json.dumps({"Node": {"Name": call.argv[-1] + ".tail.ts.net."}}))
 

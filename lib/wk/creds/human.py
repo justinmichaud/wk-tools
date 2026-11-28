@@ -8,6 +8,7 @@ git-webkit and gh read, as shell variables.
 The controller makes them at a person's request, the API's POST /credentials, and `wk enter` writes them; `wk ai`
 removes them and has the controller revoke the push keys before an agent starts."""
 
+import re
 import shlex
 import urllib.parse
 
@@ -19,7 +20,8 @@ BUGZILLA = urllib.parse.urlsplit(PROJECT["bugzilla"]).hostname.upper().replace("
 # What git-webkit (webkitcorepy.credentials: <HOST>_USERNAME and <HOST>_TOKEN or _PASSWORD) and gh read.
 ENV = (("GITHUB_COM_USERNAME", "github-user"), ("GITHUB_COM_TOKEN", "github-token"), ("GH_TOKEN", "github-token"),
        (BUGZILLA + "_USERNAME", "bugzilla-user"), (BUGZILLA + "_PASSWORD", "bugzilla-password"))
-AGENT = "/cache/agents/(claude|pi)/"
+# An agent's own process: its program is one the agents role installed. `ps`, which Linux and macOS read alike.
+AGENT = re.compile(r"\s*(\d+) (\S*/cache/agents/(claude|pi)/\S*)(.*)")
 
 
 def made(inv, server):
@@ -34,5 +36,6 @@ def script(env):
 
 
 def agents(m):
-    """One line per running agent session: its process id and command line."""
-    return m.run(["pgrep", "-a", "-f", AGENT]).out.splitlines()
+    """One line per running agent session: its process id, the agent, and its words."""
+    found = [AGENT.fullmatch(line) for line in m.run(["ps", "-A", "-o", "pid=,args="]).out.splitlines()]
+    return ["%s %s%s" % (f.group(1), f.group(3), f.group(4)[:100]) for f in found if f]

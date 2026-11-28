@@ -105,11 +105,12 @@ class TestCredentials(unittest.TestCase):
         self.assertNotIn("[vault] POST /credentials", self.w.wk("enter", "x", "--", "true").effects)
 
     def test_a_running_agent_session_is_named_and_the_shell_still_opens(self):
-        self.w.machines["lin"].on(("pgrep", "-a", "-f", human.AGENT), "4242 /home/u/wk/cache/agents/claude/2/claude --remote-control x\n")
+        self.w.machines["lin"].on(("ps", "-A", "-o", "pid=,args="), "  1 /sbin/init\n 4241 podman exec wk-x env WK_AGENT=claude /home/u/wk/cache/agents/claude/2/claude\n"
+                                                                     " 4242 /home/u/wk/cache/agents/claude/2/claude --remote-control x\n")
         r = self.w.wk("enter", "x", "--", "true")
         self.assertEqual(r.code, 0)
         self.assertIn("warning: an agent session runs on lin and can read this shell's credentials:\n"
-                      "    4242 /home/u/wk/cache/agents/claude/2/claude --remote-control x\n", r.err)
+                      "    4242 claude --remote-control x\n", r.err)
         self.assertIn("[lin] write " + HELD, r.effects)
 
     def test_a_controller_that_cannot_give_them_is_said_and_the_shell_opens_without(self):
