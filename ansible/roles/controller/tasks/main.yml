@@ -15,6 +15,16 @@
     dest: "{{ wk_home }}/bin/wk"
     state: link
 
+# A change made here (`wk machine save`'s settings) is pushed from here: git asks this helper for github.com, and it
+# answers the stored github-token, read from its file at each push. The checkout's own config, not the login's.
+- name: Let the checkout push with the stored GitHub token
+  community.general.git_config:
+    scope: local
+    repo: "{{ wk_root }}"
+    name: credential.https://github.com.helper
+    value: >-
+      !f() { test "$1" = get && printf 'username=x-access-token\npassword=%s\n' "$(cat '{{ wk_store }}/github-token')"; }; f
+
 - name: Assert this platform has a pinned websocat
   ansible.builtin.assert:
     that: wk_websocat_platform in wk_websocat_assets

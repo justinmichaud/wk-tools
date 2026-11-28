@@ -312,6 +312,8 @@ All of it runs on the controller, typed by the person.
 - `wk machine save <workstation>` runs `ansible/save.yml`, which fetches the
   person's Zed settings and keymap from the workstation into the role's files
   in this checkout; committed and pushed, every later setup writes them back.
+  The controller's checkout pushes with the stored `github-token`, which a
+  git credential helper of that checkout alone reads from its file.
   Every setting and workaround of a workstation lives in the role, so a setup
   re-applies all of it. Every task but the rotation is idempotent: a second run
   reports changed only for the keys it rotated.
