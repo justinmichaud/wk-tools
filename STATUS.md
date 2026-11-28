@@ -8,7 +8,7 @@ store or Ansible run is in that. "Live" means it ran on a real machine.
 
 The fleet the live column is about: alce (the controller, Ubuntu 26.04 x86_64, 1 core, 1 GB), moose (a Linux server,
 Ubuntu 24.04 aarch64, 80 cores, podman 4.9.3, offline since 2026-11-23), tolken (a Mac server, macOS 27.0.1, 10 cores,
-32 GB, Xcode). There is no workstation conf. The moose rows were typed on tolken while it was the client of the
+32 GB, Xcode), ante (the workstation, Debian 13 x86_64, GNOME, an HP ProDesk 600 G4). The moose rows were typed on tolken while it was the client of the
 previous design; the tolken rows on tolken, provisioned from alce.
 
 | Piece | Implemented | Unit-tested | Verified live |
@@ -21,6 +21,8 @@ previous design; the tolken rows on tolken, provisioned from alce.
 | The mirror, `wk new`, `wk rm`, `wk ls` on a server, `wk enter -- <command>` | yes | yes, and against a real local git | yes: moose |
 | `wk ls` on a workstation or the controller: the controller's API asked | yes | yes | yes: alce |
 | `wk zed <ws>` on a workstation: the controller's API asked, the server's home read | yes | yes | no |
+| `wk machine setup <workstation>`: the `workstation` role (apt with passwordless sudo, Zed by its installer, the person's Zed settings and keymap, an ssh `Host` per machine, their git settings, no idle suspend on mains), then `wk` | yes | the inventory and the line; its syntax | yes: ante, from alce, a second run `changed=0` |
+| The API reads `machines/` at each request | yes | yes | yes: ante answered after its conf was added |
 | The controller's API, `wk serve`: the systemd user unit `wk-api` on the tailnet address, the asker from `tailscale whois`, a name a file made with `O_EXCL`, 403 for a node with no conf | yes | yes, and its HTTP on a loopback socket | yes: alce, asked from tolken and alce |
 | A machine reaches the API at `tailscale ip -4 <controller>`: on the controller its own name resolves to `127.0.1.1` | yes | yes | yes: alce |
 | `wk new` reserves the name first (409 names the holder; no answer is a barrier, forced it is made with no reservation) | yes | yes | the reservation: tolken |
@@ -62,7 +64,29 @@ previous design; the tolken rows on tolken, provisioned from alce.
 | `wk machine install` on the controller: the refusals, the question, the `ansible-playbook` line, `--rehearse`, `--dry-run` | yes | yes | no |
 | The rules for `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `sudo-password`, `bmc/<machine>/user` and `password` | yes | yes, HTTP scripted | no |
 | The install playbook: the credentials read, the BMC asked, the image made, attached through the BMC by the pinned websocat, seen from the server, detached | yes | its YAML is parsed and its autoinstall template rendered by a real Ansible | no |
-| The install playbook: what is tagged `wipe` (the boot override, the restart, the installer, the tailnet node, the first ssh) | yes | its YAML is parsed | no |
+| The install playbook: what is tagged `wipe` (the boot override, the restart, the installer, the tailnet node, the first ssh) | yes | its YAML is parsed | by its steps: moose, 2026-11-28 (below); not yet as one `wk machine install` run |
+
+## Verified live: moose installed from nothing, and ante
+
+Typed on alce and tolken, 2026-11-28.
+
+- moose had been off since a power loss (OpenBMC's chassis `Off`, the BMC's last reboot cause `POR`, the serial console
+  silent); Redfish `ResetType: On` started it into its old system.
+- `wk machine install moose --yes` stopped at the one-time boot: this OpenBMC answers HTTP 412 to every `If-Match`,
+  the ETag it has just sent included, and `community.general.redfish_command` always sends one. A PATCH of `Boot`
+  without `If-Match` answers 204; the play now sets and clears the boot so (0c30cb89).
+- The next run set the boot and restarted moose from its own system with `sudo-password`, but the firmware booted the
+  NVMe: the bridge had ended 41 s after it attached (websocat rc 0, the BMC's NBD client giving the disk up), before the
+  restart. The bridge now serves with `qemu-nbd --persistent` and connects again whenever the BMC closes it (0885de9f).
+- By hand, as the play does it: the bridge up, `Boot` `Once`/`Usb`/`UEFI`, `systemctl reboot`: the firmware ran GRUB
+  from the USB disk ("Try or Install Ubuntu Server"), subiquity installed without a question, and the installed system
+  joined the tailnet as `moose-1` 63 min later. The bridge held the whole install at 640 KiB/s. Then the old node was
+  deleted and the new one named `moose` through the tailnet API, the override cleared, the image removed, and alce
+  took the new host key: Ubuntu 24.04.5, kernel 6.8.0-139-generic, sudo without a password, podman, git, python3.
+- ante: a person installed Debian 13, gave `jmichaud` sudo without a password, and tagged the node `tag:person`; the
+  tailnet's policy lets `tag:wk-controller` (alce) alone ssh into it. `wk machine setup ante` from alce: `ok=20
+  changed=11`, then `changed=0`. Zed 1.30.2, `wk ls` answered by the controller.
+- ante froze in GNOME's idle suspend (S3 `deep`) twice; it does not resume. The role keeps it awake on mains power.
 
 ## Verified live: the controller and tolken
 
@@ -183,15 +207,5 @@ What the live runs corrected: the unit directory is made before a unit is writte
 - TODO: the presets other than `jsc-release` and `mac-release`, and layout tests.
 - TODO: `wk` typed inside the container, and the pueue client reaching the daemon's socket from there.
 - TODO: `wk gc` with something to reclaim, and `wk new` over a half-made workspace, on a real server.
-- TODO: install: everything tagged `wipe`, which the permission classifier refused to start from this session. Each line below is unverified.
-- TODO: install: `SetOneTimeBoot` to `Usb` in UEFI mode as this OpenBMC takes it from `community.general.redfish_command`, the firmware booting the USB disk's ESP for it once and the disk after, and `DisableBootOverride`. The BMC reports the running server as `Off`.
-- TODO: install: `shutdown --reboot +1` itself, with `sudo-password` in the store (it holds none yet); `PowerForceRestart` for a server that does not answer.
-- TODO: install: the image under UEFI after `xorriso -boot_image any replay`, and the boot menu on the serial console.
-- TODO: install: subiquity reading `/autoinstall.yaml` from a USB disk with `autoinstall` on the kernel command line: no question asked, and its restart at the end asking for no key.
-- TODO: install: the bridge for the length of an install: the firmware's and the installer's reads at the measured pace, and the controller awake throughout.
-- TODO: install: WiFi: the installer's own system has no `wpasupplicant`, so it installs from the medium (`apt: fallback: offline-install`) and puts `wpasupplicant` on the disk from the image's pool; the conf's interface name under Ubuntu's kernel; cloud-init waiting for the WiFi network on the first boot before it installs packages.
-- TODO: install: Ubuntu's generic kernel on the server's hardware (the machine now runs a vendor kernel).
-- TODO: install: cloud-init's `apt.sources` with `signed-by=$KEY_FILE` for Tailscale's repository, and `tailscale up --auth-key=file:` under the stored key.
-- TODO: install: the tailnet API with `tailnet-api-key`: the new node listed as `<name>-1` with a `created` after the install began, `DELETE /device/<id>` of the old node, `POST /device/<id>/name`.
-- TODO: install: `StrictHostKeyChecking=accept-new` through Ansible's ssh for the new host key, and Tailscale SSH admitting the conf's user under the tailnet's policy.
-- TODO: install: `wk machine setup` on a freshly installed server.
+- TODO: install: one `wk machine install moose --yes` run end to end with the reconnecting bridge (0885de9f).
+- TODO: install: `PowerForceRestart` for a server that does not answer, and a server whose chassis is off.
