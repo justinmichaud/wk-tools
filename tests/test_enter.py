@@ -1,32 +1,40 @@
 import shlex
 import unittest
+from unittest import mock
 
 from tests.world import World
 from wk.core import seams
+from wk.core.act import die
 from wk.core.machine import Result
+from wk.core.vars import VARS
+from wk.creds import human, rotation
 from wk.workspace import driver
 from wk.workspace.drivers import ENTER
 
 SRC = "/home/u/wk/ws/x/src"
+HELD = "/home/u/wk/secrets/credentials.sh"
 
 
 class TestEnter(unittest.TestCase):
+    """A shell in the workspace, on a server that already holds a person's credentials."""
+
     def setUp(self):
         self.w = World(here="lin")
         self.w.workspace("x")
+        self.w.machines["lin"].files[HELD] = "export GH_TOKEN=t\n"
 
     def test_at_a_terminal_it_is_the_persons_shell_on_that_terminal(self):
         r = self.w.wk("enter", "x", tty=True)
-        self.assertEqual((r.code, r.calls), (0, ["[lin] fake-enter -t x"]))
+        self.assertEqual((r.code, r.effects), (0, ["[lin] fake-enter -t x"]))
 
     def test_at_a_terminal_a_command_is_run_by_that_shell(self):
         r = self.w.wk("enter", "x", "--", "echo", "a b", tty=True)
-        self.assertEqual(r.calls, ["[lin] fake-enter -t x echo 'a b'"])
+        self.assertEqual(r.effects, ["[lin] fake-enter -t x echo 'a b'"])
 
     def test_without_a_terminal_a_command_is_run_by_the_same_shell_and_its_exit_code_comes_back(self):
         self.w.machines["lin"].on(("fake-enter",), Result(3))
         r = self.w.wk("enter", "x", "--", "make", "-j", "4")
-        self.assertEqual((r.code, r.calls), (3, ["[lin] fake-enter x make -j 4"]))
+        self.assertEqual((r.code, r.effects), (3, ["[lin] fake-enter x make -j 4"]))
 
     def test_typed_on_a_workstation_it_is_refused_naming_the_servers(self):
         r = World().wk("enter", "x", "--", "true")
@@ -37,6 +45,7 @@ class TestEnter(unittest.TestCase):
         for on, before in (("lin", "podman exec --interactive%s --workdir " + SRC + " wk-x env SHELL=/bin/bash "), ("mac", "%.0s")):
             w = World(here=on, seams={"driver": driver})
             w.workspace("x", on=on)
+            w.machines[on].files[HELD] = "export GH_TOKEN=t\n"
             w.machines[on].on(("podman", "container", "exists"), Result(0))
             w.machines[on].on(("podman", "container", "inspect"), "running\n")
             for tty in (False, True):
@@ -67,3 +76,45 @@ class TestEnter(unittest.TestCase):
     def test_a_dry_run_prints_the_command_and_runs_nothing(self):
         r = self.w.wk("--dry-run", "enter", "x", "--", "true")
         self.assertEqual((r.plan, r.effects), (["[lin] fake-enter x true"], []))
+
+
+class TestCredentials(unittest.TestCase):
+    """A person's credentials, asked of the controller by a shell on a server that holds none."""
+
+    def setUp(self):
+        self.w = World(here="lin")
+        self.w.workspace("x")
+        self.w.secrets.values.update({"github-token": "ghp_t", "bugzilla-user": "me@example.org"})
+        patch = mock.patch.object(rotation, "rotate", lambda inv, name: {fork: "key %s of %s" % (fork, name) for fork in VARS["wk_forks"]})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_they_are_asked_for_written_0600_and_said_before_the_shell(self):
+        r = self.w.wk("enter", "x", "--", "true")
+        lin = self.w.machines["lin"]
+        deploy = ["/home/u/wk/secrets/deploy/" + fork.replace("/", "--") for fork in sorted(VARS["wk_forks"])]
+        self.assertEqual(r.effects, ["[vault] POST /credentials"] + ["[lin] write " + p for p in deploy + [HELD]] + ["[lin] fake-enter x true"])
+        self.assertEqual([lin.modes[p] for p in deploy + [HELD]], ["600"] * (len(deploy) + 1))
+        self.assertEqual(lin.files[deploy[0]], "key %s of lin" % sorted(VARS["wk_forks"])[0])
+        self.assertEqual(lin.files[HELD], human.script({"GITHUB_COM_TOKEN": "ghp_t", "GH_TOKEN": "ghp_t", human.BUGZILLA + "_USERNAME": "me@example.org"}))
+        self.assertIn("export GH_TOKEN=ghp_t\n", lin.files[HELD])
+        self.assertIn("==> delivered this session's push keys for", r.err)
+
+    def test_held_ones_are_not_asked_for_again(self):
+        self.w.wk("enter", "x", "--", "true")
+        self.assertNotIn("[vault] POST /credentials", self.w.wk("enter", "x", "--", "true").effects)
+
+    def test_a_running_agent_session_is_named_and_the_shell_still_opens(self):
+        self.w.machines["lin"].on(("pgrep", "-a", "-f", human.AGENT), "4242 /home/u/wk/cache/agents/claude/2/claude --remote-control x\n")
+        r = self.w.wk("enter", "x", "--", "true")
+        self.assertEqual(r.code, 0)
+        self.assertIn("warning: an agent session runs on lin and can read this shell's credentials:\n"
+                      "    4242 /home/u/wk/cache/agents/claude/2/claude --remote-control x\n", r.err)
+        self.assertIn("[lin] write " + HELD, r.effects)
+
+    def test_a_controller_that_cannot_give_them_is_said_and_the_shell_opens_without(self):
+        with mock.patch.object(rotation, "rotate", lambda inv, name: die("github-token is gone")):
+            r = self.w.wk("enter", "x", "--", "true")
+        self.assertEqual((r.code, r.effects), (0, ["[vault] POST /credentials", "[lin] fake-enter x true"]))
+        self.assertIn("warning: the controller, vault, answered HTTP 502: github-token is gone\n"
+                      "    so this shell has no push keys and no GitHub or Bugzilla login", r.err)

@@ -143,9 +143,8 @@ class EndToEnd(unittest.TestCase):
         inner = ["env", "WK_WORKSPACE=x"] + ["%s=%s" % kv for kv in sorted(CLAUDE_ENV.items())] + [CLAUDE] + MODE + ["--remote-control", "x"]
         entered = ["sh", "-c", ENTER, SRC, SECRETS + "/env.sh", "-c", shlex.join(inner)]
         start = EXEC_TTY[name] + ["env", "SHELL=/bin/bash"] + entered if name == "lin" else entered
-        self.assertEqual(run.effects, ["[%s] write /home/u/.claude.json" % name, "[vault] POST /rotate"]
-                         + ["[%s] write %s" % (name, path) for path in DEPLOYED] + ["[%s] %s" % (name, shlex.join(start))])
-        self.assertEqual({w.machines[name].files[path] for path in DEPLOYED}, {"private\n"})
+        self.assertEqual(run.effects, ["[%s] write /home/u/.claude.json" % name, "[vault] POST /revoke", "[%s] %s" % (name, shlex.join(start))])
+        self.assertEqual([path for path in DEPLOYED + [SECRETS + "/credentials.sh"] if path in w.machines[name].files], [])
         return run
 
 
@@ -170,7 +169,7 @@ class TestYourServers(EndToEnd):
     def journey(self, name, removed):
         w = world()
         self.started(w, name)
-        self.assertEqual(self.agent(w, name).err, "==> rotated the push keys of %s\n==> starting claude in x\n" % ", ".join(sorted(VARS["wk_forks"])))
+        self.assertEqual(self.agent(w, name).err, "==> starting claude in x\n")
         for on in (name, "vault"):
             doctor = self.ok(w.wk("doctor", on=on))
             self.assertEqual([line for line in doctor.out.splitlines() if not line.startswith(" ")], [on])

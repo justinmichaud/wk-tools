@@ -14,7 +14,7 @@ from wk.core.act import die
 from wk.core.fakes import Fake
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
 from wk.core.machine import Result
-from wk.creds import net, rotation
+from wk.creds import human, net, rotation
 
 HOME = "/home/u/wk"
 
@@ -88,8 +88,8 @@ class TestAnswers(unittest.TestCase):
         self.assertEqual(self.ask("GET", "/ws", "stranger"), (403, {"message": "stranger has no conf on the controller"}))
         self.assertEqual(self.ask("GET", "/ws", "100.64.0.9"), (403, {"message": "the tailnet names no node at 100.64.0.9"}))
 
-    def test_only_a_server_reserves_releases_and_rotates(self):
-        for method, path in (("PUT", "/ws/x"), ("DELETE", "/ws/x"), ("POST", "/rotate")):
+    def test_only_a_server_reserves_releases_and_asks_for_credentials_or_their_revocation(self):
+        for method, path in (("PUT", "/ws/x"), ("DELETE", "/ws/x"), ("POST", "/credentials"), ("POST", "/revoke")):
             self.assertEqual(self.ask(method, path, "desk"), (403, {"message": "desk holds no workspace: it is a workstation"}))
         self.assertEqual(self.vault.listdir(HOME + "/ws"), [])
 
@@ -98,11 +98,21 @@ class TestAnswers(unittest.TestCase):
             self.assertEqual(self.ask(method, path), (404, {"message": "no such request: %s %s" % (method, path)}), path)
         self.assertEqual(self.vault.files, {})
 
-    def test_a_rotation_is_the_askers_and_one_that_fails_is_502_with_why(self):
+    def test_credentials_are_the_askers_push_keys_made_anew_and_the_logins_the_store_holds(self):
+        self.w.secrets.values.update({"github-user": "me", "github-token": "ghp_t", "bugzilla-user": "me@example.org"})
         with mock.patch.object(rotation, "rotate", lambda inv, name: {"o/r": "key of %s" % name}):
-            self.assertEqual(self.ask("POST", "/rotate", "mac"), (200, {"o/r": "key of mac"}))
+            self.assertEqual(self.ask("POST", "/credentials", "mac"), (200, {"deploy": {"o/r": "key of mac"}, "env": {
+                "GITHUB_COM_USERNAME": "me", "GITHUB_COM_TOKEN": "ghp_t", "GH_TOKEN": "ghp_t", human.BUGZILLA + "_USERNAME": "me@example.org"}}))
         with mock.patch.object(rotation, "rotate", lambda inv, name: die("github-token is gone")):
-            self.assertEqual(self.ask("POST", "/rotate"), (502, {"message": "github-token is gone"}))
+            self.assertEqual(self.ask("POST", "/credentials"), (502, {"message": "github-token is gone"}))
+
+    def test_a_revocation_is_the_askers_and_one_that_fails_is_502_with_why(self):
+        asked = []
+        with mock.patch.object(rotation, "revoke", lambda inv, name: asked.append(name)):
+            self.assertEqual(self.ask("POST", "/revoke", "mac"), (200, {}))
+        self.assertEqual(asked, ["mac"])
+        with mock.patch.object(rotation, "revoke", lambda inv, name: die("github-token is gone")):
+            self.assertEqual(self.ask("POST", "/revoke"), (502, {"message": "github-token is gone"}))
 
 
 class TestHttp(unittest.TestCase):

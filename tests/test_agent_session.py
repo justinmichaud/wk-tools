@@ -18,18 +18,19 @@ INJECTED = {"CLAUDE_SECURESTORAGE_CONFIG_DIR": HOME + "/claude-login", "DISABLE_
 CLAUDE = [session.claude_bin(HOME), "--dangerously-skip-permissions", "--remote-control", "x"]
 PI = [session.pi_bin(HOME)]
 ANSWERED = session.answered(None, SRC)
-KEYS = {fork: "-----BEGIN OPENSSH PRIVATE KEY-----\n%s\n-----END OPENSSH PRIVATE KEY-----\n" % fork for fork in VARS["wk_forks"]}
-ASK = "[vault] POST /rotate"
+DEPLOY = {"%s/secrets/deploy/%s" % (HOME, fork.replace("/", "--")): "key" for fork in VARS["wk_forks"]}
+ASK = "[vault] POST /revoke"
 
 
-def renewed(on):
-    """What a rotation does on the server `on`: the controller asked, and each fork's key written."""
-    return [ASK] + ["[%s] write %s/secrets/deploy/%s" % (on, HOME, fork.replace("/", "--")) for fork in sorted(KEYS)]
+def revoked(on, held=()):
+    """What a revocation does on the server `on`: each of a person's credentials held there removed, then the
+    controller asked."""
+    return ["[%s] remove %s" % (on, path) for path in held] + [ASK]
 
 
-def rotating(case, rotate=lambda inv, server: dict(KEYS)):
-    """The controller's rotation, scripted for the test `case`; the real one asks GitHub."""
-    patch = mock.patch.object(rotation, "rotate", rotate)
+def revoking(case, revoke=lambda inv, server: None):
+    """The controller's revocation, scripted for the test `case`; the real one asks GitHub."""
+    patch = mock.patch.object(rotation, "revoke", revoke)
     patch.start()
     case.addCleanup(patch.stop)
 
@@ -49,20 +50,20 @@ def line(on, argv, env, tty=False):
 
 class TestStart(unittest.TestCase):
     def setUp(self):
-        rotating(self)
+        revoking(self)
 
     def test_claude_is_started_in_the_login_shell_on_the_terminal_through_the_injector_with_remote_control_named_for_the_workspace(self):
         w = make()
         r = w.wk("ai", "claude", "x", tty=True)
-        self.assertEqual(r.calls, ["[lin] write /home/u/.claude.json", "[lin] tailscale ip -4 vault"] + renewed("lin")
+        self.assertEqual(r.calls, ["[lin] write /home/u/.claude.json", "[lin] tailscale ip -4 vault"] + revoked("lin")
                          + [line("lin", CLAUDE, INJECTED, tty=True)])
         self.assertEqual((r.code, r.effects), (0, [c for c in r.calls if "tailscale" not in c]))
         self.assertEqual((w.machines["lin"].read("/home/u/.claude.json"), w.machines["lin"].modes["/home/u/.claude.json"]), (ANSWERED, "600"))
-        self.assertEqual(r.err, "==> rotated the push keys of %s\n==> starting claude in x\n" % ", ".join(sorted(KEYS)))
+        self.assertEqual(r.err, "==> starting claude in x\n")
 
     def test_pi_gets_no_proxy_no_ca_and_no_claude_state(self):
         r = make().wk("ai", "pi", "x", tty=True)
-        self.assertEqual(r.effects, renewed("lin") + [line("lin", PI, {}, tty=True)])
+        self.assertEqual(r.effects, revoked("lin") + [line("lin", PI, {}, tty=True)])
         self.assertNotIn("PROXY", "".join(r.calls).upper())
 
     def test_a_mac_starts_it_the_same_way(self):
@@ -99,45 +100,39 @@ class TestStart(unittest.TestCase):
     def test_answers_claude_already_holds_are_not_written_again(self):
         w = make()
         w.machines["lin"].files["/home/u/.claude.json"] = ANSWERED
-        self.assertEqual(w.wk("ai", "claude", "x", tty=True).effects, renewed("lin") + [line("lin", CLAUDE, INJECTED, tty=True)])
+        self.assertEqual(w.wk("ai", "claude", "x", tty=True).effects, revoked("lin") + [line("lin", CLAUDE, INJECTED, tty=True)])
 
-    def test_a_dry_run_asks_for_no_rotation_and_starts_nothing(self):
+    def test_a_dry_run_removes_nothing_asks_for_no_revocation_and_starts_nothing(self):
         r = make().wk("--dry-run", "ai", "claude", "x", tty=True)
-        self.assertEqual((r.code, r.effects, r.plan), (0, [], ["[lin] write /home/u/.claude.json"] + renewed("lin")[:1]
+        self.assertEqual((r.code, r.effects, r.plan), (0, [], ["[lin] write /home/u/.claude.json"] + revoked("lin")
                                                                                    + [line("lin", CLAUDE, INJECTED, tty=True)]))
 
 
-class TestRotation(unittest.TestCase):
-    def test_the_keys_are_written_whole_0600_where_the_ssh_aliases_name_them(self):
-        rotating(self)
+class TestRevocation(unittest.TestCase):
+    def test_a_persons_credentials_here_are_removed_before_the_agent_starts(self):
+        revoking(self)
         w = make()
-        w.wk("ai", "pi", "x", tty=True)
-        for fork, key in KEYS.items():
-            path = "%s/secrets/deploy/%s" % (HOME, fork.replace("/", "--"))
-            self.assertEqual((w.machines["lin"].files[path], w.machines["lin"].modes[path]), (key, "600"))
+        held = dict({HOME + "/secrets/credentials.sh": "export GH_TOKEN=t\n"}, **DEPLOY)
+        w.machines["lin"].files.update(held)
+        r = w.wk("ai", "pi", "x", tty=True)
+        self.assertEqual(r.effects, revoked("lin", [HOME + "/secrets/credentials.sh"] + sorted(DEPLOY)) + [line("lin", PI, {}, tty=True)])
+        self.assertEqual([path for path in held if path in w.machines["lin"].files], [])
 
-    def test_the_controller_rotates_the_keys_of_the_server_that_asks(self):
+    def test_the_controller_revokes_the_keys_of_the_server_that_asks(self):
         asked = []
-        rotating(self, lambda inv, server: asked.append((inv.fleet.hostname, server)) or dict(KEYS))
+        revoking(self, lambda inv, server: asked.append((inv.fleet.hostname, server)))
         make("mac").wk("ai", "pi", "x", tty=True, on="mac")
         self.assertEqual(asked, [("vault", "mac")])
 
-    def test_a_rotation_that_fails_refuses_the_session_and_writes_no_key(self):
+    def test_a_revocation_that_fails_refuses_the_session_with_the_credentials_removed_here(self):
         def failing(inv, server):
-            die("POST /repos/o/r/keys answered HTTP 401: Bad credentials")
-        rotating(self, failing)
+            die("GET /repos/o/r/keys answered HTTP 401: Bad credentials")
+        revoking(self, failing)
         r = make().wk("ai", "pi", "x", tty=True)
-        self.assertEqual((r.code, r.effects), (4, [ASK]))
-        self.assertEqual(r.err, "error: the controller, vault, answered HTTP 502: POST /repos/o/r/keys answered HTTP 401: Bad credentials\n"
-                                "    so lin's push keys are not rotated; forced, the session starts with the keys this server has\n"
+        self.assertEqual((r.code, r.effects), (4, revoked("lin")))
+        self.assertEqual(r.err, "error: the controller, vault, answered HTTP 502: GET /repos/o/r/keys answered HTTP 401: Bad credentials\n"
+                                "    so lin's push keys are still registered on the forks; forced, the session starts with them removed here\n"
                                 "    --force crosses this\n")
-
-    def test_an_answer_that_holds_no_keys_is_refused_too(self):
-        for keys in ({}, {"no fork": "k"}, {"o/r": 1}):
-            rotating(self, lambda inv, server, keys=keys: keys)
-            r = make().wk("ai", "pi", "x", tty=True)
-            self.assertEqual((r.code, r.effects), (4, [ASK]), keys)
-            self.assertIn("error: the controller's answer holds no push keys\n", r.err)
 
     def test_a_controller_that_does_not_answer_refuses_the_session(self):
         w = make()
@@ -146,17 +141,17 @@ class TestRotation(unittest.TestCase):
         self.assertEqual((r.code, r.effects), (4, []))
         self.assertIn("error: the controller, vault, did not answer (the fake is down)\n", r.err)
 
-    def test_force_starts_the_session_with_the_keys_the_server_has_and_says_so_at_exit(self):
+    def test_force_starts_the_session_with_the_credentials_removed_here_and_says_so_at_exit(self):
         w = make()
         w.machines["vault"].down = True
         r = w.wk("ai", "pi", "x", "--force", tty=True)
-        self.assertEqual((r.code, r.effects), (0, [line("lin", PI, {}, tty=True)]))
+        self.assertEqual((r.code, r.effects), (0, [] + [line("lin", PI, {}, tty=True)]))
         self.assertIn("warning: this command was forced past: the controller, vault, did not answer", r.err)
 
 
 class TestRefusals(unittest.TestCase):
     def setUp(self):
-        rotating(self)
+        revoking(self)
 
     def refused(self, w, want, *words):
         r = w.wk(*(words or ("ai", "claude", "x")), tty=True)

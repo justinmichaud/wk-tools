@@ -4,13 +4,13 @@ private halves printed as JSON. GitHub is scripted; the keys are made by a scrip
 import json
 import unittest
 
-from tests import ROOT
 from tests.credsworld import TOKEN, Http
 from tests.world import World
 from wk.core.fakes import Killed
 from wk.core.machine import Result
 from wk.core.vars import VARS
-from wk.creds import net
+from wk.core.errors import Refused
+from wk.creds import net, rotation
 
 GH = "https://api.github.com/repos/"
 FORKS = VARS["wk_forks"]
@@ -124,10 +124,25 @@ class TestRotate(unittest.TestCase):
         self.assertIn("not asked: there is no terminal\n    re-run in a terminal, or pass --yes", r.err)
         self.assertEqual([method for method, _, _, _ in http.asked], ["GET"] * len(FORKS))
 
-    def test_the_playbook_answers_its_question(self):
-        with open(ROOT + "/ansible/roles/credentials/tasks/rotate.yml") as f:
-            self.assertIn('argv: ["{{ wk_root }}/wk", key, rotate, "{{ inventory_hostname }}", --yes]', f.read())
-
     def test_only_a_server_is_rotated_and_only_on_the_controller(self):
         self.assertIn("error: vault holds no workspace: it is the controller", make()[0].wk("key", "rotate", "vault").err)
         self.assertIn("error: wk key rotate runs on the controller (vault), and this is lin", make()[0].wk("key", "rotate", "lin", on="lin").err)
+
+
+class TestRevoke(unittest.TestCase):
+    def test_every_key_of_the_server_goes_from_every_fork_and_no_other_is_touched(self):
+        w, _ = make()
+        listed = OLD + [{"id": 9, "title": TITLE}]
+        http = Http(dict([(("GET", GH + fork + "/keys?per_page=100"), (200, listed)) for fork in FORKS]
+                         + [(("DELETE", "%s%s/keys/%d" % (GH, fork, n)), (204, b"")) for fork in FORKS for n in (1, 9)]))
+        with http.patch():
+            rotation.revoke(w.inv("vault"), "lin")
+        self.assertEqual([(method, url) for method, url, _, _ in http.asked if method != "GET"],
+                         [("DELETE", GH + fork + "/keys/%d" % n) for fork in FORKS for n in (1, 9)])
+
+    def test_without_github_token_nothing_is_asked(self):
+        w, _ = make(token=None)
+        http = github(OLD)
+        with http.patch(), self.assertRaisesRegex(Refused, "managed with github-token, and there is none"):
+            rotation.revoke(w.inv("vault"), "lin")
+        self.assertEqual(http.asked, [])

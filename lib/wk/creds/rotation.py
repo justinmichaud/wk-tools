@@ -1,9 +1,11 @@
-"""The push keys: one writable deploy key per fork in `wk_forks`, per server, replaced at every agent session.
+"""The push keys: one writable deploy key per fork in `wk_forks`, per server, made when a person's session asks for
+its credentials and revoked before an agent session starts.
 
     keys = rotate(inv, "moose")     # on the controller: {fork: a new private key}, each registered, the older ones gone
+    revoke(inv, "moose")            # on the controller: every key of the server's gone from every fork
 
-The controller makes each key and asks GitHub with github-token. A server asks for its rotation through the
-controller's API (wk.api.client.rotate)."""
+The controller makes each key and asks GitHub with github-token. A server asks through the controller's API
+(wk.api.client.credentials and revoke)."""
 
 import json
 import time
@@ -42,21 +44,36 @@ def github(method, path, token, body=None, want=(200,)):
     return doc
 
 
-def rotate(inv, server):
-    token = inv.secrets().get("github-token")
-    if not token:
+def token(inv):
+    value = inv.secrets().get("github-token")
+    if not value:
         die("the forks' deploy keys are managed with github-token, and there is none: `wk key set github-token`")
-    name = title(server, inv.clock.now())
-    keys = {}
+    return value
+
+
+def drop(path, server, token, keep=None):
+    """Every key of `server` on the fork at `path` deleted, but the one whose id is `keep`."""
+    for old in github("GET", path + "?per_page=100", token):
+        if old.get("title", "").startswith("wk %s " % server) and old.get("id") != keep:
+            act.act("github", "DELETE %s/%s (%s)" % (path, old["id"], old["title"]),
+                    lambda: github("DELETE", "%s/%s" % (path, old["id"]), token, want=(204, 404)))
+
+
+def rotate(inv, server):
+    secret, name, keys = token(inv), title(server, inv.clock.now()), {}
     for fork in VARS["wk_forks"]:
         private, public = keypair(inv.here, name)
         path = "/repos/%s/keys" % fork
         made = act.act("github", "POST %s %s" % (path, name),
-                       lambda: github("POST", path, token, {"title": name, "key": public, "read_only": False}, (201,)), {"id": None})
-        for old in github("GET", path + "?per_page=100", token):
-            if old.get("title", "").startswith("wk %s " % server) and old.get("id") != made.get("id"):
-                act.act("github", "DELETE %s/%s (%s)" % (path, old["id"], old["title"]),
-                        lambda: github("DELETE", "%s/%s" % (path, old["id"]), token, want=(204, 404)))
+                       lambda: github("POST", path, secret, {"title": name, "key": public, "read_only": False}, (201,)), {"id": None})
+        drop(path, server, secret, made.get("id"))
         keys[fork] = private
     info("rotated %s's deploy keys on %s" % (server, ", ".join(keys)))
     return keys
+
+
+def revoke(inv, server):
+    secret = token(inv)
+    for fork in VARS["wk_forks"]:
+        drop("/repos/%s/keys" % fork, server, secret)
+    info("revoked %s's deploy keys on %s" % (server, ", ".join(VARS["wk_forks"])))

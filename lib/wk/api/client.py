@@ -3,7 +3,8 @@
     reserve(inv, "x")      wk new: the name is this server's, or the command ends
     release(inv, "x")      wk rm: the name is free again
     holders(inv)           {name: server}: wk ls and wk zed off a server, and wk rm of a name with no workspace
-    rotate(inv)            wk ai: this server's push keys replaced, and the new ones written under its secrets
+    credentials(inv)       wk enter: a person's credentials, push keys made anew, written under this server's secrets
+    revoke(inv)            wk ai: those removed here and this server's push keys revoked, before an agent starts
 
 A request that changes the record is printed, not sent, under --dry-run."""
 
@@ -13,7 +14,7 @@ from wk.core import act
 from wk.core.act import barrier, die, info, warn
 from wk.core.errors import NEEDS_PERSON
 from wk.core.vars import VARS
-from wk.creds import rules
+from wk.creds import human, rules
 
 FORK = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 ROTATE_TIMEOUT = 120
@@ -67,22 +68,43 @@ def holders(inv):
     return doc["names"]
 
 
-def rotate(inv):
-    """This server's push keys replaced by the controller and written here. A rotation that fails is a barrier: forced,
-    the session starts with the keys this server has."""
-    status, keys = ask(inv, "POST", "/rotate", ROTATE_TIMEOUT)
+def written(inv):
+    """The files a person's credentials are written to: the variables, and one push key per fork."""
+    home = inv.wk_home + "/secrets"
+    return home + "/" + human.FILE, home + "/deploy"
+
+
+def credentials(inv):
+    """A person's credentials asked of the controller and written here, unless they are here already. One that cannot
+    be had is said, and the shell opens without them."""
+    script, deploy = written(inv)
+    if inv.here.exists(script):
+        return
+    status, doc = ask(inv, "POST", "/credentials", ROTATE_TIMEOUT)
     if act.flags.dry_run:
         return
-    if status != 200:
-        why = said(inv, status, keys)
-    elif not keys or not all(FORK.fullmatch(k) and isinstance(v, str) for k, v in keys.items()):
-        why = "the controller's answer holds no push keys"
-    else:
-        why = None
-    if why:
-        barrier("%s\n    so %s's push keys are not rotated; forced, the session starts with the keys this server has"
-                % (why, inv.fleet.hostname), NEEDS_PERSON)
+    keys, env = (doc.get("deploy"), doc.get("env")) if status == 200 else (None, None)
+    if not (isinstance(keys, dict) and keys and all(FORK.fullmatch(k) and isinstance(v, str) for k, v in keys.items())
+            and isinstance(env, dict)):
+        warn("%s\n    so this shell has no push keys and no GitHub or Bugzilla login: `exit` and `wk enter` again asks once more"
+             % (said(inv, status, doc) if status != 200 else "the controller's answer holds no credentials"))
         return
     for fork, private in sorted(keys.items()):
-        inv.here.write("%s/secrets/deploy/%s" % (inv.wk_home, fork.replace("/", "--")), private, mode="600")
-    info("rotated the push keys of %s" % ", ".join(sorted(keys)))
+        inv.here.write("%s/%s" % (deploy, fork.replace("/", "--")), private, mode="600")
+    inv.here.write(script, human.script(env), mode="600")
+    info("delivered this session's push keys for %s and its logins (%s)" % (", ".join(sorted(keys)), ", ".join(sorted(env)) or "none"))
+
+
+def revoke(inv):
+    """A person's credentials removed from this server, then its push keys revoked by the controller, so an agent
+    starts with none and any copy is dead. A revocation that fails is a barrier: forced, the session starts with the
+    files removed and the keys still registered."""
+    script, deploy = written(inv)
+    for path in [script] + ["%s/%s" % (deploy, f) for f in sorted(inv.here.listdir(deploy) or [])]:
+        if inv.here.exists(path):
+            inv.here.remove(path)
+    status, doc = ask(inv, "POST", "/revoke", ROTATE_TIMEOUT)
+    if act.flags.dry_run or status == 200:
+        return
+    barrier("%s\n    so %s's push keys are still registered on the forks; forced, the session starts with them removed here"
+            % (said(inv, status, doc), inv.fleet.hostname), NEEDS_PERSON)

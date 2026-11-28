@@ -1,5 +1,6 @@
 """`wk ai`: one agent session in a workspace, started as `wk enter` starts a command: the login's own shell, in the
-checkout, inside the container on Linux, once the controller has rotated the server's push keys. The agents themselves
+checkout, inside the container on Linux, once a person's credentials are gone from the server and the controller has
+revoked its push keys: an agent holds no credential (DESIGN.md, Trust). The agents themselves
 are the playbook's agents role's to install, under <wk_home>/cache/agents."""
 
 import json
@@ -51,7 +52,7 @@ def start(inv, agent, name, tail):
             % (agent, conf.name, argv[0], NEEDS[agent] and NEEDS[agent] % conf.name, conf.name, inv.fleet.controller.name))
     if agent == "claude":
         trust(m, ws.path + "/src")
-    client.rotate(inv)
+    client.revoke(inv)
     info("starting %s in %s" % (agent, name))
     env = ["env", "WK_WORKSPACE=" + ws.name] + ["%s=%s" % kv for kv in sorted(extra.items())]
     return m.act(inv.driver(ws.driver, m).enter_argv(ws, env + argv + tail, tty=tty), stream=True, tty=tty).rc

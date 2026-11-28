@@ -43,14 +43,14 @@ two is a bug.
 - What keeps that safe is what a server holds: nothing a leak of which costs
   more than a fork's branches. The interesting credentials (the claude.ai
   login, the tailnet's keys, the BMCs' logins) never leave the controller.
-- `github-token` is on every server because `git-webkit` needs it, and a
-  classic token with `public_repo` can itself add a deploy key to a fork:
-  rotation bounds the ssh keys, not that token.
-- A server's push keys are rotated every time an agent session starts there,
-  so a key a session saw stops working at the next one.
-- A human session is an ordinary login. `git push`, `git-webkit` and `gh` work
-  unmodified, with no wrapper, prompt or approval, between agent sessions as
-  in them.
+- Agents neither push nor change anything on GitHub. A server holds no push
+  key and no GitHub or Bugzilla login of its own: a person's session asks the
+  controller for them (`wk enter`), and `wk ai` removes them from the server
+  and has the controller revoke its push keys before an agent starts.
+- A human session is a login shell from `wk enter`. `git push`, `git-webkit`
+  and `gh` work in it unmodified, with no wrapper, prompt or approval. An
+  agent running on the same server could read what that shell holds, so
+  `wk enter` says so and goes on: the person decides.
 - Claude runs with `--dangerously-skip-permissions` and Remote Control.
 - A server is fresh-installed often, which is how any drift, an agent's
   included, is removed. `wk machine check` proves the fresh server builds and
@@ -106,7 +106,7 @@ Zed  --ssh-->         wk <cmd> <ws> ...                         secrets/   every
 wk ls, wk zed           |- workspace: ~/wk/ws/<name>/src        injector   the one claude.ai login
                         |- driver:    container | plain          wk machine install | setup | check
                         |- tasks:     pueue                     wk key set | ls | check | rotate
-                        |- secrets/:  rotated push keys, env.sh
+                        |- secrets/:  env.sh; a person's keys and logins
                         '- mirror:    ~/wk/git/WebKit.git
 ```
 
@@ -122,7 +122,8 @@ HTTP on the tailnet address):
 | `PUT /ws/<name>` | reserves the name for the asking server; 409 naming its holder when another holds it |
 | `DELETE /ws/<name>` | releases it, when the asking server holds it |
 | `GET /ws` | every name and its server |
-| `POST /rotate` | rotates the asking server's push keys and returns them |
+| `POST /credentials` | a person's session's: the asking server's push keys made anew, and the GitHub and Bugzilla logins |
+| `POST /revoke` | before an agent session: every push key of the asking server's revoked |
 
 The caller is the tailnet node `tailscale whois` names for the request's
 address; a node with no conf is refused.
@@ -192,7 +193,7 @@ Layout under a machine's wk home, `~/wk` (or `$WK_HOME`):
 | `ws/<name>/.ready` | server | written last by `wk new`; absent means half-made |
 | `cache/` | all | pinned downloads; `wk gc` reclaims an entry nothing pins |
 | `pueue/` | server | pueue's config, socket, state and task logs |
-| `secrets/` | server | what a server holds: its rotated deploy keys, `ssh_config`, `env.sh` |
+| `secrets/` | server | `ssh_config`, GitHub's `known_hosts`, `env.sh`; while a person's session holds them, `deploy/` and `credentials.sh` |
 | `claude-login/` | server | the placeholder claude.ai login |
 | `injector-ca.pem` | server | the injector's CA, which an agent session trusts |
 
@@ -219,8 +220,9 @@ converges. A half-made workspace is wiped, never repaired.
     login's, hostname the server's: inside reads what the login reads.
   - `plain`: Mac. Commands run in the checkout.
 - `wk enter <ws> [-- <command>]` is a login shell in the checkout (inside the
-  container on Linux) that has sourced `secrets/env.sh`. Zed's terminal on a
-  Mac is already that shell.
+  container on Linux) that has sourced `secrets/env.sh`, with the person's
+  credentials delivered first when the server holds none. In Zed's terminal,
+  `wk enter <ws>` is the door to a push or `git-webkit pr`.
 - `wk ls` asks the controller for every name and its server; on a server,
   `wk ls` lists that server's own workspaces with their state.
 - `wk zed <ws>` on the workstation asks the controller which server holds
@@ -266,17 +268,20 @@ converges. A half-made workspace is wiped, never repaired.
   `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `bmc/<machine>/user` and
   `bmc/<machine>/password`, and `sudo-password` while a system being replaced
   asks for one.
-- What a server holds, under `secrets/`: one deploy key per fork with its ssh
-  alias, and `env.sh` (`github-token`, the Bugzilla login).
-  pi's `litellm-key` sits in `~/.pi/agent/models.json`. Nothing else.
-- **Rotation.** `wk key rotate <server>` on the controller makes a new
-  ed25519 key for each fork in `wk_forks`, adds its public half to the fork
-  as a writable deploy key titled `wk <server> <time>`, deletes that fork's
-  older `wk <server> ...` keys, and prints the private halves as JSON
-  (rotation revokes, so it is destructive and asks). Two callers: the
-  `credentials` role, which writes them to the server; and the API's
-  `POST /rotate`, which `wk ai` calls before the agent starts and whose
-  answer it writes.
+- What a server holds, under `secrets/`: an ssh alias per fork, GitHub's
+  published host keys, and `env.sh`, which holds no secret and sources
+  `credentials.sh` when there is one. pi's `litellm-key` sits in
+  `~/.pi/agent/models.json`.
+- A person's credentials: `wk enter` on a server that holds none asks the
+  API's `POST /credentials` and writes one deploy key per fork under
+  `deploy/` and `credentials.sh` (`github-token` and the Bugzilla login, as
+  `git-webkit` and `gh` read them), all 0600. They stay until `wk ai`.
+- **Push keys.** The controller makes a new ed25519 key for each fork in
+  `wk_forks`, adds its public half to the fork as a writable deploy key
+  titled `wk <server> <time>`, and deletes that fork's older
+  `wk <server> ...` keys: for `POST /credentials`, and as `wk key rotate
+  <server>` typed by a person (it revokes, so it asks). `POST /revoke`
+  deletes every `wk <server> ...` key.
 - The injector is a forward proxy on the controller, reachable only on the
   tailnet. For Claude's hosts it terminates TLS with its own CA and replaces
   the placeholder with the real login, which it alone refreshes. Every other
@@ -284,8 +289,8 @@ converges. A half-made workspace is wiped, never repaired.
 
 ## Agent sessions
 
-- `wk ai claude|pi <ws>` on a server rotates the server's push keys, then
-  starts the agent in the workspace (inside the container on Linux) with
+- `wk ai claude|pi <ws>` on a server removes a person's credentials from it
+  and has the controller revoke its push keys, then starts the agent in the workspace (inside the container on Linux) with
   Remote Control on, named after the workspace, the injector as its proxy and
   its CA trusted. The words after `--` are the agent's; given any, it runs
   without a terminal too (`-- -p <prompt>`).
@@ -315,8 +320,8 @@ All of it runs on the controller, typed by the person.
   The controller's checkout pushes with the stored `github-token`, which a
   git credential helper of that checkout alone reads from its file.
   Every setting and workaround of a workstation lives in the role, so a setup
-  re-applies all of it. Every task but the rotation is idempotent: a second run
-  reports changed only for the keys it rotated.
+  re-applies all of it. Every task is idempotent: a second run reports
+  nothing changed.
 - A server fetches exactly the controller's commit from the repository's
   public URL. Uncommitted changes, and a commit on no remote branch, are
   barriers.
@@ -429,8 +434,8 @@ lib/wk/cmd/             one module per command: COMMAND table + main
 lib/wk/workspace/       drivers, mirror, git wiring, lifecycle
 lib/wk/tasks/           pueue client, sizing, status
 lib/wk/webkit/          project.json, presets, Tools/Scripts command lines (the only WebKit names)
-lib/wk/creds/           the secrets files, credential rules, rotation, the injector
-lib/wk/api/             the controller's API: the workspace names and rotation
+lib/wk/creds/           the secrets files, credential rules, push keys, a person's credentials, the injector
+lib/wk/api/             the controller's API: the workspace names, a person's credentials, their revocation
 lib/wk/agent/           session
 lib/wk/provision/       the inventory and the ansible-playbook lines, doctor rows
 tests/                  unittest, one test per behaviour, against fakes

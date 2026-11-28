@@ -3,10 +3,12 @@
     PUT /ws/<name>      reserves the name for the asker: 200; 409 naming the holder when another server holds it
     DELETE /ws/<name>   releases it when the asker holds it: 200; 404 when no server does; 409 naming the holder
     GET /ws             200 {"names": {"<name>": "<server>"}}
-    POST /rotate        rotates the asker's push keys: 200 {"<owner>/<repo>": "<private key>"}; 502 when that fails
+    POST /credentials   a person's session's: the asker's push keys made anew and the logins git-webkit and gh read,
+                        200 {"deploy": {"<owner>/<repo>": "<private key>"}, "env": {"<variable>": "<value>"}}
+    POST /revoke        before an agent session: every push key of the asker's revoked, 200 {}; 502 when that fails
 
 The asker is the node `tailscale whois` names for the request's address; a node with no conf is answered 403, and only
-a server reserves, releases and rotates. Every answer is a JSON object, and every refusal's says why in "message"."""
+a server reserves, releases, asks for credentials and revokes them. Every answer is a JSON object, and every refusal's says why in "message"."""
 
 import http.server
 import json
@@ -15,7 +17,7 @@ from wk.api import client, names
 from wk.core.act import die, info
 from wk.core.conf import THE
 from wk.core.errors import NEEDS_PERSON, Refused
-from wk.creds import rotation
+from wk.creds import human, rotation
 from wk.workspace.lifecycle import NAME
 
 WHOIS_TIMEOUT = 10
@@ -43,8 +45,11 @@ def route(inv, method, path, address):
         return 200, {"names": names.holders(inv.here, home)}
     if method in ("PUT", "DELETE", "POST") and not who.holds_workspaces:
         return 403, {"message": "%s holds no workspace: it is %s" % (who.name, THE[who.kind])}
-    if (method, path) == ("POST", "/rotate"):
-        return 200, rotation.rotate(inv, who.name)
+    if (method, path) == ("POST", "/credentials"):
+        return 200, human.made(inv, who.name)
+    if (method, path) == ("POST", "/revoke"):
+        rotation.revoke(inv, who.name)
+        return 200, {}
     name = path[len("/ws/"):]
     if method not in ("PUT", "DELETE") or not path.startswith("/ws/") or not NAME.fullmatch(name):
         return 404, {"message": "no such request: %s %s" % (method, path)}
