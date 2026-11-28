@@ -86,6 +86,13 @@ Typed on alce and tolken, 2026-11-28.
 - ante: a person installed Debian 13, gave `jmichaud` sudo without a password, and tagged the node `tag:person`; the
   tailnet's policy lets `tag:wk-controller` (alce) alone ssh into it. `wk machine setup ante` from alce: `ok=20
   changed=11`, then `changed=0`. Zed 1.30.2, `wk ls` answered by the controller.
+- The tailnet's policy now has the design's tags, applied through its API from alce and checked by its own tests:
+  `tag:wk-controller` (alce), `tag:wk-server` (moose), `tag:person` (ante). A server reaches the controller on 3128 and
+  3129 alone; the person and the controller ssh into every server, the controller alone into ante. Measured: moose
+  answered by the API, alce into ante and to moose's BMC, tolken refused by ante. The freshly installed moose had joined
+  as `tag:wk`, the stored auth key's tag, which reached no port of alce, so `wk machine check moose` built `jsc-release`,
+  ran `jsc` and passed the stress test, then its `wk rm` could not release the name. `tailnet-auth-key` is now a
+  reusable, pre-approved `tag:wk-server` key minted through the API.
 - ante froze in GNOME's idle suspend (S3 `deep`) twice; it does not resume. The role keeps it awake on mains power.
 
 ## Verified live: the controller and tolken
@@ -177,11 +184,9 @@ What the live runs corrected: the unit directory is made before a unit is writte
 - The claude.ai login is the one the previous tree's injector on the client held; its refresh token ends in 26 days, and the previous tree's copy stops working at the injector's next refresh. A login made for this purpose alone replaces it: `wk key set claude-login`, `wk machine setup alce --stage controller`.
 - pi is installed on no server. moose's node is 18.19.1, tolken's login shell has none (nvm's is on an interactive
   shell's `PATH` alone), and pi needs 22.19.
-- The tailnet's policy is wider than DESIGN.md's: alce, moose and tolken are all `tag:workstation`, which reaches every
-  node on every port, and Tailscale SSH lets `tag:workstation` into any tagged node. The design's rules (servers reach
-  the controller on the API's and the injector's ports alone; the person and the controller ssh everywhere; servers
-  ssh to each other) need distinct tags for the controller and the servers; `wk_server_tags` names the tag a Mac's join
-  key carries, `tag:workstation` until then.
+- tolken is still `tag:workstation`, which the tailnet's policy lets reach alce (ssh and the API) while this session
+  drives the fleet from it; its reinstall makes it a `tag:wk-server` (`wk_server_tags`, its join key's tag), and the
+  policy's `tag:workstation` exception goes. rpi5 is `tag:workstation` too.
 - alce reaches tolken by an OpenSSH key in tolken's `authorized_keys` (tolken runs the GUI Tailscale app, which serves
   no Tailscale SSH), and tolken still holds `secrets/rotate-key`, alce `~/.ssh/authorized_keys`'s `wk-rotate tolken`
   line: tolken's reinstall, with the open-source `tailscaled`, removes the first two; the line is removed by hand.

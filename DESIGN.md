@@ -30,7 +30,9 @@ two is a bug.
   and servers into each other; nothing but the person logs in to the
   controller.
 - A server reaches the controller only through the controller's API and the
-  injector, two ports the tailnet's policy opens to servers. The API knows
+  injector, two ports the tailnet's policy opens to servers. The tags:
+  `tag:wk-controller`, `tag:wk-server` (the join key's), `tag:person`
+  (the workstation). The API knows
   which server is asking from the tailnet itself (`tailscale whois`).
 - Bench boards are WiFi only (pass 2).
 

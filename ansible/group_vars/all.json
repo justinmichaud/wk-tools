@@ -57,7 +57,7 @@
   "wk_install_reset": "PowerForceRestart",
   "wk_install_console_port": 2200,
   "wk_tailnet_api": "https://api.tailscale.com/api/v2",
-  "wk_server_tags": ["tag:workstation"],
+  "wk_server_tags": ["tag:wk-server"],
   "wk_zed_install": "https://zed.dev/install.sh",
   "wk_workstation_packages": ["git", "curl", "openssh-client", "python3-psutil", "dconf-cli"],
   "wk_homebrew_install": "https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh",
