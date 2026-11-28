@@ -73,6 +73,18 @@ class TestThePlaybook(unittest.TestCase):
     def test_each_step_is_wk_typed_in_the_logins_login_shell(self):
         steps = re.findall(r'argv: "\{\{ wk_check_wk \+ \[\'(\w+)\'', playbook())
         self.assertEqual(steps, ["new", "run", "enter", "test", "rm"])
+        self.assertEqual(re.findall(r'argv: "\{\{ (wk_check_\w+)', playbook()), ["wk_check_wk", "wk_check_wk", "wk_check_take", "wk_check_agent",
+                                                                               "wk_check_wk", "wk_check_take", "wk_check_wk", "wk_check_wk"])
+
+    def test_an_agents_shell_is_refused_a_push_and_a_persons_is_not(self):
+        text = playbook()
+        self.assertIn("""wk_check_take: "{{ wk_check_wk + ['ai', 'claude', wk_check_ws, '--', '--version'] }}\"""", text)
+        self.assertIn("""wk_check_agent: ["{{ ansible_facts['user_shell'] }}", -lc, 'WK_AGENT=check exec wk "$@"', wk]""", text)
+        agent, person = text.index("- name: An agent's shell cannot push"), text.index("- name: A person's shell pushes")
+        self.assertLess(text.index("- name: Start an agent session"), agent)
+        self.assertLess(agent, person)
+        self.assertIn("failed_when: wk_check_agent_push.rc == 0", text[agent:person])
+        self.assertLess(person, text.index("- name: Take the person's credentials away again"))
         self.assertIn("""wk_check_wk: ["{{ ansible_facts['user_shell'] }}", -lc, 'exec wk "$@"', wk]""", playbook())
 
     def test_the_presets_are_built_in_turn_and_the_first_that_fails_ends_the_check(self):

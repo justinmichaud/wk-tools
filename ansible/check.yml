@@ -10,6 +10,12 @@
     wk_check_presets: "{{ ['jsc-release', 'mac-release'] if 'mac' in group_names else ['jsc-release'] }}"
     # The words after `wk`, run by the login shell: exec "$0" "$@" keeps each word whole.
     wk_check_wk: ["{{ ansible_facts['user_shell'] }}", -lc, 'exec wk "$@"', wk]
+    # The same words in a shell marked as an agent session's, as `wk ai` marks one.
+    wk_check_agent: ["{{ ansible_facts['user_shell'] }}", -lc, 'WK_AGENT=check exec wk "$@"', wk]
+    wk_check_push: [git, push, --dry-run, fork, "HEAD:refs/heads/{{ wk_check_ws }}"]
+    # `wk ai` takes a person's credentials away and has the controller revoke the push keys before the agent starts;
+    # --version makes Claude say its version and leave.
+    wk_check_take: "{{ wk_check_wk + ['ai', 'claude', wk_check_ws, '--', '--version'] }}"
 
   tasks:
     - name: Gather the login's shell
@@ -43,10 +49,26 @@
           register: wk_check_run
           failed_when: wk_check_run.rc != 0 or wk_check_run.stdout_lines != ['2']
 
-        # The push keys and GitHub's host keys, as a person's push uses them: nothing is pushed.
-        - name: Push to the fork, as a dry run
+        # Agents neither push nor change GitHub; a person's session does both (DESIGN.md, Trust). Nothing is pushed.
+        - name: Start an agent session, which takes a person's credentials away
           ansible.builtin.command:
-            argv: "{{ wk_check_wk + ['enter', wk_check_ws, '--', 'git', 'push', '--dry-run', 'fork', 'HEAD:refs/heads/' ~ wk_check_ws] }}"
+            argv: "{{ wk_check_take }}"
+
+        - name: An agent's shell cannot push
+          ansible.builtin.command:
+            argv: "{{ wk_check_agent + ['enter', wk_check_ws, '--'] + wk_check_push }}"
+          register: wk_check_agent_push
+          changed_when: false
+          failed_when: wk_check_agent_push.rc == 0
+
+        # The person's push keys and GitHub's host keys, as a person's push uses them.
+        - name: A person's shell pushes to the fork, as a dry run
+          ansible.builtin.command:
+            argv: "{{ wk_check_wk + ['enter', wk_check_ws, '--'] + wk_check_push }}"
+
+        - name: Take the person's credentials away again
+          ansible.builtin.command:
+            argv: "{{ wk_check_take }}"
 
         - name: Run a JSC stress test
           ansible.builtin.command:
