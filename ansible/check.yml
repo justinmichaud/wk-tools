@@ -1,7 +1,7 @@
 ---
 # The end-to-end check of a server, run on the controller. `wk machine check <server>` runs
 #   ansible-playbook -i ansible/inventory.py --limit <server> [--check --diff] ansible/check.yml
-# Each step is wk, typed on the server in a login shell as its person types it.
+# Each step is wk, typed on the server in a login shell as its person types it. Nothing is pushed: the push is a dry run.
 
 - name: Check that a server builds, runs and tests WebKit
   hosts: linux:mac
@@ -42,6 +42,11 @@
             argv: "{{ wk_check_wk + ['run', wk_check_ws, '--preset', 'jsc-release', '--', '-e', 'print(1+1)'] }}"
           register: wk_check_run
           failed_when: wk_check_run.rc != 0 or wk_check_run.stdout_lines != ['2']
+
+        # The push keys and GitHub's host keys, as a person's push uses them: nothing is pushed.
+        - name: Push to the fork, as a dry run
+          ansible.builtin.command:
+            argv: "{{ wk_check_wk + ['enter', wk_check_ws, '--', 'git', 'push', '--dry-run', 'fork', 'HEAD:refs/heads/' ~ wk_check_ws] }}"
 
         - name: Run a JSC stress test
           ansible.builtin.command:

@@ -318,12 +318,14 @@ All of it runs on the controller, typed by the person.
 - A server fetches exactly the controller's commit from the repository's
   public URL. Uncommitted changes, and a commit on no remote branch, are
   barriers.
-- `wk machine setup` installs nothing with a package manager: a fresh install
-  put every package there, and what is absent is named.
+- `wk machine setup` installs nothing on a server with a package manager: a
+  fresh install put every package there, and what is absent is named. A
+  workstation, which a person installed, gets its few packages from apt.
 - `wk machine check <server>` runs `ansible/check.yml`: on the server, a
   workspace `check-<time>` is made, built with each of the server's check
   presets (`jsc-release` everywhere, `mac-release` on a Mac), `jsc` runs a
-  line, one JSC stress test passes, and the workspace is removed. It is the
+  line, a dry-run push to the fork goes through its deploy key, one JSC
+  stress test passes, and the workspace is removed. It is the
   end-to-end proof that a fresh server, with today's WebKit and today's
   distribution, works. Its exit code is the playbook's.
 - Renewing a server is three commands typed together:
