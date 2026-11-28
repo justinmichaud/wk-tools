@@ -17,14 +17,16 @@
       no_log: true
       diff: false
 
-    # --fork returns once the socket listens. The server leaves with its one client. The throttle spaces the replies:
-    # this BMC loses NBD replies that arrive together, as bmcweb did before its change 4ee8f0b7, and its NBD client
-    # then waits 30 s and gives the disk up. At 1 MiB/s one attach in two died that way, at 640 KiB/s none of seven.
+    # --fork returns once the socket listens; --persistent serves each connection the bridge makes again. The
+    # throttle spaces the replies: this BMC loses NBD replies that arrive together, as bmcweb did before its change
+    # 4ee8f0b7, and its NBD client then waits 30 s and gives the disk up. At 1 MiB/s one attach in two died that way,
+    # at 640 KiB/s none of seven; one more died 41 s in, before the restart, so the bridge connects again.
     - name: Serve the image
       ansible.builtin.command:
         argv:
           - qemu-nbd
           - --fork
+          - --persistent
           - --read-only
           - "--socket={{ wk_install_socket }}"
           - --object
@@ -32,10 +34,12 @@
           - --image-opts
           - "driver=throttle,throttle-group=pace,file.driver=raw,file.file.driver=file,file.file.filename={{ wk_install_iso }}"
 
+    # When the BMC closes the websocket the disk leaves the server; the loop attaches it again, until detach.yml
+    # stops it by the socket in its command line.
     - name: Carry the image to the BMC
       ansible.builtin.command:
-        argv: ["{{ wk_websocat }}", --binary, --insecure, --basic-auth-file, "{{ wk_install_build }}/bmc-login",
-               "wss://{{ wk_bmc }}/vm/0/0", "unix:{{ wk_install_socket }}"]
+        argv: [sh, -c, 'while :; do "$0" --binary --insecure --basic-auth-file "$1" "$2" "unix:$3"; sleep 5; done',
+               "{{ wk_websocat }}", "{{ wk_install_build }}/bmc-login", "wss://{{ wk_bmc }}/vm/0/0", "{{ wk_install_socket }}"]
       async: "{{ (wk_install_minutes + wk_install_boot_minutes) * 60 }}"
       poll: 0
       register: wk_bridge

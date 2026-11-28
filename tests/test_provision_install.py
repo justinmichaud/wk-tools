@@ -241,7 +241,7 @@ class TestThePlaybook(unittest.TestCase):
         self.assertIn('dest: "{{ wk_install_build }}/', tasks()["media.yml"])
 
     def test_the_bridge_is_the_pinned_websocat_the_controller_role_fetched(self):
-        self.assertIn('argv: ["{{ wk_websocat }}", --binary,', tasks()["media.yml"])
+        self.assertIn('"$0" --binary --insecure --basic-auth-file "$1" "$2" "unix:$3"; sleep 5; done\',\n               "{{ wk_websocat }}",', tasks()["media.yml"])
         self.assertIn('{tool: "{{ wk_websocat }}", asks: --version', tasks()["install.yml"])
 
     def test_the_bmcs_password_reaches_the_bridge_in_a_file_and_no_command_line(self):
