@@ -47,7 +47,7 @@ previous design; the tolken rows on tolken, provisioned from alce.
 | `wk key check` | yes | yes | no |
 | Each credential's rule and live probe | yes | yes, HTTP scripted | yes: `github-user`, `github-token`, `tailnet-api-key`, `claude-login`; no for `bugzilla-*`, `litellm-key` |
 | `wk key rotate <server>`: a writable deploy key per fork, the server's older ones deleted, the private halves as JSON; it asks, `--yes` answers | yes | yes, HTTP and ssh-keygen scripted | yes: alce, for tolken, by the `credentials` role |
-| `wk ai` asking the controller's API for a rotation (`POST /rotate`) and writing the keys; a failed one a barrier | yes | yes, the rotation itself through the API end to end | yes: tolken, the forks' `wk tolken <time>` keys replaced in 4 s |
+| A person's credentials: `wk enter` asks `POST /credentials` (push keys made anew, the GitHub and Bugzilla logins) and writes `deploy/` and `credentials.sh`; `wk ai` removes them and asks `POST /revoke`, marks the session `WK_AGENT`, and `wk enter` under it is given none; a running agent is named | yes | yes | yes: moose, 2026-11-28 (below) |
 | The injector: started, its CA made, answering with no login | yes | yes | yes: alce |
 | The injector: TLS for Claude under its CA, the placeholder recognised, a refresh asked for on first use | yes | yes, on loopback sockets | yes: alce, from moose |
 | The injector: the login replaced, a refreshed login kept | yes | yes, on loopback sockets | yes: alce, a refresh on first use and the login replaced on requests from moose |
@@ -100,6 +100,15 @@ Typed on alce and tolken, 2026-11-28.
 - That push first failed `Host key verification failed`: a fresh server had never seen github.com's host key. The
   credentials role now writes GitHub's published keys (its API's `meta`) to `secrets/known_hosts` for the push aliases,
   and `wk machine check` pushes to the fork as a dry run (e237a2b3, d966c574).
+- Agents neither push nor change GitHub (98ca88d6, bf1a2b03, and the one after). The old design's 13 deploy keys
+  were deleted from the forks, and alce's `wk-openbao` and `secrets/deploy-key/` removed; the credentials stage then
+  left moose and tolken an `env.sh` with no secret, and their own keys were removed and revoked: the forks held no key.
+  On moose, `wk ai claude e2e -- -p` with no person's credentials: the agent's `git push --dry-run fork` was refused
+  (`Permission denied (publickey)`, no deploy key), `WK_AGENT=claude`, no `GH_TOKEN` and no Bugzilla password.
+  `wk enter e2e` then delivered three push keys and the logins: `git push --dry-run fork` answered `* [new branch]`,
+  `GET /user` with `GH_TOKEN` 200, and git-webkit's `webkitscmpy.remote.GitHub` found `justinmichaud` with a token and
+  read WebKit/WebKit's open pull requests. With `wk ai claude` running, `wk enter` named it (`70361 claude ... e2e`)
+  and delivered all the same; the agent's start had removed the person's keys. No pull request was opened.
 - ante: a person installed Debian 13, gave `jmichaud` sudo without a password, and tagged the node `tag:person`; the
   tailnet's policy lets `tag:wk-controller` (alce) alone ssh into it. `wk machine setup ante` from alce: `ok=20
   changed=11`, then `changed=0`. Zed 1.30.2, `wk ls` answered by the controller.
@@ -231,9 +240,7 @@ What the live runs corrected: the unit directory is made before a unit is writte
   fails there until a person runs it, or the store holds tolken's password. Its stages but `xcode` run.
 - tolken's interactive shells put the previous tree (`~/Development/wk-tools/bin`, `container/bin`) ahead of
   `~/wk/bin`, from `.zshrc`; its reinstall removes it.
-- The forks still hold the previous design's deploy keys (`wk build key (...)`, `devbox-arm64`, `wk shared deploy key`),
-  and alce still runs `wk-openbao.service` and holds `deploy-key/*` in `secrets/`.
-- `bugzilla-password` is not on the controller, and its conf has no `litellm_url=`: Bugzilla through `git-webkit` and pi's `models.json` wait for them.
+- `bugzilla-password` is not on the controller (`wk key set bugzilla-password`), so `git-webkit pr` has no Bugzilla login; and its conf has no `litellm_url=`: Bugzilla through `git-webkit` and pi's `models.json` wait for them.
 
 ## Not yet verified live
 
