@@ -23,6 +23,7 @@ previous design; the tolken rows on tolken, provisioned from alce.
 | `wk zed <ws>` on a workstation: the controller's API asked, the server's home read | yes | yes | yes: ante, `e2e` on moose |
 | `wk machine setup <workstation>`: the `workstation` role (apt with passwordless sudo, Zed by its installer, the person's Zed settings and keymap, an ssh `Host` per machine, their git settings, no idle suspend on mains), then `wk` | yes | the inventory and the line; its syntax | yes: ante, from alce, a second run `changed=0` |
 | The API reads `machines/` at each request | yes | yes | yes: ante answered after its conf was added |
+| `wk machine save <workstation>`: `ansible/save.yml` fetches the Zed settings and keymap into the role; the controller's checkout pushes with `github-token` through a credential helper of its own | yes | yes | yes: a change on ante saved, shown and set back; `git push --dry-run` from alce authenticated |
 | The controller's API, `wk serve`: the systemd user unit `wk-api` on the tailnet address, the asker from `tailscale whois`, a name a file made with `O_EXCL`, 403 for a node with no conf | yes | yes, and its HTTP on a loopback socket | yes: alce, asked from tolken and alce |
 | A machine reaches the API at `tailscale ip -4 <controller>`: on the controller its own name resolves to `127.0.1.1` | yes | yes | yes: alce |
 | `wk new` reserves the name first (409 names the holder; no answer is a barrier, forced it is made with no reservation) | yes | yes | the reservation: tolken |
