@@ -20,7 +20,7 @@ previous design; the tolken rows on tolken, provisioned from alce.
 | `wk help`, `wk selftest` | yes | yes | yes |
 | The mirror, `wk new`, `wk rm`, `wk ls` on a server, `wk enter -- <command>` | yes | yes, and against a real local git | yes: moose |
 | `wk ls` on a workstation or the controller: the controller's API asked | yes | yes | yes: alce |
-| `wk zed <ws>` on a workstation: the controller's API asked, the server's home read | yes | yes | no |
+| `wk zed <ws>` on a workstation: the controller's API asked, the server's home read | yes | yes | yes: ante, `e2e` on moose |
 | `wk machine setup <workstation>`: the `workstation` role (apt with passwordless sudo, Zed by its installer, the person's Zed settings and keymap, an ssh `Host` per machine, their git settings, no idle suspend on mains), then `wk` | yes | the inventory and the line; its syntax | yes: ante, from alce, a second run `changed=0` |
 | The API reads `machines/` at each request | yes | yes | yes: ante answered after its conf was added |
 | The controller's API, `wk serve`: the systemd user unit `wk-api` on the tailnet address, the asker from `tailscale whois`, a name a file made with `O_EXCL`, 403 for a node with no conf | yes | yes, and its HTTP on a loopback socket | yes: alce, asked from tolken and alce |
@@ -64,7 +64,7 @@ previous design; the tolken rows on tolken, provisioned from alce.
 | `wk machine install` on the controller: the refusals, the question, the `ansible-playbook` line, `--rehearse`, `--dry-run` | yes | yes | no |
 | The rules for `tailnet-api-key`, `wifi-ssid`, `wifi-psk`, `sudo-password`, `bmc/<machine>/user` and `password` | yes | yes, HTTP scripted | no |
 | The install playbook: the credentials read, the BMC asked, the image made, attached through the BMC by the pinned websocat, seen from the server, detached | yes | its YAML is parsed and its autoinstall template rendered by a real Ansible | no |
-| The install playbook: what is tagged `wipe` (the boot override, the restart, the installer, the tailnet node, the first ssh) | yes | its YAML is parsed | by its steps: moose, 2026-11-28 (below); not yet as one `wk machine install` run |
+| The install playbook: what is tagged `wipe` (the boot override, the restart, the installer, the tailnet node, the first ssh) | yes | its YAML is parsed | yes: moose, 2026-11-28, one run (below) |
 
 ## Verified live: moose installed from nothing, and ante
 
@@ -83,6 +83,22 @@ Typed on alce and tolken, 2026-11-28.
   joined the tailnet as `moose-1` 63 min later. The bridge held the whole install at 640 KiB/s. Then the old node was
   deleted and the new one named `moose` through the tailnet API, the override cleared, the image removed, and alce
   took the new host key: Ubuntu 24.04.5, kernel 6.8.0-139-generic, sudo without a password, podman, git, python3.
+- The renewal as one line on alce, `wk machine install moose --yes && wk machine setup moose && wk machine check
+  moose`: exit 0 in 1 h 43 min. Install 69 min 48 s (`ok=42 changed=13`): the boot set without If-Match, the bridge
+  connected the whole install, the new node joined as `tag:wk-server`, the old node retired and the new one named
+  `moose` by the play, the override cleared and the image removed. Once, the firmware stopped in POST after the restart
+  from the running system (`Synchronous Exception ... ASSERT [EmulatorDxe]` on the serial console) and a Redfish
+  `ForceRestart` by hand booted the USB disk; the other two restarts booted it themselves. Setup 22 min 13 s (`ok=54
+  changed=30`), check 11 min 9 s (`ok=7 changed=5`).
+- WebKit development on the renewed moose, typed from ante through Tailscale SSH: `wk ls` on ante answered by the
+  controller before and after `wk new e2e` (34 s); `wk build e2e jsc-release --detach`, 79 jobs at 1536 MB, `wk status
+  e2e --wait` 0 after 7 min 40 s; `wk run e2e -- -e 'print(1+1)'` printed 2; `wk test e2e -- stress/array-push.js`
+  passed in 53 s; `wk ai claude e2e -- -p "Reply with exactly: OK"` rotated the push keys through the API and answered
+  OK in 12 s through the injector; `wk enter e2e -- git push --dry-run fork HEAD:refs/heads/wk-e2e-moose` answered
+  `* [new branch]`; `wk zed e2e` on ante opened the checkout, Zed's remote server 1.30.2 running on moose.
+- That push first failed `Host key verification failed`: a fresh server had never seen github.com's host key. The
+  credentials role now writes GitHub's published keys (its API's `meta`) to `secrets/known_hosts` for the push aliases,
+  and `wk machine check` pushes to the fork as a dry run (e237a2b3, d966c574).
 - ante: a person installed Debian 13, gave `jmichaud` sudo without a password, and tagged the node `tag:person`; the
   tailnet's policy lets `tag:wk-controller` (alce) alone ssh into it. `wk machine setup ante` from alce: `ok=20
   changed=11`, then `changed=0`. Zed 1.30.2, `wk ls` answered by the controller.
@@ -231,5 +247,4 @@ What the live runs corrected: the unit directory is made before a unit is writte
 - TODO: the presets other than `jsc-release` and `mac-release`, and layout tests.
 - TODO: `wk` typed inside the container, and the pueue client reaching the daemon's socket from there.
 - TODO: `wk gc` with something to reclaim, and `wk new` over a half-made workspace, on a real server.
-- TODO: install: one `wk machine install moose --yes` run end to end with the reconnecting bridge (0885de9f).
 - TODO: install: `PowerForceRestart` for a server that does not answer, and a server whose chassis is off.
