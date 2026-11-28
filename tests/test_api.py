@@ -9,6 +9,7 @@ from unittest import mock
 
 from tests.world import CONFS, World
 from wk.api import client, hooks, names, server
+from wk.core import conf
 from wk.core.act import die
 from wk.core.fakes import Fake
 from wk.core.hooks import MISSING, OK, UNKNOWN, DoctorRow
@@ -75,6 +76,12 @@ class TestAnswers(unittest.TestCase):
         self.w.reserve("y", "mac")
         for who in ("desk", "lin", "vault"):
             self.assertEqual(self.ask("GET", "/ws", who), (200, {"names": {"x": "lin", "y": "mac"}}))
+
+    def test_a_conf_added_while_it_serves_is_read_at_the_next_request(self):
+        inv = self.w.inv("vault")
+        self.assertEqual(server.answer(inv, "GET", "/ws", "seat")[0], 403)
+        self.w.confs = dict(self.w.confs, seat=conf.parse("seat", "kind=workstation"))
+        self.assertEqual(server.answer(inv, "GET", "/ws", "seat"), (200, {"names": {}}))
 
     def test_a_node_with_no_conf_or_none_at_all_is_403(self):
         self.vault.on(("tailscale", "whois", "--json", "100.64.0.9"), Result(1, "", "no match for IP\n"))

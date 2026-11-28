@@ -28,9 +28,10 @@ def caller(inv, address):
         node = json.loads(r.out)["Node"]["Name"].split(".")[0]
     except (ValueError, KeyError, TypeError, AttributeError):
         return None, "the tailnet names no node at %s" % address
-    if node not in inv.fleet.confs:
+    confs = inv.fleet.load()
+    if node not in confs:
         return None, "%s has no conf on the controller" % node
-    return inv.fleet.confs[node], None
+    return confs[node], None
 
 
 def route(inv, method, path, address):

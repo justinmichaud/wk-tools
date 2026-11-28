@@ -22,6 +22,10 @@ class Fleet:
     def confs(self):
         return self._load()
 
+    def load(self):
+        """machines/ as it is now: what a process that outlives a conf's change, `wk serve`, reads."""
+        return self._load()
+
     def machines(self):
         return [self.confs[name] for name in sorted(self.confs)]
 
