@@ -97,7 +97,10 @@ Typed on alce and tolken, 2026-11-28.
   each resume; real S3 and s2idle each wake on an RTC alarm, through `rtcwake` and through `systemctl suspend`; but from
   S3 neither a key nor the power button wakes it (the journal ends at `Performing sleep operation 'suspend'`), with or
   without wakeup enabled on its USB hubs. The firmware is HP Q07 02.07.00 (2019), which LVFS does not carry. In s2idle a
-  key wakes it; the role writes systemd's `MemorySleepMode=s2idle`, and GNOME's idle suspend stays on.
+  key wakes it once the Ethernet controller's wake is off: its PME (GPE 0x6D, the SCI as the wake IRQ) ended s2idle
+  within a second every time, so an earlier "woke on a key" had never slept. With it off, s2idle slept 30 s to an
+  alarm and 20 s to a key. The role writes systemd's `MemorySleepMode=s2idle` and a udev rule that disables wake on
+  every Ethernet controller; GNOME's idle suspend stays on.
 
 ## Verified live: the controller and tolken
 

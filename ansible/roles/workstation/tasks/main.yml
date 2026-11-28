@@ -66,7 +66,8 @@
     value: "{{ wk_home }}/tools/ansible/roles/workstation/files/gitconfig"
 
 # ante's firmware (HP Q07 02.07.00, 2019, on no LVFS) wakes from S3 by its RTC alone: neither a key nor the power button
-# brings it back, and it is then frozen. In s2idle Linux handles the wake, and a key wakes it.
+# brings it back, and it is then frozen. In s2idle Linux handles the wake, and a key wakes it, once the Ethernet
+# controller may not: its PME woke s2idle within a second, every time.
 - name: Make the systemd sleep drop-in directory
   ansible.builtin.file:
     path: /etc/systemd/sleep.conf.d
@@ -83,3 +84,20 @@
     dest: /etc/systemd/sleep.conf.d/wk.conf
     mode: "0644"
   become: true
+
+- name: Let no Ethernet controller wake the machine
+  ansible.builtin.copy:
+    content: |
+      # Written by wk's workstation role: the Ethernet controller's wake ends s2idle at once.
+      ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{class}=="0x020000", ATTR{power/wakeup}="disabled"
+    dest: /etc/udev/rules.d/90-wk-no-ethernet-wake.rules
+    mode: "0644"
+  become: true
+  register: wk_no_ethernet_wake
+
+# udev reads a new rule at its next event; this is that event, for the devices already there.
+- name: Apply it to the controllers already bound
+  ansible.builtin.command:
+    argv: [udevadm, trigger, --subsystem-match=pci, --attr-match=class=0x020000, --action=bind]
+  become: true
+  when: wk_no_ethernet_wake is changed
