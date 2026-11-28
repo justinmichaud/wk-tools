@@ -1,0 +1,19 @@
+---
+# A workstation's settings, saved into the controller's checkout. `wk machine save <workstation>` runs
+#   ansible-playbook -i ansible/inventory.py --limit <workstation> ansible/save.yml
+# The files are those the workstation role writes, so the next `wk machine setup` writes them back as they were saved.
+
+- name: Save a workstation's settings
+  hosts: workstation
+  gather_facts: false
+  tasks:
+    - name: Gather the home directory
+      ansible.builtin.setup:
+        gather_subset: [min]
+
+    - name: Fetch Zed's settings and keymap
+      ansible.builtin.fetch:
+        src: "{{ ansible_facts['env']['HOME'] }}/.config/zed/{{ item }}"
+        dest: "{{ wk_root }}/ansible/roles/workstation/files/zed/{{ item }}"
+        flat: true
+      loop: [settings.json, keymap.json]

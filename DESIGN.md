@@ -308,7 +308,12 @@ All of it runs on the controller, typed by the person.
   (servers), `xcode` (Mac), `controller` (websocat, the injector and the API, `wk serve`),
   `workstation` (Zed by its own per-user installer, the person's Zed settings
   and keymap, an ssh `Host` per machine with its conf's `user`, their git
-  settings, sleep in s2idle). Every task but the rotation is idempotent: a second run
+  settings, sleep in s2idle).
+- `wk machine save <workstation>` runs `ansible/save.yml`, which fetches the
+  person's Zed settings and keymap from the workstation into the role's files
+  in this checkout; committed and pushed, every later setup writes them back.
+  Every setting and workaround of a workstation lives in the role, so a setup
+  re-applies all of it. Every task but the rotation is idempotent: a second run
   reports changed only for the keys it rotated.
 - A server fetches exactly the controller's commit from the repository's
   public URL. Uncommitted changes, and a commit on no remote branch, are
@@ -411,6 +416,7 @@ machines/               one conf per machine
 ansible/site.yml        provisioning
 ansible/install.yml     a Linux server's operating system, through its BMC (tasks in ansible/install/)
 ansible/check.yml       the end-to-end check of a server
+ansible/save.yml        a workstation's settings, fetched back into the workstation role
 ansible/inventory.py    prints `wk machine inventory`
 ansible/group_vars/     all.json: the pins and ports the playbooks and the program share
 ansible/roles/          wk, pueue, mirror, sdk, agents, credentials, xcode, controller

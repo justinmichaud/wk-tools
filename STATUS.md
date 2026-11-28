@@ -93,6 +93,12 @@ Typed on alce and tolken, 2026-11-28.
   as `tag:wk`, the stored auth key's tag, which reached no port of alce, so `wk machine check moose` built `jsc-release`,
   ran `jsc` and passed the stress test, then its `wk rm` could not release the name. `tailnet-auth-key` is now a
   reusable, pre-approved `tag:wk-server` key minted through the API.
+- ante sleeps in s2idle, which draws more than S3: its FADT declares no low-power S0 idle, and across 30 s of s2idle
+  `slp_s0_residency_usec` stayed 0 (package C10 for 23 s; XHCI, GBE and NPK powered). S3 is woken by the RTC alone; a
+  key or the power button leaves it hung, below Linux (every `pm_test` stage resumes; Debian's kernel has no
+  `pm_trace`). The person chose no BIOS update (02.07.00 against HP's 02.30.00 of 2025-01), and s2idle for now. After
+  a power-button wake from s2idle the system ran but the monitor stayed off (DP-1 `enabled=disabled`; gnome-shell had
+  let its sleep inhibitor time out); a key wake relit it.
 - ante froze in GNOME's idle suspend. Measured: the kernel's `pm_test` stages (freezer, devices, platform, processors)
   each resume; real S3 and s2idle each wake on an RTC alarm, through `rtcwake` and through `systemctl suspend`; but from
   S3 neither a key nor the power button wakes it (the journal ends at `Performing sleep operation 'suspend'`), with or
