@@ -99,6 +99,12 @@ Typed on alce and tolken, 2026-11-28.
   `pm_trace`). The person chose no BIOS update (02.07.00 against HP's 02.30.00 of 2025-01), and s2idle for now. After
   a power-button wake from s2idle the system ran but the monitor stayed off (DP-1 `enabled=disabled`; gnome-shell had
   let its sleep inhibitor time out); a key wake relit it.
+- ante's Dell Universal Receiver (413c:301c, port 4 of a VIA VL817 hub) stopped answering after one s2idle that a USB
+  wake ended at 3 s: its reset during the resume failed (`-32`, then `-71`), and neither the hub port's `disable`,
+  `usbreset` of the hub, nor an S3 brought it back; a replug did. Not reproduced in three tries (30 s to an alarm with
+  its wake off and on, and a wake by the mouse itself), so its wake is left as it is.
+- ante's power LED kept blinking after a wake. Its DSDT drives no LED: `_PTS` and `_WAK` reach empty `SIOS`/`SIOW` and
+  write debug codes, so the blink is the platform's own; the last S3 there was woken at 0.5 s.
 - ante froze in GNOME's idle suspend. Measured: the kernel's `pm_test` stages (freezer, devices, platform, processors)
   each resume; real S3 and s2idle each wake on an RTC alarm, through `rtcwake` and through `systemctl suspend`; but from
   S3 neither a key nor the power button wakes it (the journal ends at `Performing sleep operation 'suspend'`), with or
